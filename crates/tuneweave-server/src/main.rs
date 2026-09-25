@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Bilibili,
         BilibiliProvider::new(BilibiliConfig {
             proxy_url: bilibili_proxy.clone(),
-            credential_store: Some(credential_store),
+            credential_store: Some(credential_store.clone()),
         }),
     )?;
     register_provider(
@@ -122,6 +122,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         KugouProvider::new(KugouConfig {
             proxy_url: kugou_proxy.clone(),
             device_path: Some(data_dir.join("kugou-device.json")),
+            credential_store: Some(credential_store.clone()),
         }),
     )?;
     register_provider(
@@ -129,6 +130,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Migu,
         MiguProvider::new(MiguConfig {
             proxy_url: migu_proxy.clone(),
+            device_path: Some(data_dir.join("migu-music-device.json")),
+            credential_store: Some(credential_store.clone()),
         }),
     )?;
     register_provider(
@@ -136,6 +139,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Kuwo,
         KuwoProvider::new(KuwoConfig {
             proxy_url: kuwo_proxy.clone(),
+            credential_store: Some(credential_store.clone()),
+            device_path: Some(data_dir.join("kuwo-device.json")),
         }),
     )?;
     register_provider(
@@ -143,6 +148,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Platform::Soda,
         SodaProvider::new(SodaConfig {
             proxy_url: soda_proxy.clone(),
+            device_path: Some(data_dir.join("soda-device.json")),
+            credential_store: Some(credential_store),
         }),
     )?;
     let state =
@@ -185,7 +192,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         info!("  本地数据：{}", data_dir.display());
         info!("  默认平台：网易云音乐");
         info!("  已启用平台：网易云、QQ 音乐、B 站、酷狗、咪咕、酷我、汽水");
-        info!("  账户能力：服务端托管与调用方凭据均支持网易云、QQ 音乐、B 站");
+        info!("  账户能力：服务端托管与调用方凭据均支持网易云、QQ 音乐、B 站、咪咕、汽水");
         info!("  存储状态：账户凭据与 Uni Playlist 已就绪");
         info!(
             "  日志输出：{log_outputs}（{}）",
@@ -222,8 +229,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             default_platform = "netease",
             credential_store_open = true,
             uni_playlist_store_open = true,
-            server_account_platforms = "netease,qq,bilibili",
-            caller_credential_platforms = "netease,qq,bilibili",
+            server_account_platforms = "netease,qq,bilibili,kugou,migu,kuwo,soda",
+            caller_credential_platforms = "netease,qq,bilibili,kugou,migu,kuwo,soda",
             netease_bootstrap_cookie = netease_cookie.is_some(),
             netease_proxy = netease_proxy.is_some(),
             qq_proxy = qq_proxy.is_some(),
@@ -260,6 +267,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             shutdown_snapshot.map_or(0, |snapshot| snapshot.qr_auth_transactions),
         sms_auth_transactions =
             shutdown_snapshot.map_or(0, |snapshot| snapshot.sms_auth_transactions),
+        password_auth_transactions =
+            shutdown_snapshot.map_or(0, |snapshot| snapshot.password_auth_transactions),
         "TuneWeave shutdown completed"
     );
     drop(logging);
@@ -441,6 +450,8 @@ async fn shutdown_signal(state: AppState) {
         auth_transactions = snapshot.map_or(0, |snapshot| snapshot.auth_transactions),
         qr_auth_transactions = snapshot.map_or(0, |snapshot| snapshot.qr_auth_transactions),
         sms_auth_transactions = snapshot.map_or(0, |snapshot| snapshot.sms_auth_transactions),
+        password_auth_transactions =
+            snapshot.map_or(0, |snapshot| snapshot.password_auth_transactions),
         "TuneWeave shutdown requested"
     );
 }

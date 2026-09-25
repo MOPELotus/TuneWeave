@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 tuneweave-core.workspace = true
 tuneweave-provider-bilibili.workspace = true
 tuneweave-provider-kugou.workspace = true

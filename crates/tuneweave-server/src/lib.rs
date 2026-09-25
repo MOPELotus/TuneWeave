@@ -1,12 +1,32 @@
+mod album_collections;
+mod artist_catalog;
+mod chart_periods;
+mod cloud_transfers;
+mod playlist_catalog;
+mod playlist_submissions;
+mod purchases;
+use album_collections::{
+    account_digital_albums, digital_album_subscribe, digital_album_unsubscribe,
+    digital_albums_subscribe, digital_albums_unsubscribe, user_favorite_digital_albums,
+};
+mod auth_challenges;
+mod caller_scope;
 pub mod logging;
 mod response;
+mod session_revocation;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tuneweave_core::{ScrobbleRequest, ScrobbleResult};
+use tuneweave_core::{
+    PasswordChallengeAction, PasswordLoginIdentity, PasswordLoginProgress, PasswordVerification,
+    ProviderPasswordChallenge, PurchasedAlbum, PurchasedTrack, ScrobbleRequest, ScrobbleResult,
+};
+use tuneweave_core::{
+    PlaylistOccurrenceOrderRequest, PlaylistOccurrenceOrderResult, PlaylistTrackOccurrence,
+};
 
 use axum::{
     Json, Router,
@@ -35,19 +55,19 @@ use tuneweave_core::{
     ArtistTrackListRequest, ArtistTrackOrder, ArtistUpdatesRequest, ArtistVideoListRequest,
     ArtistWorkUpdate, ArtistWorksRequest, AudioCdnDispatch, AudioContent, AudioFileBatch,
     AudioFileRequest, AudioFileRequestItem, AudioRecognition, AudioRecognitionRequest,
-    AuthChallengeBackend, AuthChallengeDelivery, AuthChallengeRequest, AuthChallengeValidation,
-    AuthPrincipalStatus, AuthPrincipalStatusRequest, AuthSecurityChallengeRequest, AuthState,
-    Banner, BannerCatalog, BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER,
-    CallerCredential, Capability, ChallengeMethod, ChartCatalog, ChartCatalogRequest,
-    ChartCatalogView, ChartTrackListRequest, CloudImportRequest, CloudImportResult,
-    CloudLyricsRequest, CloudMatchRequest, CloudMatchResult, CloudTrack, CloudTrackDeleteRequest,
-    CloudTrackDeleteResult, CloudTrackDetailRequest, CloudUploadCompleteRequest,
-    CloudUploadRequest, CloudUploadResult, CloudUploadTicket, CloudUploadTicketRequest, Comment,
-    CommentDeleteRequest, CommentListRequest, CommentListView, CommentMutationResult, CommentPage,
-    CommentReaction, CommentReactionKind, CommentReactionListRequest,
-    CommentReactionMutationRequest, CommentReactionMutationResult, CommentReactionPage,
-    CommentReportRequest, CommentReportResult, CommentSort, CommentTarget, CommentTargetKind,
-    CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
+    AuthChallengeAction, AuthChallengeBackend, AuthChallengeDelivery, AuthChallengeProgress,
+    AuthChallengeRequest, AuthChallengeStatus, AuthChallengeValidation, AuthPrincipalStatus,
+    AuthPrincipalStatusRequest, AuthSecurityChallengeRequest, AuthState, Banner, BannerCatalog,
+    BannerClient, BannerListRequest, CALLER_CREDENTIAL_HEADER, CallerCredential, Capability,
+    ChallengeMethod, ChartCatalog, ChartCatalogRequest, ChartCatalogView, ChartTrackListRequest,
+    CloudImportRequest, CloudImportResult, CloudLyricsRequest, CloudMatchRequest, CloudMatchResult,
+    CloudTrack, CloudTrackDeleteRequest, CloudTrackDeleteResult, CloudTrackDetailRequest,
+    CloudUploadCompleteRequest, CloudUploadRequest, CloudUploadResult, CloudUploadTicket,
+    CloudUploadTicketRequest, Comment, CommentDeleteRequest, CommentListRequest, CommentListView,
+    CommentMutationResult, CommentPage, CommentReaction, CommentReactionKind,
+    CommentReactionListRequest, CommentReactionMutationRequest, CommentReactionMutationResult,
+    CommentReactionPage, CommentReportRequest, CommentReportResult, CommentSort, CommentTarget,
+    CommentTargetKind, CommentThreadStatsBatch, CommentThreadStatsRequest, CommentWriteRequest,
     CountryCallingCodeGroup, CountryCallingCodeListRequest, CredentialMode, DigitalAlbum,
     DigitalAlbumChartEntry, DigitalAlbumChartKind, DigitalAlbumChartPeriod,
     DigitalAlbumChartRequest, DigitalAlbumListRequest, DimensionChart, DimensionChartRequest,
@@ -56,7 +76,7 @@ use tuneweave_core::{
     ImageUploadResult, ImmersiveAudioType, ListeningRightsAdCatalog, ListeningRightsAdRequest,
     ListeningRightsGainRequest, ListeningRightsGainResult, ListeningRightsStatus,
     ListeningRightsStatusRequest, ListeningRightsTimestamp, LocalTrackMatchRequest,
-    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
+    LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream,
     MemoryUniPlaylistStore, MultiStyleLyricTranslations, MusicProvider, MusicVideoArea,
     MusicVideoCatalog, MusicVideoListRequest, MusicVideoOrder, MusicVideoType, PageMeta,
     PageRequest, PasswordFormat, PasswordLoginRequest, PersonalFmRequest, PersonalFmVariant,
@@ -66,32 +86,33 @@ use tuneweave_core::{
     PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
     PlaylistKind, PlaylistMetadataUpdateVariant, PlaylistMutationResult, PlaylistOrderRequest,
     PlaylistOrderResult, PlaylistPlayableEntry, PlaylistPlayableItem, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility, Podcast, PodcastCatalog,
-    PodcastCategoryRecommendations, PodcastChartEntry, PodcastChartKind, PodcastChartRequest,
-    PodcastCreatorChartEntry, PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode,
-    PodcastEpisodeChartEntry, PodcastEpisodeChartKind, PodcastEpisodeChartRequest,
-    PodcastEpisodeCover, PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult,
-    PodcastEpisodeDisplayStatus, PodcastEpisodeFeeFilter, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest,
-    PodcastEpisodeRecommendationSource, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
-    PodcastEpisodeUploadResult, PodcastEpisodeVisibility, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind, PodcastTaxonomyRequest,
-    PrincipalType, ProviderAuthResult, ProviderCredential, ProviderRegistry, Quality,
-    RadioPlaybackItem, RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation,
-    RadioStationCursor, RadioStationListRequest, RadioStyleCatalog, RadioStyleCatalogRequest,
-    RadioTaxonomy, RadioTaxonomyRequest, RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry,
-    RecentTrackHistoryEntry, RecommendationDislikeRequest, RecommendationDislikeResult,
-    RecommendationFeed, RecommendationFeedDirection, RecommendationFeedRequest,
-    RecommendationRequest, RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest,
-    RelatedVideoList, RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest,
-    ResourceRef, SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind,
-    SearchMultiMatch, SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
+    PlaylistTrackOrderResult, PlaylistUpdateRequest, PlaylistVisibility,
+    PlaylistVisibilityUpdateRequest, Podcast, PodcastCatalog, PodcastCategoryRecommendations,
+    PodcastChartEntry, PodcastChartKind, PodcastChartRequest, PodcastCreatorChartEntry,
+    PodcastCreatorChartKind, PodcastCreatorChartRequest, PodcastEpisode, PodcastEpisodeChartEntry,
+    PodcastEpisodeChartKind, PodcastEpisodeChartRequest, PodcastEpisodeCover,
+    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeDisplayStatus,
+    PodcastEpisodeFeeFilter, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeRecommendationSource, PodcastEpisodeStream,
+    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeVisibility,
+    PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyKind,
+    PodcastTaxonomyRequest, PrincipalType, ProviderAuthChallenge, ProviderAuthResult,
+    ProviderCredential, ProviderRegistry, Quality, RadioPlaybackItem, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationCursor, RadioStationListRequest,
+    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
+    RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry, RecentTrackHistoryEntry,
+    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationFeed,
+    RecommendationFeedDirection, RecommendationFeedRequest, RecommendationRequest,
+    RecommendationSource, RelatedPlaylistList, RelatedPlaylistRequest, RelatedVideoList,
+    RelatedVideoRequest, ResolutionAttempt, ResolutionStatus, ResolveRequest, ResourceRef,
+    SearchDefaultKeyword, SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch,
+    SearchMultiMatchRequest, SearchQuery, SearchSelector, SearchSuggestionClient,
     SearchSuggestionList, SearchSuggestionRequest, SearchTrendingDetail, SearchTrendingList,
     SearchTrendingRequest, SearchVariant, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
     SimilarArtistList, SimilarArtistRequest, SimilarTrackList, SimilarTrackRequest,
     SingingAnnotationsAvailability, StreamBatch, StreamOutcome, StreamRequest, StreamResolver,
-    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track, TrackAvailability,
+    StreamVariant, StyledRadioStationLibraryRequest, SubscriptionResult, Track,
     TrackAvailabilityRequest, TrackCredits, TrackDetailBatchRequest, TrackDetailRequestItem,
     TrackEntitlement, TrackFavoriteCount, TrackIdentifierKind, TrackLabelList, TrackVersionList,
     TuneWeaveError, UniPlaylist, UniPlaylistClientItemStream, UniPlaylistCreateRequest,
@@ -102,16 +123,17 @@ use tuneweave_core::{
     UniPlaylistItemInput, UniPlaylistItemKind, UniPlaylistItemOrderRequest,
     UniPlaylistItemOrderResult, UniPlaylistItemSnapshot, UniPlaylistItemStream,
     UniPlaylistMaterializeImportsResult, UniPlaylistMaterializeItemsResult, UniPlaylistStore,
-    UniPlaylistUpdateRequest, User, UserMusicGene, UserProfile, UserProfileBackend, Video,
-    VideoAudioStream, VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail,
-    VideoDetailRequest, VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest,
-    VideoPlaybackRequest, VideoRecommendationKind, VideoRecommendationRequest,
-    VideoRecommendationView, VideoResourceKind, VideoSearchDuration, VideoSearchFilters,
-    VideoSearchOrder, VideoStats, VideoStream, VideoStreamRequest, VideoSubtitleDocument,
-    VideoSubtitleList, VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest,
-    VideoTrackQuality, VideoTrackStream, VideoTrackStreamRequest,
+    UniPlaylistUpdateRequest, User, UserMusicGene, UserProfileBackend, Video, VideoAudioStream,
+    VideoAudioStreamRequest, VideoCatalogOption, VideoCodecFamily, VideoDetail, VideoDetailRequest,
+    VideoKind, VideoPart, VideoPartListRequest, VideoPlaybackManifest, VideoPlaybackRequest,
+    VideoRecommendationKind, VideoRecommendationRequest, VideoRecommendationView,
+    VideoResourceKind, VideoSearchDuration, VideoSearchFilters, VideoSearchOrder, VideoStats,
+    VideoStream, VideoStreamRequest, VideoSubtitleDocument, VideoSubtitleList,
+    VideoSubtitleRequest, VideoTaxonomyKind, VideoTaxonomyRequest, VideoTrackQuality,
+    VideoTrackStream, VideoTrackStreamRequest,
 };
 
+pub use caller_scope::UPDATED_CREDENTIAL_HEADER;
 pub use response::{ApiError, ApiResponse, REQUEST_ID_HEADER, ResponseMeta};
 use response::{RequestCredentialSource, ResponseResultCount, record_request_provider_access};
 
@@ -122,6 +144,7 @@ impl ResponseResultCount for UniPlaylistMaterializeImportsResult {
 }
 
 const AUTH_TRANSACTION_TTL: Duration = Duration::from_secs(10 * 60);
+const AUTH_TRANSACTION_CAPACITY: usize = 128;
 const MAX_CALLER_CREDENTIALS_PER_REQUEST: usize = 8;
 const MAX_AVATAR_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PLAYLIST_COVER_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -177,6 +200,7 @@ struct AuthTransactionCounts {
     total: usize,
     qr: usize,
     sms: usize,
+    password: usize,
 }
 
 #[derive(Clone)]
@@ -188,6 +212,13 @@ struct StoredAuthTransaction {
 
 #[derive(Clone)]
 enum StoredAuthKind {
+    Password {
+        platform: Platform,
+        credential_mode: CredentialMode,
+        identity: PasswordLoginIdentity,
+        provider_challenge: Option<ProviderPasswordChallenge>,
+        verifying: bool,
+    },
     Qr {
         platform: Platform,
         account: String,
@@ -198,13 +229,17 @@ enum StoredAuthKind {
         platform: Platform,
         credential_mode: CredentialMode,
         request: AuthChallengeRequest,
+        provider_challenge: Option<ProviderAuthChallenge>,
+        verifying: bool,
     },
 }
 
 impl StoredAuthKind {
     const fn platform(&self) -> Platform {
         match self {
-            Self::Qr { platform, .. } | Self::Challenge { platform, .. } => *platform,
+            Self::Qr { platform, .. }
+            | Self::Challenge { platform, .. }
+            | Self::Password { platform, .. } => *platform,
         }
     }
 
@@ -215,6 +250,9 @@ impl StoredAuthKind {
             }
             | Self::Challenge {
                 credential_mode, ..
+            }
+            | Self::Password {
+                credential_mode, ..
             } => *credential_mode,
         }
     }
@@ -222,6 +260,7 @@ impl StoredAuthKind {
     const fn method_name(&self) -> &'static str {
         match self {
             Self::Qr { .. } => "qr",
+            Self::Password { .. } => "password",
             Self::Challenge {
                 request:
                     AuthChallengeRequest {
@@ -246,6 +285,7 @@ fn auth_state_name(state: AuthState) -> &'static str {
     match state {
         AuthState::Waiting => "waiting",
         AuthState::Scanned => "scanned",
+        AuthState::VerificationRequired => "verification_required",
         AuthState::Confirmed => "confirmed",
         AuthState::Expired => "expired",
         AuthState::Failed => "failed",
@@ -345,17 +385,21 @@ fn log_auth_transaction_completed(
 
 #[derive(Clone, Copy)]
 enum AuthOperation {
+    CredentialImport,
     PasswordLogin,
     SessionRefresh,
     SessionLogout,
+    SessionRevoke,
 }
 
 impl AuthOperation {
     const fn name(self) -> &'static str {
         match self {
+            Self::CredentialImport => "credential_import",
             Self::PasswordLogin => "password_login",
             Self::SessionRefresh => "session_refresh",
             Self::SessionLogout => "session_logout",
+            Self::SessionRevoke => "session_revoke",
         }
     }
 }
@@ -461,6 +505,14 @@ impl AuthTransactions {
         let mut entries = self.entries.write().map_err(|_| auth_store_error())?;
         let now = Instant::now();
         let expired = Self::take_expired(&mut entries, now);
+        if entries.len() >= AUTH_TRANSACTION_CAPACITY {
+            drop(entries);
+            Self::log_expired(expired);
+            return Err(TuneWeaveError::new(
+                ErrorCode::RateLimited,
+                "Authentication transaction capacity is exhausted",
+            ));
+        }
         let transaction_id = (0..8)
             .map(|_| {
                 let suffix = rand::rng()
@@ -523,6 +575,7 @@ impl AuthTransactions {
             counts.total += 1;
             match transaction.kind {
                 StoredAuthKind::Qr { .. } => counts.qr += 1,
+                StoredAuthKind::Password { .. } => counts.password += 1,
                 StoredAuthKind::Challenge {
                     request:
                         AuthChallengeRequest {
@@ -564,6 +617,7 @@ pub struct ShutdownSnapshot {
     pub auth_transactions: usize,
     pub qr_auth_transactions: usize,
     pub sms_auth_transactions: usize,
+    pub password_auth_transactions: usize,
 }
 
 #[derive(Clone, Default)]
@@ -638,15 +692,11 @@ impl CallerCredentialSet {
         let now = unix_time_seconds()?;
         let mut providers = BTreeMap::new();
         for (platform, credential) in &credentials {
-            if credential.is_expired_at(now) {
-                return Err(TuneWeaveError::new(
-                    ErrorCode::AuthenticationRequired,
-                    "caller credential has expired",
-                )
-                .with_platform(*platform));
-            }
             let provider = state.registry.require(*platform)?;
-            providers.insert(*platform, provider.with_caller_credential(credential)?);
+            providers.insert(
+                *platform,
+                caller_scope::provider_scope(provider, credential, now)?,
+            );
         }
         Ok(Self {
             credentials,
@@ -823,6 +873,7 @@ impl AppState {
             auth_transactions: transactions.total,
             qr_auth_transactions: transactions.qr,
             sms_auth_transactions: transactions.sms,
+            password_auth_transactions: transactions.password,
         })
     }
 }
@@ -917,6 +968,10 @@ pub fn build_router(state: AppState) -> Router {
             get(track_download_redirect),
         )
         .route("/tracks/{reference}/download", get(track_download))
+        .route(
+            "/tracks/{reference}/download/content",
+            get(track_download_content),
+        )
         .route("/albums", get(albums))
         .route("/albums/{reference}", get(album))
         .route("/albums/{reference}/tracks", get(album_tracks))
@@ -927,6 +982,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/digital-albums", get(digital_albums))
         .route("/digital-albums/{reference}", get(digital_album))
+        .route(
+            "/digital-albums/{reference}/tracks",
+            get(digital_album_tracks),
+        )
         .route("/charts", get(chart_catalog))
         .route("/charts/podcasts", get(podcast_chart))
         .route("/charts/podcast-creators", get(podcast_creator_chart))
@@ -938,6 +997,7 @@ pub fn build_router(state: AppState) -> Router {
             get(dimension_chart_tracks),
         )
         .route("/charts/{reference}/tracks", get(chart_tracks))
+        .route("/charts/{reference}/periods", get(chart_periods::list))
         .route("/artists", get(artists))
         .route("/artists/catalog", get(artist_catalog))
         .route(
@@ -950,6 +1010,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/artists/{reference}/overview", get(artist_overview))
         .route("/artists/{reference}/stats", get(artist_stats))
         .route("/artists/{reference}/albums", get(artist_albums))
+        .route(
+            "/artists/{reference}/digital-albums",
+            get(artist_catalog::digital_albums),
+        )
         .route("/artists/{reference}/fans", get(artist_fans))
         .route("/artists/{reference}/videos", get(artist_videos))
         .route("/artists/{reference}/tracks", get(artist_tracks))
@@ -999,6 +1063,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos/{reference}/subtitles", get(video_subtitles))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
+        .route(
+            "/videos/{reference}/native-stream",
+            get(migu_native_mv_stream),
+        )
         .route("/videos/{reference}/stream", get(video_stream))
         .route(
             "/account/library/videos/{reference}",
@@ -1081,10 +1149,20 @@ pub fn build_router(state: AppState) -> Router {
                 .patch(uni_playlist_update)
                 .delete(uni_playlist_delete),
         )
-        .route("/playlists", post(playlist_create).delete(playlists_delete))
+        .route(
+            "/playlists",
+            get(playlist_catalog::list)
+                .post(playlist_create)
+                .delete(playlists_delete),
+        )
+        .route("/playlists/tags", get(playlist_catalog::taxonomy))
         .route(
             "/playlists/{reference}",
             get(playlist).patch(playlist_update).delete(playlist_delete),
+        )
+        .route(
+            "/playlists/{reference}/visibility",
+            put(playlist_visibility_update),
         )
         .route(
             "/playlists/{reference}/tracks",
@@ -1109,6 +1187,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/playlists/{reference}/items/{item_id}/stream/redirect",
             get(uni_playlist_item_stream_redirect),
+        )
+        .route(
+            "/playlists/{reference}/track-occurrences",
+            get(playlist_track_occurrences),
+        )
+        .route(
+            "/playlists/{reference}/track-occurrences/order",
+            put(playlist_occurrences_order).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(
             "/playlists/{reference}/tracks/order",
@@ -1199,7 +1285,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/country-codes", get(auth_country_calling_codes))
         .route("/auth/qr", post(auth_qr_start))
         .route("/auth/qr/{transaction_id}", get(auth_qr_poll))
+        .route(
+            "/auth/qr/{transaction_id}/verification",
+            post(auth_qr_verification).layer(DefaultBodyLimit::max(4096)),
+        )
         .route("/auth/password", post(auth_password))
+        .route(
+            "/auth/password/challenges/{transaction_id}/verify",
+            post(auth_password_verify),
+        )
+        .route(
+            "/auth/import",
+            post(auth_credential_import).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/auth/challenges", post(auth_challenge_start))
         .route(
             "/auth/security-challenges",
@@ -1216,6 +1314,10 @@ pub fn build_router(state: AppState) -> Router {
             get(auth_session_get).delete(auth_session_delete),
         )
         .route("/auth/session/refresh", post(auth_session_refresh))
+        .route(
+            "/auth/session/revoke",
+            post(session_revocation::auth_session_revoke).layer(DefaultBodyLimit::max(4096)),
+        )
         .route("/account", get(account_profile))
         .route("/account/profile", get(account_user_profile))
         .route("/account/membership", get(account_membership))
@@ -1243,6 +1345,22 @@ pub fn build_router(state: AppState) -> Router {
             "/account/cloud/uploads",
             post(cloud_upload).layer(DefaultBodyLimit::max(MAX_CLOUD_PROXY_UPLOAD_BYTES)),
         )
+        .route(
+            "/account/cloud/uploads/transfers",
+            post(cloud_transfers::start),
+        )
+        .route(
+            "/account/cloud/uploads/transfers/{id}",
+            get(cloud_transfers::read).delete(cloud_transfers::cancel),
+        )
+        .route(
+            "/account/cloud/uploads/transfers/{id}/advance",
+            post(cloud_transfers::advance).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/account/cloud/uploads/transfers/{id}/complete",
+            post(cloud_transfers::publish),
+        )
         .route("/account/cloud/uploads/ticket", post(cloud_upload_ticket))
         .route(
             "/account/cloud/uploads/complete",
@@ -1252,12 +1370,44 @@ pub fn build_router(state: AppState) -> Router {
         .route("/account/cloud/lyrics", get(cloud_lyrics))
         .route("/account/cloud/matches", post(cloud_match))
         .route("/account/playlists", get(account_playlists))
+        .route(
+            "/playlists/{reference}/submission",
+            post(playlist_submissions::submit),
+        )
+        .route(
+            "/account/playlist-submissions/{reference}",
+            delete(playlist_submissions::delete_records),
+        )
+        .route(
+            "/account/playlist-submissions",
+            get(playlist_submissions::list),
+        )
         .route("/account/playlists/order", put(account_playlists_order))
+        .route(
+            "/account/favorites/playlists/order",
+            put(account_collected_playlists_order),
+        )
+        .route("/account/purchases/tracks", get(purchases::tracks))
+        .route("/account/purchases/albums", get(purchases::albums))
         .route(
             "/account/library/albums",
             get(account_albums)
                 .put(albums_subscribe)
                 .delete(albums_unsubscribe),
+        )
+        .route(
+            "/account/library/digital-albums",
+            get(account_digital_albums)
+                .put(digital_albums_subscribe)
+                .delete(digital_albums_unsubscribe),
+        )
+        .route(
+            "/account/library/digital-albums/{reference}",
+            put(digital_album_subscribe).delete(digital_album_unsubscribe),
+        )
+        .route(
+            "/users/{reference}/favorites/digital-albums",
+            get(user_favorite_digital_albums),
         )
         .route("/account/library/videos", get(account_videos))
         .route(
@@ -1909,6 +2059,7 @@ async fn search(
         highlight: parse_bool_parameter("highlight", params.highlight.as_deref(), false)?,
         selectors: parse_search_selectors(params.selectors.as_deref())?,
         video_filters: parse_video_search_filters(
+            platform,
             kind,
             params.order.as_deref(),
             params.duration.as_deref(),
@@ -3377,7 +3528,7 @@ async fn track(
     Path(reference): Path<String>,
     Query(params): Query<AccountParams>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<Track>>, ApiError> {
+) -> Result<Response, ApiError> {
     let reference = parse_reference(reference)?;
     let account = params
         .account
@@ -3385,7 +3536,9 @@ async fn track(
         .map(str::trim)
         .filter(|account| !account.is_empty());
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         account,
@@ -3394,8 +3547,16 @@ async fn track(
     let track = access
         .provider
         .track(reference.id(), access.provider_account.as_deref())
-        .await?;
-    Ok(Json(access.response(track, platform)))
+        .await;
+    let (track, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, track)?;
+    let sensitive = caller_managed || access.provider_account.is_some();
+    Ok(auth_json_response(
+        access
+            .response(track, platform)
+            .with_caller_credential(credential),
+        sensitive,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3410,13 +3571,15 @@ async fn track_availability(
     Path(reference): Path<String>,
     Query(params): Query<TrackAvailabilityParams>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<TrackAvailability>>, ApiError> {
+) -> Result<Response, ApiError> {
     let reference = parse_reference(reference)?;
     let bitrate = parse_optional_u64_parameter("bitrate", params.bitrate.as_deref())?
         .unwrap_or(TrackAvailabilityRequest::DEFAULT_BITRATE);
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         account.as_deref(),
@@ -3431,8 +3594,20 @@ async fn track_availability(
                 account: access.provider_account.clone(),
             },
         )
-        .await?;
-    Ok(Json(access.response(availability, platform)))
+        .await;
+    let (availability, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_managed,
+        availability,
+    )?;
+    let sensitive = caller_managed || access.provider_account.is_some();
+    Ok(auth_json_response(
+        access
+            .response(availability, platform)
+            .with_caller_credential(credential),
+        sensitive,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3628,6 +3803,53 @@ async fn digital_album(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DigitalAlbumTrackParams {
+    account: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
+}
+
+async fn digital_album_tracks(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    headers: HeaderMap,
+    params: Result<Query<DigitalAlbumTrackParams>, QueryRejection>,
+) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let account = optional_trimmed(params.account);
+    let platform = reference.platform();
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        platform,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let page = access
+        .provider
+        .digital_album_tracks(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: access.provider_account.clone(),
+            },
+        )
+        .await?;
+    Ok(Json(
+        access
+            .response(page.items, platform)
+            .with_pagination(page.pagination),
+    ))
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct DigitalAlbumListParams {
     platform: Option<String>,
     account: Option<String>,
@@ -3752,6 +3974,7 @@ async fn chart_catalog(
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChartTracksParams {
     #[serde(alias = "num")]
     limit: Option<String>,
@@ -3766,6 +3989,30 @@ struct ChartTracksParams {
         alias = "includeTags"
     )]
     include_tags: Option<String>,
+    period_kind: Option<String>,
+    period_date: Option<String>,
+    period_id: Option<String>,
+}
+
+fn chart_period(
+    kind: Option<&str>,
+    date: Option<String>,
+    id: Option<String>,
+) -> tuneweave_core::Result<tuneweave_core::ChartPeriod> {
+    use tuneweave_core::ChartPeriod;
+    let period = match (kind, date, id) {
+        (None | Some("current"), None, None) => ChartPeriod::Current,
+        (Some("day"), Some(date), None) => ChartPeriod::Day { date },
+        (Some("week"), Some(date), None) => ChartPeriod::Week { date },
+        (Some("id"), None, Some(id)) => ChartPeriod::Id { id },
+        _ => {
+            return Err(TuneWeaveError::invalid_request(
+                "chart period requires current without a value, day/week with period_date, or id with period_id",
+            ));
+        }
+    };
+    period.validate()?;
+    Ok(period)
 }
 
 async fn chart_tracks(
@@ -3775,6 +4022,11 @@ async fn chart_tracks(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let reference = parse_reference(reference)?;
+    let period = chart_period(
+        params.period_kind.as_deref(),
+        params.period_date,
+        params.period_id,
+    )?;
     let limit = parse_u32_parameter("limit/num", params.limit.as_deref(), 10)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
@@ -3805,6 +4057,7 @@ async fn chart_tracks(
         AccountSelection::Optional,
     )?;
     let mut request = ChartTrackListRequest::new(limit, offset);
+    request.period = period;
     request.include_tags =
         parse_bool_parameter("tag/include_tags", params.include_tags.as_deref(), true)?;
     request.account.clone_from(&access.provider_account);
@@ -3929,7 +4182,7 @@ async fn albums_subscribe(
     headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
-    set_album_subscriptions(state, headers, payload, true).await
+    set_album_subscriptions(state, headers, payload, true, false).await
 }
 
 async fn albums_unsubscribe(
@@ -3937,7 +4190,7 @@ async fn albums_unsubscribe(
     headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
-    set_album_subscriptions(state, headers, payload, false).await
+    set_album_subscriptions(state, headers, payload, false, false).await
 }
 
 async fn set_album_subscriptions(
@@ -3945,6 +4198,7 @@ async fn set_album_subscriptions(
     headers: HeaderMap,
     payload: Result<Json<AlbumSubscriptionBatchBody>, JsonRejection>,
     subscribed: bool,
+    digital: bool,
 ) -> Result<Json<ApiResponse<Vec<SubscriptionResult>>>, ApiError> {
     let body = json_body(payload)?;
     let references = parse_batch_references(
@@ -3968,7 +4222,8 @@ async fn set_album_subscriptions(
         .with_details(json!({ "refs": references }))
         .into());
     }
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -3979,11 +4234,28 @@ async fn set_album_subscriptions(
         .iter()
         .map(|reference| reference.id().to_owned())
         .collect::<Vec<_>>();
-    let results = access
-        .provider
-        .set_album_subscriptions(&ids, subscribed, Some(&account))
-        .await?;
-    Ok(Json(access.list_response(results, platform)))
+    let results = if digital {
+        access
+            .provider
+            .set_digital_album_subscriptions(&ids, subscribed, Some(&account))
+            .await
+    } else {
+        access
+            .provider
+            .set_album_subscriptions(&ids, subscribed, Some(&account))
+            .await
+    };
+    let (results, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        results,
+    )?;
+    Ok(Json(
+        access
+            .list_response(results, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn album_subscribe(
@@ -3992,7 +4264,15 @@ async fn album_subscribe(
     Path(reference): Path<String>,
     params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, headers, reference, query_params(params)?, true).await
+    set_album_subscription(
+        state,
+        headers,
+        reference,
+        query_params(params)?,
+        true,
+        false,
+    )
+    .await
 }
 
 async fn album_unsubscribe(
@@ -4001,7 +4281,15 @@ async fn album_unsubscribe(
     Path(reference): Path<String>,
     params: Result<Query<AlbumSubscriptionParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
-    set_album_subscription(state, headers, reference, query_params(params)?, false).await
+    set_album_subscription(
+        state,
+        headers,
+        reference,
+        query_params(params)?,
+        false,
+        false,
+    )
+    .await
 }
 
 async fn set_album_subscription(
@@ -4010,21 +4298,40 @@ async fn set_album_subscription(
     reference: String,
     params: AlbumSubscriptionParams,
     subscribed: bool,
+    digital: bool,
 ) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
     let account = access.required_account().to_owned();
-    let result = access
-        .provider
-        .set_album_subscription(reference.id(), subscribed, Some(&account))
-        .await?;
-    Ok(Json(access.response(result, platform)))
+    let result = if digital {
+        access
+            .provider
+            .set_digital_album_subscription(reference.id(), subscribed, Some(&account))
+            .await
+    } else {
+        access
+            .provider
+            .set_album_subscription(reference.id(), subscribed, Some(&account))
+            .await
+    };
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn track_subscribe(
@@ -4032,7 +4339,7 @@ async fn track_subscribe(
     headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     set_track_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
@@ -4041,7 +4348,7 @@ async fn track_unsubscribe(
     headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<TrackSubscriptionParams>, QueryRejection>,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     set_track_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
@@ -4078,10 +4385,11 @@ async fn set_track_subscription(
     reference: String,
     params: TrackSubscriptionParams,
     subscribed: bool,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -4091,8 +4399,19 @@ async fn set_track_subscription(
     let result = access
         .provider
         .set_track_subscription(reference.id(), subscribed, Some(&account))
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(auth_json_response(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+        true,
+    ))
 }
 
 async fn playlist_subscribe(
@@ -4100,7 +4419,7 @@ async fn playlist_subscribe(
     headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     set_playlist_subscription(state, headers, reference, query_params(params)?, true).await
 }
 
@@ -4109,7 +4428,7 @@ async fn playlist_unsubscribe(
     headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<PlaylistSubscriptionParams>, QueryRejection>,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     set_playlist_subscription(state, headers, reference, query_params(params)?, false).await
 }
 
@@ -4125,10 +4444,11 @@ async fn set_playlist_subscription(
     reference: String,
     params: PlaylistSubscriptionParams,
     subscribed: bool,
-) -> Result<Json<ApiResponse<SubscriptionResult>>, ApiError> {
+) -> Result<Response, ApiError> {
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -4138,8 +4458,19 @@ async fn set_playlist_subscription(
     let result = access
         .provider
         .set_playlist_subscription(reference.id(), subscribed, Some(&account))
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(auth_json_response(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+        true,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4320,16 +4651,19 @@ async fn track_lyrics(
     headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<LyricsParams>, QueryRejection>,
-) -> Result<Json<ApiResponse<Lyrics>>, ApiError> {
+) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
         AccountSelection::Optional,
     )?;
+    let sensitive = caller_managed || access.provider_account.is_some();
     let provider = access.provider;
     let account = access.provider_account;
     let word_synced =
@@ -4353,13 +4687,17 @@ async fn track_lyrics(
                 account,
             },
         )
-        .await?;
-    let mut response = ApiResponse::new(lyrics).with_platform(platform);
+        .await;
+    let (lyrics, credential) =
+        finish_account_operation(provider.as_ref(), platform, caller_managed, lyrics)?;
+    let mut response = ApiResponse::new(lyrics)
+        .with_platform(platform)
+        .with_caller_credential(credential);
     if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
 
-    Ok(Json(response))
+    Ok(auth_json_response(response, sensitive))
 }
 
 async fn track_singing_annotations_availability(
@@ -4932,10 +5270,69 @@ async fn track_stream_content(
     audio_content_response(&track, content).map_err(Into::into)
 }
 
+async fn track_download_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    params: Result<Query<DownloadParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let params = query_params(params)?;
+    if params.playback_platform.is_some()
+        || params.fallback.is_some()
+        || params.fallback_platforms.is_some()
+        || params.unblock.is_some()
+        || params.source.is_some()
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "download content does not accept playback routing controls",
+        )
+        .into());
+    }
+    let reference = parse_reference(reference)?;
+    let mut request = download_request(&params)?;
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        reference.platform(),
+        params.account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    request.account = access.provider_account;
+    let provider = access.provider;
+    let track = provider
+        .track(reference.id(), request.account.as_deref())
+        .await?;
+    let content = provider.audio_download_content(&track, &request).await?;
+    audio_content_response_with_disposition(&track, content, "attachment").map_err(Into::into)
+}
+
 fn audio_content_response(
     track: &Track,
     content: AudioContent,
 ) -> Result<Response, TuneWeaveError> {
+    audio_content_response_with_disposition(track, content, "inline")
+}
+
+fn audio_content_response_with_disposition(
+    track: &Track,
+    content: AudioContent,
+    disposition: &'static str,
+) -> Result<Response, TuneWeaveError> {
+    if let Some(trial) = &content.trial {
+        if trial.start_ms >= trial.end_ms {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "provider returned an invalid audio preview window",
+            )
+            .with_platform(track.platform));
+        }
+        if disposition == "attachment" {
+            return Err(TuneWeaveError::new(
+                ErrorCode::PermissionDenied,
+                "audio previews cannot satisfy download authorization",
+            )
+            .with_platform(track.platform));
+        }
+    }
     if content.track_ref != track.resource_ref {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -4958,6 +5355,7 @@ fn audio_content_response(
             | "audio/aac"
             | "audio/ogg"
             | "audio/webm"
+            | "audio/wav"
             | "application/octet-stream"
     ) {
         return Err(TuneWeaveError::new(
@@ -4981,8 +5379,27 @@ fn audio_content_response(
         .with_platform(track.platform));
     }
     let content_length = content.bytes.len().to_string();
-    let content_disposition = format!("inline; filename=\"{}\"", content.filename);
+    let content_disposition = format!("{disposition}; filename=\"{}\"", content.filename);
     let mut response = Response::new(Body::from(content.bytes));
+    response.headers_mut().insert(
+        "x-tuneweave-audio-kind",
+        HeaderValue::from_static(if content.trial.is_some() {
+            "trial"
+        } else {
+            "full"
+        }),
+    );
+    if let Some(trial) = content.trial {
+        for (name, value) in [
+            ("x-tuneweave-trial-start-ms", trial.start_ms),
+            ("x-tuneweave-trial-end-ms", trial.end_ms),
+        ] {
+            response.headers_mut().insert(
+                name,
+                HeaderValue::from_str(&value.to_string()).expect("decimal time is a valid header"),
+            );
+        }
+    }
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&content.content_type).map_err(|_| {
@@ -5125,16 +5542,8 @@ async fn resolve_uni_playlist_item_playback(
         source: params.source.as_deref(),
         account: params.account.as_deref(),
     })?;
-    let resolution = parse_u32_parameter(
-        "resolution",
-        params.resolution.as_deref(),
-        VideoStreamRequest::DEFAULT_RESOLUTION,
-    )?;
-    if !(1..=4_320).contains(&resolution) {
-        return Err(TuneWeaveError::invalid_request(
-            "resolution must be between 1 and 4320",
-        ));
-    }
+    let resolution =
+        parse_video_stream_resolution(item.source_ref.platform(), params.resolution.as_deref())?;
     if params.resolution.is_some()
         && !matches!(
             item.kind,
@@ -5306,6 +5715,7 @@ async fn resolve_uni_video_stream(
                         last_error = Some(error);
                     }
                     Err(error) => {
+                        provider.discard_response_credential_after_error(error.code)?;
                         attempts.push(stream_failed_attempt(
                             platform,
                             account,
@@ -5358,6 +5768,7 @@ async fn resolve_uni_video_stream(
                     last_error = Some(error);
                 }
                 Err(error) => {
+                    provider.discard_response_credential_after_error(error.code)?;
                     attempts.push(stream_failed_attempt(
                         platform,
                         account,
@@ -5955,6 +6366,69 @@ fn media_download_from_stream(
     })
 }
 
+async fn authorize_resolved_download(
+    state: &AppState,
+    headers: &HeaderMap,
+    origin: &ResourceRef,
+    controls: &StreamControls,
+    stream: MediaStream,
+) -> Result<MediaDownload, TuneWeaveError> {
+    let platform = stream.resolved_platform;
+    let accounts = controls.resolve_request(origin.platform()).accounts;
+    let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
+        state,
+        platform,
+        accounts.get(&platform).map(String::as_str),
+        AccountSelection::Optional,
+    )?;
+    if !access
+        .provider
+        .requires_download_authorization(access.provider_account.as_deref())
+    {
+        return media_download_from_stream(origin, stream);
+    }
+    if stream.resolved_track.platform() != platform {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "resolved media has inconsistent platform identity",
+        )
+        .with_platform(platform));
+    }
+    let request = StreamRequest {
+        quality: controls.quality,
+        variant: controls.variant,
+        bitrate: controls.bitrate,
+        immersive_type: controls.immersive_type,
+        account: access.provider_account,
+    };
+    let track = access
+        .provider
+        .track(stream.resolved_track.id(), request.account.as_deref())
+        .await?;
+    let mut download = access.provider.download(&track, &request).await?;
+    if download.track_ref != stream.resolved_track
+        || download.platform != platform
+        || download.available != download.url.is_some()
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            "download authorization returned inconsistent media identity",
+        )
+        .with_platform(platform));
+    }
+    download
+        .extensions
+        .insert("origin_track".into(), json!(origin));
+    download
+        .extensions
+        .insert("resolved_track".into(), json!(stream.resolved_track));
+    download
+        .extensions
+        .insert("attempts".into(), json!(stream.attempts));
+    download.track_ref = origin.clone();
+    Ok(download)
+}
+
 async fn resolve_track_download_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -5978,7 +6452,7 @@ async fn resolve_track_download_request(
         let (stream, _) =
             resolve_track_stream_request(state, headers, reference.to_string(), stream_params)
                 .await?;
-        return media_download_from_stream(&reference, stream);
+        return authorize_resolved_download(state, headers, &reference, &controls, stream).await;
     }
 
     let mut request = download_request(params)?;
@@ -5994,12 +6468,25 @@ async fn resolve_track_download_request(
         .track(reference.id(), request.account.as_deref())
         .await?;
     let download = provider.download(&track, &request).await?;
+    if provider.requires_download_authorization(request.account.as_deref()) {
+        if download.available != download.url.is_some()
+            || download.platform != reference.platform()
+            || download.track_ref != reference
+        {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "download authorization returned an inconsistent result",
+            )
+            .with_platform(reference.platform()));
+        }
+        return Ok(download);
+    }
     if download.available && download.url.is_some() {
         return Ok(download);
     }
     let (stream, _) =
         resolve_track_stream_request(state, headers, reference.to_string(), stream_params).await?;
-    match media_download_from_stream(&reference, stream) {
+    match authorize_resolved_download(state, headers, &reference, &controls, stream).await {
         Ok(download) => Ok(download),
         Err(mut error) => {
             let stream_details = std::mem::take(&mut error.details);
@@ -6517,6 +7004,12 @@ async fn resolve_failed_stream_outcome(
     initial: StreamOutcome,
     controls: &ScopedStreamControls,
 ) -> StreamOutcome {
+    if matches!(
+        initial.error_code,
+        Some(ErrorCode::AuthenticationRequired | ErrorCode::Conflict)
+    ) {
+        caller_scope::invalidate(Some(initial.track_ref.platform()));
+    }
     if initial.status == ResolutionStatus::Success
         || !controls.fallback_enabled_for(initial.track_ref.platform())
     {
@@ -6566,6 +7059,12 @@ async fn resolve_stream_reference(
 }
 
 fn stream_outcome_from_error(reference: &ResourceRef, error: &TuneWeaveError) -> StreamOutcome {
+    if matches!(
+        error.code,
+        ErrorCode::AuthenticationRequired | ErrorCode::Conflict
+    ) {
+        caller_scope::invalidate(error.platform.or(Some(reference.platform())));
+    }
     StreamOutcome {
         track_ref: reference.clone(),
         status: stream_error_status(error.code),
@@ -7141,6 +7640,7 @@ async fn load_uni_playlist_import_source(
     }
     let mut offset = 0;
     let mut visited_offsets = BTreeSet::from([offset]);
+    let source_snapshot_id = playlist.extensions.get("source_snapshot_id");
     let mut items = Vec::new();
     let mut page_count = 0usize;
     loop {
@@ -7158,6 +7658,15 @@ async fn load_uni_playlist_import_source(
         let page = provider
             .playlist_source_items(source.playlist_ref.id(), &source.source_type, &page_request)
             .await?;
+        if let Some(expected) = source_snapshot_id
+            && page.pagination.extensions.get("source_snapshot_id") != Some(expected)
+        {
+            return Err(TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "playlist source changed between metadata and item pages",
+            )
+            .with_platform(platform));
+        }
         if page.items.len() > max_items.saturating_sub(items.len()) {
             return Err(TuneWeaveError::invalid_request(format!(
                 "playlist sources cannot expand to more than {MAX_UNI_PLAYLIST_IMPORT_ITEMS} playable items"
@@ -7189,6 +7698,11 @@ async fn load_uni_playlist_import_source(
         offset = next_offset;
     }
     let item_count = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    let mut source_extensions = Extensions::from([("complete_pagination".to_owned(), json!(true))]);
+    if playlist.extensions.get("editable_metadata_verified") == Some(&json!(true)) {
+        source_extensions.insert("source_tags".to_owned(), json!(playlist.tags));
+        source_extensions.insert("source_metadata_verified".to_owned(), json!(true));
+    }
     Ok(LoadedUniPlaylistImportSource {
         result: UniPlaylistImportSourceResult {
             playlist_ref: playlist.resource_ref,
@@ -7199,7 +7713,7 @@ async fn load_uni_playlist_import_source(
             cover_url: playlist.cover_url,
             item_count,
             account: access.response_account,
-            extensions: Extensions::from([("complete_pagination".to_owned(), json!(true))]),
+            extensions: source_extensions,
         },
         description: playlist.description,
         items,
@@ -7697,13 +8211,15 @@ fn deterministic_uni_playlist_import_item_id(
 
 async fn uni_materialize_items(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<NoQueryParams>, QueryRejection>,
     payload: Result<Json<UniPlaylistItemAddBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<UniPlaylistMaterializeItemsResult>>, ApiError> {
     let _ = query_params(params)?;
     let body = json_body(payload)?;
     let (request, source_platforms) = normalize_uni_playlist_item_request(body)?;
-    let resolved = resolve_uni_playlist_items(&state, &request).await?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let resolved = resolve_uni_playlist_items(&state, &credentials, &request).await?;
     let added_at_ms = unix_time_millis()?;
     let items = allocate_materialized_uni_playlist_items(&resolved, added_at_ms)?;
     let items = items
@@ -7786,6 +8302,7 @@ async fn uni_client_item_stream(
 
 async fn uni_playlist_items_add(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(reference): Path<String>,
     params: Result<Query<NoQueryParams>, QueryRejection>,
     payload: Result<Json<UniPlaylistItemAddBody>, JsonRejection>,
@@ -7801,7 +8318,8 @@ async fn uni_playlist_items_add(
     }
     let body = json_body(payload)?;
     let (request, source_platforms) = normalize_uni_playlist_item_request(body)?;
-    let resolved = resolve_uni_playlist_items(&state, &request).await?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let resolved = resolve_uni_playlist_items(&state, &credentials, &request).await?;
     let added_at_ms = unix_time_millis()?;
     for _ in 0..8 {
         let items = allocate_materialized_uni_playlist_items(&resolved, added_at_ms)?;
@@ -7880,11 +8398,15 @@ fn normalize_uni_playlist_item_request(
 
 async fn resolve_uni_playlist_items(
     state: &AppState,
+    credentials: &CallerCredentialSet,
     request: &UniPlaylistItemAddRequest,
 ) -> Result<Vec<(UniPlaylistItemInput, UniPlaylistItemSnapshot)>, TuneWeaveError> {
+    let mut accounts = request.accounts.clone();
+    credentials.apply_stream_accounts(&mut accounts)?;
+    let state = credentials.scoped_state(state)?;
     let mut resolved = Vec::with_capacity(request.items.len());
     for input in &request.items {
-        let snapshot = resolve_uni_playlist_item_snapshot(state, input, &request.accounts).await?;
+        let snapshot = resolve_uni_playlist_item_snapshot(&state, input, &accounts).await?;
         resolved.push((input.clone(), snapshot));
     }
     Ok(resolved)
@@ -8287,6 +8809,14 @@ struct PlaylistItemMutationBody {
     account: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaylistOccurrenceOrderBody {
+    occurrence_ids: Vec<String>,
+    snapshot_id: String,
+    account: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlaylistTrackOrderBody {
@@ -8518,9 +9048,11 @@ async fn playlist_create(
     headers: HeaderMap,
     payload: Result<Json<PlaylistCreateBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = account_platform(&state, body.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -8535,8 +9067,18 @@ async fn playlist_create(
             kind: parse_playlist_kind(body.kind.as_ref(), body.playlist_type.as_ref())?,
             account: Some(account.clone()),
         })
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlist_update(
@@ -8545,6 +9087,7 @@ async fn playlist_update(
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistUpdateBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let reference = parse_reference(reference)?;
     let body = json_body(payload)?;
     let description = match (body.description, body.desc) {
@@ -8559,7 +9102,8 @@ async fn playlist_update(
         (None, None) => None,
     };
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -8578,8 +9122,54 @@ async fn playlist_update(
                 account: Some(account.clone()),
             },
         )
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
+}
+
+async fn playlist_visibility_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistVisibilityUpdateRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistMutationResult>>, ApiError> {
+    caller_scope::mark_sensitive();
+    let reference = parse_reference(reference)?;
+    let mut request = json_body(payload)?;
+    request.validate()?;
+    let platform = reference.platform();
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        request.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    request.account = Some(access.required_account().to_owned());
+    let result = access
+        .provider
+        .update_playlist_visibility(reference.id(), &request)
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlist_delete(
@@ -8588,10 +9178,12 @@ async fn playlist_delete(
     Path(reference): Path<String>,
     params: Result<Query<PlaylistAccountParams>, QueryRejection>,
 ) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let reference = parse_reference(reference)?;
     let params = query_params(params)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -8604,8 +9196,18 @@ async fn playlist_delete(
             playlist_refs: vec![reference],
             account: Some(account.clone()),
         })
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlists_delete(
@@ -8613,6 +9215,7 @@ async fn playlists_delete(
     headers: HeaderMap,
     payload: Result<Json<PlaylistDeleteBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistDeleteResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let playlist_refs = parse_playlist_reference_fields(
         body.refs,
@@ -8622,7 +9225,8 @@ async fn playlists_delete(
         "playlist",
     )?;
     let platform = single_reference_platform("playlist deletion", &playlist_refs)?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -8635,8 +9239,18 @@ async fn playlists_delete(
             playlist_refs,
             account: Some(account.clone()),
         })
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlist_items_add(
@@ -8749,6 +9363,7 @@ async fn playlist_items_mutation(
     action: PlaylistItemMutationAction,
     forced_kind: Option<PlaylistItemKind>,
 ) -> Result<Json<ApiResponse<PlaylistItemMutationResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let reference = parse_reference(reference)?;
     let body = json_body(payload)?;
     let kind = parse_playlist_item_kind(body.kind.as_ref(), body.item_type.as_ref(), forced_kind)?;
@@ -8760,7 +9375,8 @@ async fn playlist_items_mutation(
         "playlist item",
     )?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -8778,8 +9394,18 @@ async fn playlist_items_mutation(
                 account: Some(account.clone()),
             },
         )
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlist_tracks_order(
@@ -8788,6 +9414,7 @@ async fn playlist_tracks_order(
     Path(reference): Path<String>,
     payload: Result<Json<PlaylistTrackOrderBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistTrackOrderResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let reference = parse_reference(reference)?;
     let body = json_body(payload)?;
     let track_refs = parse_playlist_reference_fields(
@@ -8798,7 +9425,8 @@ async fn playlist_tracks_order(
         "playlist track",
     )?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
@@ -8814,8 +9442,18 @@ async fn playlist_tracks_order(
                 account: Some(account.clone()),
             },
         )
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn podcast_episode_order(
@@ -9095,7 +9733,24 @@ async fn account_playlists_order(
     headers: HeaderMap,
     payload: Result<Json<PlaylistOrderBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PlaylistOrderResult>>, ApiError> {
-    let body = json_body(payload)?;
+    playlist_directory_order(state, headers, json_body(payload)?, false).await
+}
+
+async fn account_collected_playlists_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<PlaylistOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistOrderResult>>, ApiError> {
+    playlist_directory_order(state, headers, json_body(payload)?, true).await
+}
+
+async fn playlist_directory_order(
+    state: AppState,
+    headers: HeaderMap,
+    body: PlaylistOrderBody,
+    collected: bool,
+) -> Result<Json<ApiResponse<PlaylistOrderResult>>, ApiError> {
+    caller_scope::mark_sensitive();
     let playlist_refs = parse_playlist_reference_fields(
         body.refs,
         body.ids,
@@ -9104,21 +9759,34 @@ async fn account_playlists_order(
         "playlist",
     )?;
     let platform = single_reference_platform("account playlist ordering", &playlist_refs)?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         body.account.as_deref(),
         AccountSelection::Default,
     )?;
     let account = access.required_account().to_owned();
-    let result = access
-        .provider
-        .reorder_account_playlists(&PlaylistOrderRequest {
-            playlist_refs,
-            account: Some(account.clone()),
-        })
-        .await?;
-    Ok(Json(access.response(result, platform)))
+    let request = PlaylistOrderRequest {
+        playlist_refs,
+        account: Some(account),
+    };
+    let result = if collected {
+        access.provider.reorder_collected_playlists(&request).await
+    } else {
+        access.provider.reorder_account_playlists(&request).await
+    };
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9144,7 +9812,8 @@ async fn playlist_cover_update(
     let reference = parse_reference(reference)?;
     let params = query_params(params)?;
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -9167,8 +9836,18 @@ async fn playlist_cover_update(
     let result = access
         .provider
         .update_playlist_cover(reference.id(), &request)
-        .await?;
-    Ok(Json(access.response(result, platform)))
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 fn parse_playlist_visibility(
@@ -9192,8 +9871,9 @@ fn parse_playlist_visibility(
     match value.as_str() {
         "public" | "0" => Ok(PlaylistVisibility::Public),
         "private" | "10" => Ok(PlaylistVisibility::Private),
+        "platform_default" if name == "visibility" => Ok(PlaylistVisibility::PlatformDefault),
         _ => Err(TuneWeaveError::invalid_request(format!(
-            "{name} must be public, private, 0, or 10"
+            "{name} must be public, private, 0, or 10; visibility also accepts platform_default"
         ))
         .with_details(json!({ "parameter": name, "value": value }))),
     }
@@ -9408,8 +10088,16 @@ async fn playlist(
     let playlist = access
         .provider
         .playlist(reference.id(), access.provider_account.as_deref())
-        .await?;
-    let mut response = ApiResponse::new(playlist).with_platform(platform);
+        .await;
+    let (playlist, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        playlist,
+    )?;
+    let mut response = ApiResponse::new(playlist)
+        .with_platform(platform)
+        .with_caller_credential(credential);
     if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
@@ -9491,8 +10179,15 @@ async fn playlist_tracks(
                 account: access.provider_account,
             },
         )
-        .await?;
+        .await;
+    let (page, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        page,
+    )?;
     let mut response = ApiResponse::new(page.items)
+        .with_caller_credential(credential)
         .with_platform(platform)
         .with_pagination(page.pagination);
     if let Some(account) = access.response_account {
@@ -9500,6 +10195,108 @@ async fn playlist_tracks(
     }
 
     Ok(Json(response))
+}
+
+async fn playlist_track_occurrences(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<ApiResponse<Vec<PlaylistTrackOccurrence>>>, ApiError> {
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let reference = parse_reference(reference)?;
+    let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
+    if !(1..=100).contains(&limit) {
+        return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
+    }
+    let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let platform = reference.platform();
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        params.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let page = access
+        .provider
+        .playlist_track_occurrences(
+            reference.id(),
+            &PageRequest {
+                limit,
+                offset,
+                account: access.provider_account,
+            },
+        )
+        .await;
+    let (page, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        page,
+    )?;
+    let mut response = ApiResponse::new(page.items)
+        .with_caller_credential(credential)
+        .with_platform(platform)
+        .with_pagination(page.pagination);
+    if let Some(account) = access.response_account {
+        response = response.with_account(account);
+    }
+
+    Ok(Json(response))
+}
+
+async fn playlist_occurrences_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(reference): Path<String>,
+    payload: Result<Json<PlaylistOccurrenceOrderBody>, JsonRejection>,
+) -> Result<Json<ApiResponse<PlaylistOccurrenceOrderResult>>, ApiError> {
+    let reference = parse_reference(reference)?;
+    let body = json_body(payload)?;
+    if body.occurrence_ids.len() > 40_000
+        || body
+            .occurrence_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 160 || id.chars().any(char::is_control))
+        || body.snapshot_id.is_empty()
+        || body.snapshot_id.len() > 256
+        || body.snapshot_id.chars().any(char::is_control)
+    {
+        return Err(TuneWeaveError::invalid_request(
+            "occurrence order requires at most 40000 bounded IDs and a snapshot_id",
+        )
+        .into());
+    }
+    let platform = reference.platform();
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
+        &state,
+        platform,
+        body.account.as_deref(),
+        AccountSelection::Default,
+    )?;
+    let result = access
+        .provider
+        .reorder_playlist_occurrences(
+            reference.id(),
+            &PlaylistOccurrenceOrderRequest {
+                occurrence_ids: body.occurrence_ids,
+                snapshot_id: body.snapshot_id,
+                account: Some(access.required_account().to_owned()),
+            },
+        )
+        .await;
+    let (result, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(Json(
+        access
+            .response(result, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn playlist_playable_items(
@@ -10758,6 +11555,13 @@ struct VideoStreamParams {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MiguNativeMvStreamParams {
+    account: Option<String>,
+    format: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoStreamBatchParams {
     refs: Option<String>,
     #[serde(alias = "vids")]
@@ -11333,6 +12137,62 @@ async fn video_stream(
     Ok(Json(access.response(stream, platform)))
 }
 
+async fn migu_native_mv_stream(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    params: Result<Query<MiguNativeMvStreamParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<VideoStream>>, ApiError> {
+    caller_scope::mark_sensitive();
+    let params = query_params(params)?;
+    let reference = parse_reference(reference)?;
+    if reference.platform() != Platform::Migu {
+        return Err(TuneWeaveError::invalid_request(
+            "native MV streaming is available only for Migu references",
+        )
+        .into());
+    }
+    let format = match params.format.as_deref().unwrap_or("auto") {
+        "auto" => tuneweave_core::MiguNativeMvFormat::Auto,
+        "pq" => tuneweave_core::MiguNativeMvFormat::Pq,
+        "hq" => tuneweave_core::MiguNativeMvFormat::Hq,
+        "sq" => tuneweave_core::MiguNativeMvFormat::Sq,
+        _ => {
+            return Err(TuneWeaveError::invalid_request(
+                "Migu native MV format must be auto, pq, hq or sq",
+            )
+            .into());
+        }
+    };
+    let account = optional_trimmed(params.account);
+    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+        &state,
+        Platform::Migu,
+        account.as_deref(),
+        AccountSelection::Optional,
+    )?;
+    let request = tuneweave_core::MiguNativeMvStreamRequest {
+        format,
+        account: access.provider_account.clone(),
+    };
+    let stream = access
+        .provider
+        .migu_native_mv_stream(reference.id(), &request)
+        .await?;
+    if stream.platform != Platform::Migu
+        || stream.video_ref != reference
+        || stream.source_range.is_none()
+    {
+        return Err(TuneWeaveError::new(
+            ErrorCode::InternalError,
+            "Migu native MV provider returned an inconsistent source range",
+        )
+        .with_platform(Platform::Migu)
+        .into());
+    }
+    Ok(Json(access.response(stream, Platform::Migu)))
+}
+
 async fn video_streams_get(
     State(state): State<AppState>,
     params: Result<Query<VideoStreamBatchParams>, QueryRejection>,
@@ -11414,16 +12274,8 @@ async fn video_streams_response(
     } else {
         parse_video_resource_kind(inputs.kind.as_deref(), references[0].id())?
     };
-    let resolution = parse_u32_parameter(
-        "resolution",
-        inputs.resolution.as_deref(),
-        VideoStreamRequest::DEFAULT_RESOLUTION,
-    )?;
-    if !(1..=4_320).contains(&resolution) {
-        return Err(
-            TuneWeaveError::invalid_request("resolution must be between 1 and 4320").into(),
-        );
-    }
+    let resolution =
+        parse_video_stream_resolution(selected_platform, inputs.resolution.as_deref())?;
     let account = optional_trimmed(inputs.account);
     let access = CallerCredentialSet::from_headers(headers, state)?.select_provider(
         state,
@@ -11504,6 +12356,23 @@ async fn video_stream_redirect(
     )
 }
 
+fn parse_video_stream_resolution(
+    platform: Platform,
+    value: Option<&str>,
+) -> Result<u32, TuneWeaveError> {
+    let resolution = if platform == Platform::Migu && value == Some("auto") {
+        0
+    } else {
+        parse_u32_parameter("resolution", value, VideoStreamRequest::DEFAULT_RESOLUTION)?
+    };
+    if !(1..=4320).contains(&resolution) && !(platform == Platform::Migu && resolution == 0) {
+        return Err(TuneWeaveError::invalid_request(
+            "resolution must be between 1 and 4320; Migu also supports auto",
+        ));
+    }
+    Ok(resolution)
+}
+
 fn video_stream_request(
     params: &VideoStreamParams,
     platform: Platform,
@@ -11515,16 +12384,7 @@ fn video_stream_request(
     } else {
         parse_video_resource_kind(params.kind.as_deref(), id)?
     };
-    let resolution = parse_u32_parameter(
-        "resolution",
-        params.resolution.as_deref(),
-        VideoStreamRequest::DEFAULT_RESOLUTION,
-    )?;
-    if !(1..=4_320).contains(&resolution) {
-        return Err(TuneWeaveError::invalid_request(
-            "resolution must be between 1 and 4320",
-        ));
-    }
+    let resolution = parse_video_stream_resolution(platform, params.resolution.as_deref())?;
     let mut request = VideoStreamRequest::new(kind, resolution);
     request.account.clone_from(&account);
     Ok((account, request))
@@ -11612,7 +12472,15 @@ async fn user_favorite_playlist(
     let reference = parse_reference(reference)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    if caller_managed
+        || account.is_some()
+        || matches!(platform, Platform::Migu | Platform::Soda | Platform::Kuwo)
+    {
+        caller_scope::mark_sensitive();
+    }
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         account.as_deref(),
@@ -11621,8 +12489,14 @@ async fn user_favorite_playlist(
     let playlist = access
         .provider
         .user_favorite_playlist(reference.id(), access.provider_account.as_deref())
-        .await?;
-    Ok(Json(access.response(playlist, platform)))
+        .await;
+    let (playlist, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, playlist)?;
+    Ok(Json(
+        access
+            .response(playlist, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn user_favorite_tracks(
@@ -11639,7 +12513,15 @@ async fn user_favorite_tracks(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    if caller_managed
+        || account.is_some()
+        || matches!(platform, Platform::Migu | Platform::Soda | Platform::Kuwo)
+    {
+        caller_scope::mark_sensitive();
+    }
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         account.as_deref(),
@@ -11655,10 +12537,13 @@ async fn user_favorite_tracks(
                 account: access.provider_account.clone(),
             },
         )
-        .await?;
+        .await;
+    let (page, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, page)?;
     Ok(Json(
         access
             .response(page.items, platform)
+            .with_caller_credential(credential)
             .with_pagination(page.pagination),
     ))
 }
@@ -11668,7 +12553,7 @@ async fn user_created_playlists(
     Path(reference): Path<String>,
     headers: HeaderMap,
     Query(params): Query<PageParams>,
-) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+) -> Result<Response, ApiError> {
     user_playlist_directory(state, reference, params, headers, false).await
 }
 
@@ -11677,7 +12562,7 @@ async fn user_favorite_playlists(
     Path(reference): Path<String>,
     headers: HeaderMap,
     Query(params): Query<PageParams>,
-) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+) -> Result<Response, ApiError> {
     user_playlist_directory(state, reference, params, headers, true).await
 }
 
@@ -11704,7 +12589,8 @@ async fn user_favorite_albums(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         account.as_deref(),
@@ -11720,10 +12606,17 @@ async fn user_favorite_albums(
                 account: access.provider_account.clone(),
             },
         )
-        .await?;
+        .await;
+    let (page, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        page,
+    )?;
     Ok(Json(
         access
             .response(page.items, platform)
+            .with_caller_credential(credential)
             .with_pagination(page.pagination),
     ))
 }
@@ -11828,7 +12721,7 @@ async fn user_playlist_directory(
     params: PageParams,
     headers: HeaderMap,
     favorites: bool,
-) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let reference = parse_reference(reference)?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
@@ -11837,7 +12730,15 @@ async fn user_playlist_directory(
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    let sensitive = caller_managed
+        || account.is_some()
+        || matches!(platform, Platform::Migu | Platform::Soda | Platform::Kuwo);
+    if sensitive {
+        caller_scope::mark_sensitive();
+    }
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         account.as_deref(),
@@ -11852,18 +12753,20 @@ async fn user_playlist_directory(
         access
             .provider
             .user_favorite_playlists(reference.id(), &request)
-            .await?
+            .await
     } else {
         access
             .provider
             .user_created_playlists(reference.id(), &request)
-            .await?
+            .await
     };
-    Ok(Json(
-        access
-            .response(page.items, platform)
-            .with_pagination(page.pagination),
-    ))
+    let (page, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, page)?;
+    let response = access
+        .response(page.items, platform)
+        .with_caller_credential(credential)
+        .with_pagination(page.pagination);
+    Ok(auth_json_response(response, sensitive))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -11911,7 +12814,7 @@ async fn user_profile(
     Path(reference): Path<String>,
     params: Result<Query<UserProfileParams>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
@@ -11928,7 +12831,18 @@ async fn user_profile(
         .provider
         .user_profile(reference.id(), backend, access.provider_account.as_deref())
         .await?;
-    Ok(Json(access.response(profile, platform)))
+    let credential = finalize_read_credential(
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        access.provider.take_response_credential()?,
+    )?;
+    let sensitive = credential.is_some() || access.provider_account.is_some();
+    Ok(auth_json_response(
+        access
+            .response(profile, platform)
+            .with_caller_credential(credential),
+        sensitive,
+    ))
 }
 
 async fn user_music_gene(
@@ -11959,7 +12873,7 @@ async fn account_user_profile(
     State(state): State<AppState>,
     params: Result<Query<AccountUserProfileParams>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<UserProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let backend = parse_user_profile_backend(params.backend.as_deref())?;
@@ -11971,35 +12885,48 @@ async fn account_user_profile(
         AccountSelection::Default,
     )?;
     let account = access.required_account();
-    let session = access.provider.session_profile(account).await?;
-    if !session.authenticated {
-        return Err(TuneWeaveError::new(
-            tuneweave_core::ErrorCode::AuthenticationRequired,
-            format!("{platform} account alias {account} is not logged in"),
-        )
-        .with_platform(platform)
-        .with_details(json!({ "account": account }))
-        .into());
-    }
-    let user_id = session
-        .user_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "0")
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                format!("{platform} account profile did not contain a usable user id"),
+    let result = async {
+        let session = access.provider.session_profile(account).await?;
+        if !session.authenticated {
+            return Err(TuneWeaveError::new(
+                tuneweave_core::ErrorCode::AuthenticationRequired,
+                format!("{platform} account alias {account} is not logged in"),
             )
             .with_platform(platform)
-            .with_details(json!({ "account": access.response_account }))
-        })?;
-    let profile = access
-        .provider
-        .user_profile(&user_id, backend, Some(account))
-        .await?;
-    Ok(Json(access.response(profile, platform)))
+            .with_details(json!({ "account": account })));
+        }
+        let user_id = session
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "0")
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                TuneWeaveError::new(
+                    ErrorCode::UpstreamError,
+                    format!("{platform} account profile did not contain a usable user id"),
+                )
+                .with_platform(platform)
+                .with_details(json!({ "account": access.response_account }))
+            })?;
+        access
+            .provider
+            .user_profile(&user_id, backend, Some(account))
+            .await
+    }
+    .await;
+    let (profile, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        result,
+    )?;
+    Ok(auth_json_response(
+        access
+            .response(profile, platform)
+            .with_caller_credential(credential),
+        true,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -12048,7 +12975,7 @@ async fn user_membership(
     Path(reference): Path<String>,
     params: Result<Query<UserMembershipParams>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
+) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let reference = parse_reference(reference)?;
     let platform = reference.platform();
@@ -12066,23 +12993,34 @@ async fn user_membership(
             access
                 .provider
                 .user_membership(Some(reference.id()), Some(account))
-                .await?
+                .await
         }
         MembershipBackend::Client => {
             access
                 .provider
                 .user_membership_client_info(Some(reference.id()), Some(account))
-                .await?
+                .await
         }
     };
-    Ok(Json(access.response(membership, platform)))
+    let (membership, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        membership,
+    )?;
+    Ok(auth_json_response(
+        access
+            .response(membership, platform)
+            .with_caller_credential(credential),
+        true,
+    ))
 }
 
 async fn account_membership(
     State(state): State<AppState>,
     params: Result<Query<AccountMembershipParams>, QueryRejection>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<MembershipSummary>>, ApiError> {
+) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
     let backend = parse_membership_backend(params.backend.as_deref())?;
@@ -12095,15 +13033,26 @@ async fn account_membership(
     )?;
     let account = access.required_account();
     let membership = match backend {
-        MembershipBackend::Front => access.provider.user_membership(None, Some(account)).await?,
+        MembershipBackend::Front => access.provider.user_membership(None, Some(account)).await,
         MembershipBackend::Client => {
             access
                 .provider
                 .user_membership_client_info(None, Some(account))
-                .await?
+                .await
         }
     };
-    Ok(Json(access.response(membership, platform)))
+    let (membership, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        membership,
+    )?;
+    Ok(auth_json_response(
+        access
+            .response(membership, platform)
+            .with_caller_credential(credential),
+        true,
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -12949,13 +13898,14 @@ struct AuthQrStartData {
 async fn auth_qr_start(
     State(state): State<AppState>,
     payload: Result<Json<AuthQrStartBody>, JsonRejection>,
-) -> Result<Json<ApiResponse<AuthQrStartData>>, ApiError> {
+) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
     let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
     let start = provider
-        .start_qr_login_with_mode(body.login_type.as_deref(), body.credential_mode)
+        .start_qr_login_for_account(body.login_type.as_deref(), &account, body.credential_mode)
         .await?;
     let transaction_id = state.auth_transactions.insert(StoredAuthKind::Qr {
         platform,
@@ -12969,16 +13919,16 @@ async fn auth_qr_start(
         image_data_url: start.image_data_url,
         expires_at: start.expires_at,
     };
-    Ok(Json(auth_api_response(
-        data,
-        platform,
-        &account,
-        body.credential_mode,
-    )))
+    Ok(auth_json_response(
+        auth_api_response(data, platform, &account, body.credential_mode),
+        true,
+    ))
 }
 
 #[derive(Serialize)]
 struct AuthQrPollData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification: Option<tuneweave_core::QrVerification>,
     transaction_id: String,
     state: AuthState,
     message: Option<String>,
@@ -13037,9 +13987,78 @@ async fn auth_qr_poll(
         Ok(poll) => poll,
         Err(error) => {
             log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            if error.auth_challenge_consumed() {
+                state.auth_transactions.remove(&transaction_id)?;
+            }
             return Err(error.into());
         }
     };
+    qr_poll_response(&state, transaction_id, &stored, poll)
+}
+
+async fn auth_qr_verification(
+    State(state): State<AppState>,
+    Path(transaction_id): Path<String>,
+    payload: Result<Json<tuneweave_core::QrVerificationAction>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let action = json_body(payload)?;
+    let stored = state.auth_transactions.get(&transaction_id)?;
+    let StoredAuthKind::Qr {
+        platform,
+        account,
+        credential_mode,
+        provider_transaction_id,
+    } = &stored.kind
+    else {
+        return Err(auth_transaction_not_found().into());
+    };
+    let provider = state.registry.require(*platform)?;
+    let poll = match provider
+        .verify_qr_login(provider_transaction_id, account, *credential_mode, &action)
+        .await
+    {
+        Ok(poll) => poll,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            if error.auth_challenge_consumed() {
+                state.auth_transactions.remove(&transaction_id)?;
+            }
+            return Err(error.into());
+        }
+    };
+    qr_poll_response(&state, transaction_id, &stored, poll)
+}
+
+fn qr_poll_response(
+    state: &AppState,
+    transaction_id: String,
+    stored: &StoredAuthTransaction,
+    poll: tuneweave_core::ProviderQrPoll,
+) -> Result<Response, ApiError> {
+    let StoredAuthKind::Qr {
+        platform,
+        account,
+        credential_mode,
+        ..
+    } = &stored.kind
+    else {
+        return Err(auth_transaction_not_found().into());
+    };
+    if (poll.state == AuthState::VerificationRequired) != poll.verification.is_some() {
+        return Err(auth_provider_contract_error(
+            "QR verification state and instructions are inconsistent",
+        )
+        .into());
+    }
+    if poll
+        .verification
+        .as_ref()
+        .is_some_and(|verification| verification.methods.is_empty())
+    {
+        return Err(
+            auth_provider_contract_error("QR verification omitted its available methods").into(),
+        );
+    }
     let caller_credential = match finalize_qr_credential(
         *platform,
         *credential_mode,
@@ -13049,7 +14068,7 @@ async fn auth_qr_poll(
     ) {
         Ok(credential) => credential,
         Err(error) => {
-            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            log_auth_transaction_attempt_failure(&transaction_id, stored, &error);
             return Err(error.into());
         }
     };
@@ -13058,23 +14077,26 @@ async fn auth_qr_poll(
             log_auth_transaction_completed(&transaction_id, &transaction, poll.state);
         }
     } else {
-        log_auth_transaction_progress(&transaction_id, &stored, poll.state);
+        log_auth_transaction_progress(&transaction_id, stored, poll.state);
     }
     let data = AuthQrPollData {
         transaction_id,
         state: poll.state,
+        verification: poll.verification,
         message: poll.message,
         profile: poll.profile,
         caller_credential,
     };
     Ok(auth_json_response(
         auth_api_response(data, *platform, account, *credential_mode),
-        credential_mode.returns_to_caller() && poll.state == AuthState::Confirmed,
+        true,
     ))
 }
 
 #[derive(Deserialize)]
 struct AuthPasswordBody {
+    #[serde(default)]
+    backend: tuneweave_core::PasswordLoginBackend,
     platform: String,
     account: Option<String>,
     principal_type: PrincipalType,
@@ -13087,6 +14109,86 @@ struct AuthPasswordBody {
     secure_captcha: Option<String>,
     #[serde(default)]
     credential_mode: CredentialMode,
+    browser_user_agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthCredentialImportBody {
+    platform: String,
+    account: Option<String>,
+    #[serde(default)]
+    credential_mode: CredentialMode,
+    credential: tuneweave_core::ImportedCredential,
+}
+
+async fn auth_credential_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<AuthCredentialImportBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
+    let body = json_body(payload)?;
+    if headers.contains_key(CALLER_CREDENTIAL_HEADER) {
+        return Err(TuneWeaveError::invalid_request(
+            "credential import accepts its credential in the JSON body only",
+        )
+        .into());
+    }
+    let platform = parse_platform_parameter(&body.platform)?;
+    let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
+    let provider = state.registry.require(platform)?;
+    let started_at = Instant::now();
+    let result = async {
+        let result = provider
+            .import_credential(
+                &tuneweave_core::CredentialImportRequest {
+                    account: account.clone(),
+                    credential: body.credential,
+                },
+                body.credential_mode,
+            )
+            .await?;
+        if !result.profile.authenticated
+            || result.profile.account != account
+            || result
+                .profile
+                .user_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(auth_provider_contract_error(
+                "credential import did not verify the requested account identity",
+            ));
+        }
+        finalize_auth_result(platform, body.credential_mode, result)
+    }
+    .await;
+    let data = match result {
+        Ok(data) => data,
+        Err(error) => {
+            log_auth_operation_failure(
+                AuthOperation::CredentialImport,
+                platform,
+                body.credential_mode,
+                started_at,
+                &error,
+            );
+            return Err(error.into());
+        }
+    };
+    log_auth_operation_success(
+        AuthOperation::CredentialImport,
+        platform,
+        body.credential_mode,
+        started_at,
+        None,
+        None,
+    );
+    Ok(auth_json_response(
+        auth_api_response(data, platform, &account, body.credential_mode),
+        true,
+    ))
 }
 
 #[derive(Serialize)]
@@ -13097,31 +14199,146 @@ struct AuthLoginData {
     caller_credential: Option<CallerCredential>,
 }
 
+#[derive(Serialize)]
+struct AuthPasswordChallengeData {
+    transaction_id: String,
+    state: AuthState,
+    verification: PasswordVerification,
+}
+
+async fn auth_password_verify(
+    State(state): State<AppState>,
+    Path(transaction_id): Path<String>,
+    payload: Result<Json<PasswordChallengeAction>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
+    let action = json_body(payload)?;
+    let (stored, lease) = state.auth_transactions.claim_password(&transaction_id)?;
+    let StoredAuthKind::Password {
+        platform,
+        credential_mode,
+        identity,
+        provider_challenge: Some(challenge),
+        ..
+    } = &stored.kind
+    else {
+        return Err(auth_transaction_not_found().into());
+    };
+    let provider = state.registry.require(*platform)?;
+    let result = match provider.advance_password_login(challenge, &action).await {
+        Ok(result) => result,
+        Err(error) => {
+            log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            if !error.auth_challenge_consumed()
+                && !matches!(
+                    error.code,
+                    ErrorCode::ResourceNotFound | ErrorCode::Conflict
+                )
+            {
+                lease.retry()?;
+            }
+            return Err(error.into());
+        }
+    };
+    match result {
+        PasswordLoginProgress::Pending {
+            challenge,
+            verification,
+        } => {
+            let transaction_id = lease.publish_password(challenge)?;
+            Ok(auth_json_response(
+                auth_api_response(
+                    AuthPasswordChallengeData {
+                        transaction_id,
+                        state: AuthState::VerificationRequired,
+                        verification,
+                    },
+                    *platform,
+                    &identity.account,
+                    *credential_mode,
+                ),
+                true,
+            ))
+        }
+        PasswordLoginProgress::Confirmed(result) => {
+            if result.profile.account != identity.account || !result.profile.authenticated {
+                return Err(auth_provider_contract_error(
+                    "password verification did not confirm the selected account",
+                )
+                .into());
+            }
+            let data = finalize_auth_result(*platform, *credential_mode, result)?;
+            lease.finish()?;
+            Ok(auth_json_response(
+                auth_api_response(data, *platform, &identity.account, *credential_mode),
+                true,
+            ))
+        }
+    }
+}
+
 async fn auth_password(
     State(state): State<AppState>,
     payload: Result<Json<AuthPasswordBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
     let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
+    let browser_context = match body.browser_user_agent {
+        Some(user_agent) if platform == Platform::Migu => Some(
+            tuneweave_core::PasswordLoginContext::new(platform, user_agent)?,
+        ),
+        Some(_) => {
+            return Err(TuneWeaveError::invalid_request(
+                "browser_user_agent is currently supported only for Migu password login",
+            )
+            .with_platform(platform)
+            .into());
+        }
+        None => None,
+    };
     let started_at = Instant::now();
+    let request = PasswordLoginRequest {
+        backend: body.backend,
+        account: account.clone(),
+        principal_type: body.principal_type,
+        principal: body.principal,
+        password: body.password,
+        password_format: body.password_format,
+        country_code: optional_trimmed(body.country_code),
+        secure_captcha: optional_trimmed(body.secure_captcha),
+    };
+    let reservation = state.auth_transactions.reserve_password(
+        platform,
+        body.credential_mode,
+        PasswordLoginIdentity::from(&request),
+    )?;
     let result = match provider
-        .password_login_with_mode(
-            &PasswordLoginRequest {
-                account: account.clone(),
-                principal_type: body.principal_type,
-                principal: body.principal,
-                password: body.password,
-                password_format: body.password_format,
-                country_code: optional_trimmed(body.country_code),
-                secure_captcha: optional_trimmed(body.secure_captcha),
-            },
-            body.credential_mode,
-        )
+        .begin_password_login_with_context(&request, browser_context.as_ref(), body.credential_mode)
         .await
     {
-        Ok(result) => result,
+        Ok(PasswordLoginProgress::Confirmed(result)) => result,
+        Ok(PasswordLoginProgress::Pending {
+            challenge,
+            verification,
+        }) => {
+            let transaction_id = reservation.publish_password(challenge)?;
+            return Ok(auth_json_response(
+                auth_api_response(
+                    AuthPasswordChallengeData {
+                        transaction_id,
+                        state: AuthState::VerificationRequired,
+                        verification,
+                    },
+                    platform,
+                    &account,
+                    body.credential_mode,
+                ),
+                true,
+            ));
+        }
         Err(error) => {
             log_auth_operation_failure(
                 AuthOperation::PasswordLogin,
@@ -13133,6 +14350,12 @@ async fn auth_password(
             return Err(error.into());
         }
     };
+    if result.profile.account != account || !result.profile.authenticated {
+        return Err(auth_provider_contract_error(
+            "password login did not confirm the selected account",
+        )
+        .into());
+    }
     let data = match finalize_auth_result(platform, body.credential_mode, result) {
         Ok(data) => data,
         Err(error) => {
@@ -13146,6 +14369,7 @@ async fn auth_password(
             return Err(error.into());
         }
     };
+    reservation.finish()?;
     log_auth_operation_success(
         AuthOperation::PasswordLogin,
         platform,
@@ -13179,10 +14403,16 @@ struct AuthChallengeStartBody {
     country_code: Option<Value>,
     #[serde(default)]
     credential_mode: CredentialMode,
+    #[serde(default)]
+    allow_account_creation: bool,
+    #[serde(default)]
+    accept_platform_policies: bool,
 }
 
 #[derive(Serialize)]
 struct AuthChallengeStartData {
+    #[serde(flatten)]
+    status: AuthChallengeStatus,
     transaction_id: String,
     method: ChallengeMethod,
     backend: AuthChallengeBackend,
@@ -13192,6 +14422,7 @@ async fn auth_challenge_start(
     State(state): State<AppState>,
     payload: Result<Json<AuthChallengeStartBody>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AuthChallengeStartData>>, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
     let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
@@ -13204,21 +14435,40 @@ async fn auth_challenge_start(
     let method = body.method.unwrap_or(ChallengeMethod::Sms);
     let provider = state.registry.require(platform)?;
     let request = AuthChallengeRequest {
+        allow_account_creation: body.allow_account_creation,
+        accept_platform_policies: body.accept_platform_policies,
         account: account.clone(),
         method,
         backend: body.backend,
         principal,
         country_code: Some(country_code),
     };
-    provider
-        .start_auth_challenge_with_mode(&request, body.credential_mode)
-        .await?;
-    let transaction_id = state.auth_transactions.insert(StoredAuthKind::Challenge {
+    let policies_required =
+        platform == Platform::Kuwo && request.backend == AuthChallengeBackend::Middle;
+    if request.accept_platform_policies != policies_required {
+        return Err(TuneWeaveError::invalid_request(if policies_required {
+            "Kuwo Web SMS requires explicit acceptance of its platform policies"
+        } else {
+            "accept_platform_policies is only supported by Kuwo Web SMS"
+        })
+        .with_platform(platform)
+        .into());
+    }
+    if !matches!(platform, Platform::Kuwo | Platform::Kugou) {
+        request.reject_account_creation_option(platform)?;
+    }
+    let reservation = state.auth_transactions.reserve_challenge(
         platform,
-        credential_mode: body.credential_mode,
-        request,
-    })?;
+        body.credential_mode,
+        request.clone(),
+    )?;
+    let challenge = provider
+        .begin_auth_challenge(&request, body.credential_mode)
+        .await?;
+    let status = provider.auth_challenge_status(&challenge).await?;
+    let transaction_id = reservation.publish(challenge)?;
     let data = AuthChallengeStartData {
+        status,
         transaction_id,
         method,
         backend: body.backend,
@@ -13278,9 +14528,31 @@ async fn auth_security_challenge_start(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AuthChallengeVerifyBody {
+struct LegacyAuthChallengeVerifyBody {
     #[serde(alias = "captcha")]
     code: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AuthChallengeVerifyBody {
+    Action(AuthChallengeAction),
+    Legacy(LegacyAuthChallengeVerifyBody),
+}
+impl AuthChallengeVerifyBody {
+    fn action(self) -> tuneweave_core::Result<AuthChallengeAction> {
+        match self {
+            Self::Action(AuthChallengeAction::SubmitCode { code }) => {
+                Ok(AuthChallengeAction::SubmitCode {
+                    code: required_string_or_number("code", &Value::String(code))?,
+                })
+            }
+            Self::Action(action) => Ok(action),
+            Self::Legacy(body) => Ok(AuthChallengeAction::SubmitCode {
+                code: required_string_or_number("code", &body.code)?,
+            }),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -13367,6 +14639,8 @@ async fn auth_challenge_validate(
     let validation = provider
         .validate_auth_challenge(
             &AuthChallengeRequest {
+                allow_account_creation: false,
+                accept_platform_policies: false,
                 account: account.clone(),
                 method: body.method.unwrap_or(ChallengeMethod::Sms),
                 backend: AuthChallengeBackend::Standard,
@@ -13388,28 +14662,53 @@ async fn auth_challenge_verify(
     Path(transaction_id): Path<String>,
     payload: Result<Json<AuthChallengeVerifyBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
-    let code = required_string_or_number("code", &body.code)?;
-    let stored = state.auth_transactions.get(&transaction_id)?;
+    let action = body.action()?;
+    let (stored, lease) = state.auth_transactions.claim_challenge(&transaction_id)?;
     let StoredAuthKind::Challenge {
         platform,
         credential_mode,
         request,
+        provider_challenge: Some(challenge),
+        ..
     } = &stored.kind
     else {
         return Err(auth_transaction_not_found().into());
     };
     let provider = state.registry.require(*platform)?;
-    let result = match provider
-        .verify_auth_challenge_with_mode(request, &code, *credential_mode)
-        .await
-    {
+    let result = match provider.advance_auth_challenge(challenge, &action).await {
         Ok(result) => result,
         Err(error) => {
             log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+            if !error.auth_challenge_consumed()
+                && !matches!(
+                    error.code,
+                    ErrorCode::ResourceNotFound | ErrorCode::Conflict
+                )
+            {
+                lease.retry()?;
+            }
             return Err(error.into());
         }
     };
+    let result = match result {
+        AuthChallengeProgress::Pending(status) => {
+            lease.retry()?;
+            return Ok(auth_json_response(
+                auth_api_response(status, *platform, &request.account, *credential_mode),
+                true,
+            ));
+        }
+        AuthChallengeProgress::Confirmed(result) => result,
+    };
+    if result.profile.account != request.account || !result.profile.authenticated {
+        let error = auth_provider_contract_error(
+            "challenge verification did not confirm the selected account",
+        );
+        log_auth_transaction_attempt_failure(&transaction_id, &stored, &error);
+        return Err(error.into());
+    }
     let result = match finalize_auth_result(*platform, *credential_mode, result) {
         Ok(result) => result,
         Err(error) => {
@@ -13417,9 +14716,7 @@ async fn auth_challenge_verify(
             return Err(error.into());
         }
     };
-    if let Some(transaction) = state.auth_transactions.remove(&transaction_id)? {
-        log_auth_transaction_completed(&transaction_id, &transaction, AuthState::Confirmed);
-    }
+    lease.finish()?;
     let account = request.account.clone();
     Ok(auth_json_response(
         auth_api_response(
@@ -13446,7 +14743,7 @@ async fn auth_session_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthSessionParams>,
-) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let platform = parse_platform_parameter(&params.platform)?;
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
@@ -13458,11 +14755,18 @@ async fn auth_session_get(
         .provider_account
         .expect("default account selection always yields an account");
     let profile = access.provider.session_profile(&account).await?;
-    let mut response = ApiResponse::new(profile).with_platform(platform);
+    let credential = finalize_read_credential(
+        platform,
+        access.response_account.is_none(),
+        access.provider.take_response_credential()?,
+    )?;
+    let mut response = ApiResponse::new(profile)
+        .with_platform(platform)
+        .with_caller_credential(credential);
     if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
-    Ok(Json(response))
+    Ok(auth_json_response(response, true))
 }
 
 #[derive(Deserialize)]
@@ -13477,6 +14781,7 @@ async fn auth_session_refresh(
     headers: HeaderMap,
     payload: Result<Json<AuthSessionBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
     let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
@@ -13509,7 +14814,7 @@ async fn auth_session_refresh(
                 started_at,
                 &error,
             );
-            return Err(error.into());
+            return Err(auth_refresh_error(error, platform, credential_mode));
         }
     };
     let data = match finalize_auth_result(platform, credential_mode, result) {
@@ -13535,7 +14840,7 @@ async fn auth_session_refresh(
     );
     Ok(auth_json_response(
         auth_api_response(data, platform, &account, credential_mode),
-        credential_mode.returns_to_caller(),
+        true,
     ))
 }
 
@@ -13556,7 +14861,7 @@ async fn auth_session_delete(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AuthSessionDeleteParams>,
-) -> Result<Json<ApiResponse<AuthSessionDeleteData>>, ApiError> {
+) -> Result<Response, ApiError> {
     let platform = parse_platform_parameter(&params.platform)?;
     let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let source_credential = caller_credentials.single_credential_for(platform)?;
@@ -13599,15 +14904,18 @@ async fn auth_session_delete(
         Some(result.removed),
         Some(result.caller_credential_discard_required),
     );
-    Ok(Json(auth_api_response(
-        AuthSessionDeleteData {
-            removed: result.removed,
-            caller_credential_discard_required: result.caller_credential_discard_required,
-        },
-        platform,
-        &account,
-        credential_mode,
-    )))
+    Ok(auth_json_response(
+        auth_api_response(
+            AuthSessionDeleteData {
+                removed: result.removed,
+                caller_credential_discard_required: result.caller_credential_discard_required,
+            },
+            platform,
+            &account,
+            credential_mode,
+        ),
+        true,
+    ))
 }
 
 #[derive(Default, Deserialize)]
@@ -14910,7 +16218,7 @@ async fn account_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AccountQuery>,
-) -> Result<Json<ApiResponse<AccountProfile>>, ApiError> {
+) -> Result<Response, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
         &state,
@@ -14931,28 +16239,34 @@ async fn account_profile(
         .with_details(json!({ "account": account }))
         .into());
     }
-    let mut response = ApiResponse::new(profile).with_platform(platform);
+    let credential = finalize_read_credential(
+        platform,
+        access.response_account.is_none(),
+        access.provider.take_response_credential()?,
+    )?;
+    let mut response = ApiResponse::new(profile)
+        .with_platform(platform)
+        .with_caller_credential(credential);
     if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
-    Ok(Json(response))
+    Ok(auth_json_response(response, true))
 }
 
 async fn account_playlists(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<AccountQuery>,
-) -> Result<Json<ApiResponse<Vec<Playlist>>>, ApiError> {
+) -> Result<Response, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
-    let account = access
-        .provider_account
-        .expect("default account selection always yields an account");
+    let account = access.required_account();
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 30)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
@@ -14963,16 +16277,23 @@ async fn account_playlists(
         .account_playlists(&PageRequest {
             limit,
             offset,
-            account: Some(account.clone()),
+            account: Some(account.to_owned()),
         })
-        .await?;
+        .await;
+    let (page, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        caller_credentials.credentials.contains_key(&platform),
+        page,
+    )?;
     let mut response = ApiResponse::new(page.items)
         .with_platform(platform)
+        .with_caller_credential(credential)
         .with_pagination(page.pagination);
     if let Some(account) = access.response_account {
         response = response.with_account(account);
     }
-    Ok(Json(response))
+    Ok(auth_json_response(response, true))
 }
 
 async fn account_albums(
@@ -14981,7 +16302,8 @@ async fn account_albums(
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let access = credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -14999,10 +16321,17 @@ async fn account_albums(
             offset,
             account: Some(access.required_account().to_owned()),
         })
-        .await?;
+        .await;
+    let (page, credential) = finish_account_operation(
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        page,
+    )?;
     Ok(Json(
         access
             .response(page.items, platform)
+            .with_caller_credential(credential)
             .with_pagination(page.pagination),
     ))
 }
@@ -15841,7 +17170,10 @@ async fn account_favorite_playlist(
 ) -> Result<Json<ApiResponse<Playlist>>, ApiError> {
     let params = query_params(params)?;
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    caller_scope::mark_sensitive();
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -15850,8 +17182,14 @@ async fn account_favorite_playlist(
     let playlist = access
         .provider
         .favorite_playlist(Some(access.required_account()))
-        .await?;
-    Ok(Json(access.response(playlist, platform)))
+        .await;
+    let (playlist, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, playlist)?;
+    Ok(Json(
+        access
+            .response(playlist, platform)
+            .with_caller_credential(credential),
+    ))
 }
 
 async fn account_favorite_tracks(
@@ -15860,7 +17198,10 @@ async fn account_favorite_tracks(
     Query(params): Query<AccountQuery>,
 ) -> Result<Json<ApiResponse<Vec<Track>>>, ApiError> {
     let platform = account_platform(&state, params.platform.as_deref())?;
-    let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
+    let caller_credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let caller_managed = caller_credentials.credentials.contains_key(&platform);
+    caller_scope::mark_sensitive();
+    let access = caller_credentials.select_provider(
         &state,
         platform,
         params.account.as_deref(),
@@ -15878,10 +17219,13 @@ async fn account_favorite_tracks(
             offset,
             account: Some(access.required_account().to_owned()),
         })
-        .await?;
+        .await;
+    let (page, credential) =
+        finish_account_operation(access.provider.as_ref(), platform, caller_managed, page)?;
     Ok(Json(
         access
             .response(page.items, platform)
+            .with_caller_credential(credential)
             .with_pagination(page.pagination),
     ))
 }
@@ -16742,6 +18086,37 @@ fn record_auth_session_provider_access(
     );
 }
 
+fn auth_refresh_error(
+    mut error: TuneWeaveError,
+    platform: Platform,
+    mode: CredentialMode,
+) -> ApiError {
+    let Some(update) = error.take_caller_credential_update() else {
+        return error.into();
+    };
+    let invalid_update = || {
+        caller_scope::invalidate(Some(platform));
+        ApiError::from(auth_provider_contract_error(
+            "account operation returned an invalid credential update",
+        ))
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return invalid_update();
+    };
+    if !mode.returns_to_caller()
+        || error.platform != Some(platform)
+        || update.platform != platform
+        || update.is_expired_at(now.as_secs())
+    {
+        return invalid_update();
+    }
+    let Ok(update) = CallerCredential::issue(&update) else {
+        return invalid_update();
+    };
+    // Preserve the error result and deliver only a typed, ownership-checked update.
+    ApiError::from(error).with_caller_credential(Some(update))
+}
+
 fn finalize_auth_result(
     platform: Platform,
     credential_mode: CredentialMode,
@@ -16758,6 +18133,72 @@ fn finalize_auth_result(
         profile: result.profile,
         caller_credential,
     })
+}
+
+fn finalize_read_credential(
+    platform: Platform,
+    caller_managed: bool,
+    credential: Option<ProviderCredential>,
+) -> Result<Option<CallerCredential>, TuneWeaveError> {
+    credential
+        .map(|credential| {
+            if !caller_managed {
+                return Err(auth_provider_contract_error(
+                    "server-owned account reads cannot issue caller credentials",
+                ));
+            }
+            if credential.platform != platform {
+                return Err(auth_provider_contract_error(
+                    "rotated credential platform does not match the request",
+                ));
+            }
+            CallerCredential::issue(&credential)
+        })
+        .transpose()
+}
+
+fn finish_account_operation<T>(
+    provider: &dyn MusicProvider,
+    platform: Platform,
+    caller_managed: bool,
+    result: tuneweave_core::Result<T>,
+) -> Result<(T, Option<CallerCredential>), ApiError> {
+    let credential = finalize_read_credential(
+        platform,
+        caller_managed,
+        provider.take_response_credential()?,
+    )?;
+    match result {
+        Ok(data) => Ok((data, credential)),
+        Err(mut error) => {
+            // A successful earlier subrequest may rotate a cookie before a later page
+            // fails. Preserve that update unless the session itself is invalid or replaced.
+            // Some providers clear their pending response on every failed read and
+            // instead attach the last verified update privately to this exact error.
+            // That update supersedes an earlier pending one, with the same platform,
+            // expiry and ownership checks used for explicit session refresh.
+            if let Some(update) = error.take_caller_credential_update() {
+                return Err(auth_refresh_error(
+                    error.with_caller_credential_update(update),
+                    platform,
+                    if caller_managed {
+                        CredentialMode::Client
+                    } else {
+                        CredentialMode::Server
+                    },
+                ));
+            }
+            let credential = if matches!(
+                error.code,
+                ErrorCode::AuthenticationRequired | ErrorCode::Conflict
+            ) {
+                None
+            } else {
+                credential
+            };
+            Err(ApiError::from(error).with_caller_credential(credential))
+        }
+    }
 }
 
 fn finalize_qr_credential(
@@ -17126,17 +18567,19 @@ fn parse_quality(value: Option<&str>) -> Result<Quality, TuneWeaveError> {
         "high" | "exhigh" => Ok(Quality::High),
         "lossless" => Ok(Quality::Lossless),
         "hires" | "hi_res" => Ok(Quality::Hires),
+        "dtsx" => Ok(Quality::Dtsx),
         "surround" | "jyeffect" => Ok(Quality::Surround),
         "spatial" | "sky" => Ok(Quality::Spatial),
         "dolby" | "atmos" => Ok(Quality::Dolby),
         "master" | "jymaster" => Ok(Quality::Master),
         "vivid" => Ok(Quality::Vivid),
+        "vinyl" => Ok(Quality::Vinyl),
         value => Err(
             TuneWeaveError::invalid_request(format!("unsupported quality: {value}")).with_details(
                 json!({
                     "allowed": [
                         "auto", "low", "standard", "higher", "high", "lossless", "hires",
-                        "surround", "spatial", "dolby", "master"
+                        "surround", "dtsx", "spatial", "dolby", "master", "vivid", "vinyl"
                     ]
                 }),
             ),
@@ -17207,10 +18650,11 @@ fn parse_stream_variant(value: Option<&str>) -> Result<StreamVariant, TuneWeaveE
         "default" | "auto" => Ok(StreamVariant::Default),
         "legacy" | "old" | "v0" | "song_url" => Ok(StreamVariant::Legacy),
         "modern" | "new" | "v1" | "song_url_v1" => Ok(StreamVariant::Modern),
+        "sing_along" => Ok(StreamVariant::SingAlong),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported stream variant: {value}"
         ))
-        .with_details(json!({ "allowed": ["default", "legacy", "modern"] }))),
+        .with_details(json!({ "allowed": ["default", "legacy", "modern", "sing_along"] }))),
     }
 }
 
@@ -17272,6 +18716,7 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
         "western" => Ok(ArtistArea::Western),
         "japanese" => Ok(ArtistArea::Japanese),
         "korean" => Ok(ArtistArea::Korean),
+        "japanese_korean" => Ok(ArtistArea::JapaneseKorean),
         "other" => Ok(ArtistArea::Other),
         value => Err(
             TuneWeaveError::invalid_request(format!("unsupported artist area: {value}"))
@@ -17283,6 +18728,7 @@ fn parse_artist_area(value: Option<&str>) -> Result<ArtistArea, TuneWeaveError> 
                         "western",
                         "japanese",
                         "korean",
+                        "japanese_korean",
                         "other"
                     ]
                 })),
@@ -17489,11 +18935,17 @@ fn parse_video_resource_kind(
     id: &str,
 ) -> Result<VideoResourceKind, TuneWeaveError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(if id.chars().all(|character| character.is_ascii_digit()) {
-            VideoResourceKind::Mv
-        } else {
-            VideoResourceKind::Video
-        });
+        let numeric_id = id.strip_prefix("mv:").unwrap_or(id);
+        return Ok(
+            if numeric_id
+                .chars()
+                .all(|character| character.is_ascii_digit())
+            {
+                VideoResourceKind::Mv
+            } else {
+                VideoResourceKind::Video
+            },
+        );
     };
     match value.to_ascii_lowercase().replace('-', "_").as_str() {
         "mv" | "music_video" | "0" => Ok(VideoResourceKind::Mv),
@@ -17509,10 +18961,11 @@ fn parse_artist_track_order(value: Option<&str>) -> Result<ArtistTrackOrder, Tun
     match value.unwrap_or("hot").trim().to_ascii_lowercase().as_str() {
         "hot" => Ok(ArtistTrackOrder::Hot),
         "time" => Ok(ArtistTrackOrder::Time),
+        "platform_default" => Ok(ArtistTrackOrder::PlatformDefault),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported artist track order: {value}"
         ))
-        .with_details(json!({ "allowed": ["hot", "time"] }))),
+        .with_details(json!({ "allowed": ["hot", "time", "platform_default"] }))),
     }
 }
 
@@ -17721,6 +19174,7 @@ fn parse_search_selectors(value: Option<&str>) -> Result<Vec<SearchSelector>, Tu
 }
 
 fn parse_video_search_filters(
+    platform: Platform,
     kind: SearchKind,
     order: Option<&str>,
     duration: Option<&str>,
@@ -17729,9 +19183,9 @@ fn parse_video_search_filters(
     if order.is_none() && duration.is_none() && category_id.is_none() {
         return Ok(None);
     }
-    if kind != SearchKind::Video {
+    if kind != SearchKind::Video && !(platform == Platform::Migu && kind == SearchKind::Mv) {
         return Err(TuneWeaveError::invalid_request(
-            "order, duration, and category_id are only valid for video search",
+            "order, duration, and category_id require video search or supported Migu MV search",
         ));
     }
     let order = match order
@@ -17915,6 +19369,7 @@ fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeav
             Ok(PodcastCatalog::CategoryFeatured)
         }
         "category_hot" => Ok(PodcastCatalog::CategoryHot),
+        "category_newest" | "category_recent" => Ok(PodcastCatalog::CategoryNewest),
         "personalized" | "personalize" => Ok(PodcastCatalog::Personalized),
         "today_preferred" | "today" => Ok(PodcastCatalog::TodayPreferred),
         "paid" | "paygift" => Ok(PodcastCatalog::Paid),
@@ -17926,6 +19381,7 @@ fn parse_podcast_catalog(value: Option<&str>) -> Result<PodcastCatalog, TuneWeav
                         "hot",
                         "category_featured",
                         "category_hot",
+                        "category_newest",
                         "personalized",
                         "today_preferred",
                         "paid"
@@ -18142,6 +19598,53 @@ fn parse_optional_u16_parameter(
 
 #[cfg(test)]
 mod tests {
+    mod account_playlist_imports;
+    mod account_suggestions;
+    mod album_collection_imports;
+    mod artist_catalog;
+    mod auth_challenges;
+    mod cloud_transfers;
+    mod digital_album_tracks;
+    mod kugou_auth;
+    mod kugou_chart_history;
+    mod kugou_library;
+    mod kugou_media;
+    mod kugou_membership;
+    mod kugou_sms;
+    mod kugou_videos;
+    mod kuwo_anchor;
+    mod kuwo_charts;
+    mod kuwo_favorites;
+    mod kuwo_management;
+    mod kuwo_media;
+    mod kuwo_mv_search;
+    mod kuwo_playlist_catalog;
+    mod kuwo_playlists;
+    mod kuwo_radio;
+    mod kuwo_session_revocation;
+    mod kuwo_submissions;
+    mod kuwo_videos;
+    mod migu_account_playlists;
+    mod migu_album_collections;
+    mod migu_chart_history;
+    mod migu_charts;
+    mod migu_library;
+    mod migu_media;
+    mod migu_membership;
+    mod migu_profile;
+    mod migu_purchases;
+    mod migu_video_playback;
+    mod migu_videos;
+    mod password_challenges;
+    mod session_rotation;
+    mod soda_account_artist;
+    mod soda_account_artist_detail;
+    mod soda_account_search;
+    mod soda_auth_generation;
+    mod soda_membership;
+    mod soda_playlist_create;
+    mod soda_session_revocation;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         io::{Read, Write},
@@ -18163,14 +19666,16 @@ mod tests {
         ArtistHomepageTabMetadata, ArtistSummary, ArtistWorkKind, AudioCdnNode, AudioFileAccess,
         AudioRecognitionMatch, BannerTargetKind, Chart, ChartGroup, ChartTrackPreview,
         CommentMutationAction, CommentReplyReference, CommentThreadStats, CreatorSummary,
-        DimensionChartTrackEntry, MultiStyleLyricTranslation, MusicGeneAttribute,
-        MusicGeneListeningPeriod, MusicGeneListeningReport, MusicGenePreferences, MusicProvider,
-        Page, PageMeta, PodcastCategory, PodcastCategoryRecommendation, ProviderLogoutResult,
-        ProviderQrStart, RadioCatalogOption, RadioPlaybackItem, RadioStyle, RadioStyleSource,
-        RelatedPlaylistSection, RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic,
-        SimilarTrackSection, SimilarTrackSectionKind, StreamRequest, TrackCredit, TrackCreditGroup,
-        TrackLabel, VideoDynamicRange, VideoPlaybackFormat, VideoPlaybackProgressiveSegment,
-        VideoPlaybackSegmentBase, VideoPlaybackTrack, VideoPlaybackTrackKind, VideoResolution,
+        DimensionChartTrackEntry, MembershipSummary, MultiStyleLyricTranslation,
+        MusicGeneAttribute, MusicGeneListeningPeriod, MusicGeneListeningReport,
+        MusicGenePreferences, MusicProvider, Page, PageMeta, PodcastCategory,
+        PodcastCategoryRecommendation, ProviderLogoutResult, ProviderQrStart, RadioCatalogOption,
+        RadioPlaybackItem, RadioStyle, RadioStyleSource, RelatedPlaylistSection,
+        RelatedPlaylistSectionKind, Result, SearchQuery, SheetMusic, SimilarTrackSection,
+        SimilarTrackSectionKind, StreamRequest, TrackAvailability, TrackCredit, TrackCreditGroup,
+        TrackLabel, UserProfile, VideoDynamicRange, VideoPlaybackFormat,
+        VideoPlaybackProgressiveSegment, VideoPlaybackSegmentBase, VideoPlaybackTrack,
+        VideoPlaybackTrackKind, VideoResolution,
     };
     use tuneweave_provider_qq::{QqConfig, QqProvider};
 
@@ -18375,7 +19880,11 @@ mod tests {
                     kind: StoredAuthKind::Challenge {
                         platform: Platform::Netease,
                         credential_mode: CredentialMode::Client,
+                        provider_challenge: None,
+                        verifying: false,
                         request: AuthChallengeRequest {
+                            allow_account_creation: false,
+                            accept_platform_policies: false,
                             account: "private-account-alias".to_owned(),
                             method: ChallengeMethod::Sms,
                             backend: AuthChallengeBackend::Standard,
@@ -18423,7 +19932,11 @@ mod tests {
             .insert(StoredAuthKind::Challenge {
                 platform: Platform::Netease,
                 credential_mode: CredentialMode::Client,
+                provider_challenge: None,
+                verifying: false,
                 request: AuthChallengeRequest {
+                    allow_account_creation: false,
+                    accept_platform_policies: false,
                     account: "private-sms-account".to_owned(),
                     method: ChallengeMethod::Sms,
                     backend: AuthChallengeBackend::Standard,
@@ -18441,6 +19954,7 @@ mod tests {
                 auth_transactions: 2,
                 qr_auth_transactions: 1,
                 sms_auth_transactions: 1,
+                password_auth_transactions: 0,
             }
         );
 
@@ -19443,10 +20957,11 @@ mod tests {
             let today_preferred = request.catalog == PodcastCatalog::TodayPreferred;
             let category_featured = request.catalog == PodcastCatalog::CategoryFeatured;
             let category_hot = request.catalog == PodcastCatalog::CategoryHot;
+            let category_newest = request.catalog == PodcastCatalog::CategoryNewest;
             let hot = request.catalog == PodcastCatalog::Hot;
             let paid = request.catalog == PodcastCatalog::Paid;
-            let paged = hot || category_hot || paid;
-            let category_valid = if category_featured || category_hot {
+            let paged = hot || category_hot || category_newest || paid;
+            let category_valid = if category_featured || category_hot || category_newest {
                 request.category_id.is_some()
             } else {
                 request.category_id.is_none()
@@ -19458,6 +20973,7 @@ mod tests {
                     | PodcastCatalog::Hot
                     | PodcastCatalog::CategoryFeatured
                     | PodcastCatalog::CategoryHot
+                    | PodcastCatalog::CategoryNewest
                     | PodcastCatalog::Personalized
                     | PodcastCatalog::TodayPreferred
                     | PodcastCatalog::Paid
@@ -19467,7 +20983,7 @@ mod tests {
                     && request.offset != 0)
             {
                 return Err(TuneWeaveError::invalid_request(
-                    "test provider only supports featured, hot, category featured, category hot, personalized, today preferred, and paid podcast catalogs",
+                    "test provider only supports featured, hot, category featured, category hot, category newest, personalized, today preferred, and paid podcast catalogs",
                 ));
             }
             let mut podcast = sample_podcast("336355127");
@@ -19486,7 +21002,13 @@ mod tests {
                 ("returned_count".to_owned(), json!(1)),
                 (
                     "limit_applied".to_owned(),
-                    json!(!featured && !category_featured && !category_hot && !today_preferred),
+                    json!(
+                        !featured
+                            && !category_featured
+                            && !category_hot
+                            && !category_newest
+                            && !today_preferred
+                    ),
                 ),
                 (
                     "response".to_owned(),
@@ -19500,7 +21022,7 @@ mod tests {
                         json!({"code": 200, "data": {"hasMore": true, "list": [{"id": 336355127}]}})
                     } else if category_featured {
                         json!({"code": 200, "hasMore": true})
-                    } else if category_hot {
+                    } else if category_hot || category_newest {
                         json!({"code": 200, "count": 1000, "hasMore": true})
                     } else {
                         json!({"code": 200, "hasMore": true})
@@ -19525,12 +21047,12 @@ mod tests {
                     offset: request.offset,
                     total: if featured {
                         Some(1)
-                    } else if category_hot {
+                    } else if category_hot || category_newest {
                         Some(1000)
                     } else {
                         None
                     },
-                    next_offset: if category_hot {
+                    next_offset: if category_hot || category_newest {
                         Some(request.offset.saturating_add(request.limit))
                     } else {
                         paged.then_some(request.offset.saturating_add(1))
@@ -20816,6 +22338,7 @@ mod tests {
                 height: Some(request.resolution),
                 size: Some(177_950_120),
                 duration_ms: Some(266_000),
+                source_range: None,
                 requested_resolution: request.resolution,
                 actual_resolution: available.then_some(request.resolution),
                 platform_code: Some(if available { 200 } else { 404 }),
@@ -21989,6 +23512,7 @@ mod tests {
                             StreamVariant::Default => "default",
                             StreamVariant::Legacy => "legacy",
                             StreamVariant::Modern => "modern",
+                            StreamVariant::SingAlong => "sing_along",
                         }
                         .to_owned(),
                     ),
@@ -22052,6 +23576,7 @@ mod tests {
                 bytes,
                 content_type: "audio/mpeg".to_owned(),
                 filename: format!("netease-{}.mp3", track.id),
+                trial: None,
             })
         }
 
@@ -22112,6 +23637,7 @@ mod tests {
         ) -> Result<tuneweave_core::ProviderQrPoll> {
             assert_eq!(provider_transaction_id, "provider-qr-key");
             Ok(tuneweave_core::ProviderQrPoll {
+                verification: None,
                 state: AuthState::Confirmed,
                 message: None,
                 profile: Some(AccountProfile::authenticated(Platform::Netease, account)),
@@ -22823,6 +24349,7 @@ mod tests {
                 height: Some(720),
                 size: None,
                 duration_ms: Some(266_000),
+                source_range: None,
                 requested_resolution: request.resolution,
                 actual_resolution: Some(720),
                 platform_code: Some(64),
@@ -24886,6 +26413,7 @@ mod tests {
             height: Some(480),
             size: Some(4_096),
             duration_ms: Some(15_000),
+            source_range: None,
             requested_resolution: request.resolution,
             actual_resolution: Some(480),
             platform_code: Some(0),
@@ -27497,6 +29025,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn category_newest_podcast_catalog_routes_and_preserves_sort_choice() {
+        let (status, json) = json_response_from(
+            test_app_with_provider(),
+            "/v1/podcasts?catalog=category_newest&categoryId=2&limit=3&offset=6&platform=netease&account=podcast-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["data"][0]["extensions"]["request"]["catalog"],
+            "category_newest"
+        );
+        assert_eq!(json["data"][0]["extensions"]["request"]["category_id"], "2");
+        assert_eq!(
+            json["meta"]["pagination"]["extensions"]["catalog"],
+            "category_newest"
+        );
+        assert_eq!(json["meta"]["pagination"]["next_offset"], 9);
+    }
+
+    #[tokio::test]
     async fn category_featured_podcast_catalog_exposes_known_more_without_fake_cursor() {
         let (status, json) = json_response_from(
             test_app_with_provider(),
@@ -27605,6 +29153,7 @@ mod tests {
             "/v1/podcasts?catalog=personalized&offset=1",
             "/v1/podcasts?catalog=personalized&category_id=2",
             "/v1/podcasts?catalog=category_hot",
+            "/v1/podcasts?catalog=category_newest",
             "/v1/podcasts?catalog=category_featured",
             "/v1/podcasts?catalog=category_featured&category_id=2&offset=1",
             "/v1/podcasts?catalog=today&offset=1",
@@ -30619,6 +32168,89 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires official anonymous Soda artist metadata; no account or media is used"]
+    async fn live_soda_artist_catalogue_flows_through_existing_tracks_and_albums_routes() {
+        use tuneweave_provider_soda::{SodaConfig, SodaProvider};
+
+        for (kind, extra) in [("tracks", "&order=platform_default"), ("albums", "")] {
+            let mut registry = ProviderRegistry::new();
+            registry
+                .register(SodaProvider::new(SodaConfig::default()).unwrap())
+                .unwrap();
+            let app = build_router(AppState::new(registry, Platform::Soda));
+            let (status, response) = json_response_from(
+                app,
+                &format!("/v1/artists/soda:6754918579642042369/{kind}?limit=3&offset=1{extra}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{kind}: {response}");
+            assert_eq!(response["data"].as_array().unwrap().len(), 3);
+            assert_eq!(
+                response["meta"]["pagination"]["extensions"]["complete_read"],
+                true
+            );
+            assert_eq!(response["meta"]["pagination"]["next_offset"], 4);
+            assert!(
+                response["meta"]["pagination"]["total"]
+                    .as_u64()
+                    .is_some_and(|n| n > 4)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn soda_suggestions_http_rejects_unsupported_clients_and_missing_account() {
+        use tuneweave_provider_soda::{SodaConfig, SodaProvider};
+
+        for (query, code) in [
+            ("client=pc&account=default", "authentication_required"),
+            ("client=web", "capability_not_supported"),
+            ("client=mobile&account=default", "authentication_required"),
+            ("", "capability_not_supported"),
+        ] {
+            let mut registry = ProviderRegistry::new();
+            registry
+                .register(SodaProvider::new(SodaConfig::default()).unwrap())
+                .unwrap();
+            let app = build_router(AppState::new(registry, Platform::Soda));
+            let (_, response) = json_response_from(
+                app,
+                &format!("/v1/search/suggestions?platform=soda&q=test&{query}"),
+            )
+            .await;
+            assert_eq!(response["error"]["code"], code, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires official anonymous Soda PC/mobile suggestions; no account is used"]
+    async fn live_soda_suggestions_flow_through_unified_http() {
+        use tuneweave_provider_soda::{SodaConfig, SodaProvider};
+
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(SodaProvider::new(SodaConfig::default()).unwrap())
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Soda));
+        for client in ["pc", "mobile"] {
+            let (status, response) = json_response_from(
+                app.clone(),
+                &format!("/v1/search/suggestions?platform=soda&client={client}&q=%E5%91%A8%E6%9D%B0%E4%BC%A6"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{client}: {response}");
+            assert_eq!(response["data"]["client"], client);
+            assert_eq!(response["data"]["extensions"]["authenticated"], false);
+            assert!(
+                response["data"]["suggestions"]
+                    .as_array()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            assert!(response["meta"]["account"].is_null());
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live Bilibili search suggestion access"]
     async fn live_bilibili_search_suggestions_flow_through_unified_http() {
         use tuneweave_provider_bilibili::{BilibiliConfig, BilibiliProvider};
@@ -31694,6 +33326,10 @@ mod tests {
             json_response_from(test_app_with_provider(), "/v1/artists?type=solo&area=mars").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(
+            parse_artist_area(Some("japanese_korean")).expect("known combined area"),
+            ArtistArea::JapaneseKorean
+        );
     }
 
     #[tokio::test]
@@ -35643,6 +37279,7 @@ mod tests {
             ("lossless", Quality::Lossless),
             ("hires", Quality::Hires),
             ("hi_res", Quality::Hires),
+            ("dtsx", Quality::Dtsx),
             ("surround", Quality::Surround),
             ("jyeffect", Quality::Surround),
             ("spatial", Quality::Spatial),
@@ -35651,6 +37288,7 @@ mod tests {
             ("atmos", Quality::Dolby),
             ("master", Quality::Master),
             ("jymaster", Quality::Master),
+            ("vinyl", Quality::Vinyl),
         ] {
             assert_eq!(
                 parse_quality(Some(value)).expect(value),
@@ -35712,6 +37350,8 @@ mod tests {
             ("new", StreamVariant::Modern),
             ("v1", StreamVariant::Modern),
             ("song-url-v1", StreamVariant::Modern),
+            ("sing_along", StreamVariant::SingAlong),
+            ("sing-along", StreamVariant::SingAlong),
         ] {
             assert_eq!(
                 parse_stream_variant(Some(value)).expect(value),
@@ -36868,6 +38508,829 @@ mod tests {
         assert!(!output.contains("must-never-appear"));
     }
 
+    #[tokio::test]
+    async fn credential_import_http_preserves_ownership_and_rejects_alternate_credential_sources() {
+        use tuneweave_core::{CredentialImportRequest, ImportedCredential};
+        struct ImportProvider {
+            platform: Platform,
+            calls: Arc<Mutex<Vec<(String, CredentialMode)>>>,
+        }
+        #[async_trait]
+        impl MusicProvider for ImportProvider {
+            fn platform(&self) -> Platform {
+                self.platform
+            }
+            fn name(&self) -> &'static str {
+                "Import test provider"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([
+                    Capability::CredentialImport,
+                    Capability::CallerManagedCredentials,
+                ])
+            }
+            async fn import_credential(
+                &self,
+                request: &CredentialImportRequest,
+                mode: CredentialMode,
+            ) -> Result<ProviderAuthResult> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((request.account.clone(), mode));
+                let ImportedCredential::Cookie { value } = &request.credential;
+                let mut profile = AccountProfile::authenticated(self.platform, &request.account);
+                profile.user_id = (value != "missing-identity").then(|| "123456".to_owned());
+                if value == "not-authenticated" {
+                    profile.authenticated = false;
+                }
+                Ok(ProviderAuthResult {
+                    profile,
+                    credential: mode
+                        .returns_to_caller()
+                        .then(|| ProviderCredential::new(self.platform, "test", value, None))
+                        .transpose()?,
+                })
+            }
+        }
+        for platform in [Platform::Soda, Platform::Migu] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = ProviderRegistry::new();
+            registry
+                .register(ImportProvider {
+                    platform,
+                    calls: calls.clone(),
+                })
+                .unwrap();
+            let app = build_router(AppState::new(registry, platform));
+            for (mode, account) in [
+                (CredentialMode::Server, Some("personal")),
+                (CredentialMode::Client, None),
+                (CredentialMode::Both, Some("shared")),
+            ] {
+                let body = json!({"platform":platform,"account":account,"credential_mode":mode,"credential":{"kind":"cookie","value":"sessionid_ss=private-import"}});
+                let (status, headers, response) = json_request_with_headers(
+                    app.clone(),
+                    Method::POST,
+                    "/v1/auth/import",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{response}");
+                assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+                assert_eq!(response["data"]["user_id"], "123456");
+                assert_eq!(response["data"]["authenticated"], true);
+                assert_eq!(
+                    response["data"].get("caller_credential").is_some(),
+                    mode.returns_to_caller()
+                );
+                if mode.returns_to_caller() {
+                    let caller = CallerCredential::parse(
+                        response["data"]["caller_credential"]["value"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(caller.secret(), "sessionid_ss=private-import");
+                }
+                assert!(!response.to_string().contains("sessionid_ss=private-import"));
+                assert_eq!(
+                    response["meta"].get("account").is_some(),
+                    mode.persists_on_server()
+                );
+            }
+            assert_eq!(
+                *calls.lock().unwrap(),
+                vec![
+                    ("personal".to_owned(), CredentialMode::Server),
+                    ("default".to_owned(), CredentialMode::Client),
+                    ("shared".to_owned(), CredentialMode::Both)
+                ]
+            );
+            for body in [
+                json!({"platform":platform,"credential":{"kind":"cookie","value":"a=b","generation":"override"}}),
+                json!({"platform":platform,"credential":{"kind":"cookie","value":"a=b"},"url":"https://example.test"}),
+                json!({"platform":platform,"credential":{"kind":"cookie","value":"a=b"},"credential_mode":"client","account":"other"}),
+                json!({"platform":platform,"credential":{"kind":"cookie","value":"x".repeat(65536)}}),
+            ] {
+                let (status, _) =
+                    json_request_from(app.clone(), Method::POST, "/v1/auth/import", Some(body))
+                        .await;
+                assert!(status.is_client_error());
+            }
+            let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/auth/import")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(CALLER_CREDENTIAL_HEADER, "alternate-credential")
+                    .body(Body::from(
+                        json!({"platform":platform,"credential":{"kind":"cookie","value":"a=b"}})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(response.status().is_client_error());
+            assert_eq!(calls.lock().unwrap().len(), 3);
+            for value in ["missing-identity", "not-authenticated"] {
+                let (status, response) = json_request_from(app.clone(), Method::POST, "/v1/auth/import", Some(json!({"platform":platform,"credential_mode":"client","credential":{"kind":"cookie","value":value}}))).await;
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(response["error"]["code"], "internal_error");
+                assert!(response.get("data").is_none());
+                assert!(!response.to_string().contains(value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn migu_account_routes_reach_the_provider_and_reject_invalid_sources_without_network() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(
+                tuneweave_provider_migu::MiguProvider::new(
+                    tuneweave_provider_migu::MiguConfig::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Migu));
+        let (status, headers, value) = json_request_with_headers(
+            app.clone(),
+            Method::GET,
+            "/v1/auth/session?platform=migu",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(value["data"]["authenticated"], false);
+        assert_eq!(value["data"]["platform"], "migu");
+        let (status, _) = json_request_from(
+            app.clone(),
+            Method::GET,
+            "/v1/account/profile?platform=migu",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/session/refresh",
+            Some(json!({"platform":"migu","account":"missing"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, value) = json_request_from(
+            app.clone(),
+            Method::DELETE,
+            "/v1/auth/session?platform=migu&account=missing",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["removed"], false);
+        for cookie in [
+            "",
+            "pacmtoken=",
+            "pacmtoken=a; pacmtoken=b",
+            "pacmtoken=bad\r\nheader",
+            "not-a-cookie",
+        ] {
+            let (status, headers, value) = json_request_with_headers(app.clone(), Method::POST, "/v1/auth/import", Some(json!({"platform":"migu","credential_mode":"client","credential":{"kind":"cookie","value":cookie}}))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(value.get("data").is_none());
+        }
+        let invalid = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Migu, "migu_pacm_v1", "invalid-secret", None)
+                .unwrap(),
+        )
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/session?platform=migu")
+                    .header(CALLER_CREDENTIAL_HEADER, invalid.value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .headers()
+                .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                .is_none()
+        );
+        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("invalid-secret"));
+    }
+
+    #[tokio::test]
+    async fn migu_password_route_checks_real_provider_inputs_and_never_caches_failures() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(
+                tuneweave_provider_migu::MiguProvider::new(
+                    tuneweave_provider_migu::MiguConfig::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Migu));
+        for body in [
+            json!({"platform":"migu","credential_mode":"client","principal_type":"username","principal":"private-user","password":"private-password","password_format":"md5"}),
+            json!({"platform":"migu","credential_mode":"client","account":"server-alias","principal_type":"username","principal":"private-user","password":"private-password"}),
+            json!({"platform":"migu","credential_mode":"client","principal_type":"username","principal":"private-user","password":""}),
+            json!({"platform":"migu","credential_mode":"client","principal_type":"invalid","principal":"private-user","password":"private-password"}),
+        ] {
+            let (status, headers, value) = json_request_with_headers(
+                app.clone(),
+                Method::POST,
+                "/v1/auth/password",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(
+                headers
+                    .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                    .is_none()
+            );
+            assert!(value.get("data").is_none());
+            assert!(!value.to_string().contains("private-user"));
+            assert!(!value.to_string().contains("private-password"));
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_password_route_checks_real_provider_inputs_and_never_caches_failures() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(
+                tuneweave_provider_kuwo::KuwoProvider::new(
+                    tuneweave_provider_kuwo::KuwoConfig::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Kuwo));
+        for body in [
+            json!({"platform":"kuwo","credential_mode":"client","principal_type":"username","principal":"private-user","password":"private-password","password_format":"md5"}),
+            json!({"platform":"kuwo","credential_mode":"client","account":"server-alias","principal_type":"username","principal":"private-user","password":"private-password"}),
+            json!({"platform":"kuwo","credential_mode":"client","principal_type":"username","principal":"private-user","password":""}),
+            json!({"platform":"kuwo","credential_mode":"client","principal_type":"invalid","principal":"private-user","password":"private-password"}),
+        ] {
+            let (status, headers, value) = json_request_with_headers(
+                app.clone(),
+                Method::POST,
+                "/v1/auth/password",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(
+                headers
+                    .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                    .is_none()
+            );
+            assert!(value.get("data").is_none());
+            assert!(!value.to_string().contains("private-user"));
+            assert!(!value.to_string().contains("private-password"));
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_library_routes_keep_successful_default_account_reads_private() {
+        // This fixture checks the HTTP response contract. Native authentication
+        // and data reads are exercised by the provider's loopback tests.
+        struct LibraryProvider;
+        #[async_trait]
+        impl MusicProvider for LibraryProvider {
+            fn platform(&self) -> Platform {
+                Platform::Kuwo
+            }
+            fn name(&self) -> &'static str {
+                "Kuwo library HTTP fixture"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([Capability::AccountPlaylists])
+            }
+            async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
+                let mut playlist = test_kuwo_playlist();
+                playlist.name = "私人歌单".into();
+                playlist.creator = None;
+                playlist.extensions = Extensions::from([
+                    ("library_owner_id".into(), json!("42")),
+                    ("is_public".into(), json!(false)),
+                ]);
+                Ok(Page {
+                    items: vec![playlist],
+                    pagination: PageMeta {
+                        limit: request.limit,
+                        offset: request.offset,
+                        total: Some(1),
+                        next_offset: None,
+                        has_more: false,
+                        extensions: Extensions::new(),
+                    },
+                })
+            }
+            async fn user_created_playlists(
+                &self,
+                id: &str,
+                request: &PageRequest,
+            ) -> Result<Page<Playlist>> {
+                assert_eq!(id, "42");
+                self.account_playlists(request).await
+            }
+            async fn user_favorite_playlists(
+                &self,
+                id: &str,
+                request: &PageRequest,
+            ) -> Result<Page<Playlist>> {
+                assert_eq!(id, "42");
+                self.account_playlists(request).await
+            }
+        }
+        let mut registry = ProviderRegistry::new();
+        registry.register(LibraryProvider).unwrap();
+        let app = build_router(AppState::new(registry, Platform::Kuwo));
+        for path in [
+            "/v1/account/playlists?platform=kuwo&limit=2",
+            "/v1/users/kuwo:42/playlists/created?limit=2",
+            "/v1/users/kuwo:42/favorites/playlists?limit=2",
+            "/v1/users/kuwo:42/playlists/created?account=personal&limit=2",
+        ] {
+            let (status, headers, value) =
+                json_request_with_headers(app.clone(), Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert_eq!(value["data"][0]["name"], "私人歌单");
+            assert_eq!(value["data"][0]["extensions"]["library_owner_id"], "42");
+            assert_eq!(value["meta"]["pagination"]["limit"], 2);
+            assert_eq!(value["meta"]["pagination"]["total"], 1);
+            assert!(
+                headers
+                    .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_library_routes_require_selected_credentials_and_never_cache_errors() {
+        let network_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let provider =
+            tuneweave_provider_kuwo::KuwoProvider::new(tuneweave_provider_kuwo::KuwoConfig {
+                proxy_url: Some(format!("http://{}", network_guard.local_addr().unwrap())),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::AccountPlaylists)
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(provider).unwrap();
+        let app = build_router(AppState::new(registry, Platform::Kuwo));
+        for path in [
+            "/v1/account/playlists?platform=kuwo",
+            "/v1/users/kuwo:42/playlists/created",
+            "/v1/users/kuwo:42/favorites/playlists",
+            "/v1/playlists/kuwo:101?account=personal",
+            "/v1/playlists/kuwo:101/tracks?account=personal",
+        ] {
+            let (status, headers, value) =
+                json_request_with_headers(app.clone(), Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{value}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert_eq!(value["error"]["code"], "authentication_required");
+            assert!(value.get("data").is_none_or(Value::is_null));
+            assert!(
+                headers
+                    .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_membership_routes_require_selected_credentials_and_do_not_cache_errors() {
+        let network_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let provider =
+            tuneweave_provider_kuwo::KuwoProvider::new(tuneweave_provider_kuwo::KuwoConfig {
+                proxy_url: Some(format!("http://{}", network_guard.local_addr().unwrap())),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::UserMembership)
+        );
+        assert!(
+            provider
+                .capabilities()
+                .contains(&Capability::UserMembershipClientInfo)
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(provider).unwrap();
+        let app = build_router(AppState::new(registry, Platform::Kuwo));
+        for path in [
+            "/v1/account/membership?platform=kuwo&backend=front",
+            "/v1/account/membership?platform=kuwo&backend=client",
+            "/v1/users/kuwo:42/membership?backend=front",
+            "/v1/users/kuwo:42/membership?backend=client",
+        ] {
+            let (status, headers, value) =
+                json_request_with_headers(app.clone(), Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{value}");
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert_eq!(value["error"]["code"], "authentication_required");
+            assert!(value.get("data").is_none_or(Value::is_null));
+            assert!(value["meta"].get("caller_credential").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_sms_route_requires_creation_permission_and_rejects_invalid_inputs_without_auth_output()
+     {
+        let network_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(
+                tuneweave_provider_kuwo::KuwoProvider::new(tuneweave_provider_kuwo::KuwoConfig {
+                    proxy_url: Some(format!("http://{}", network_guard.local_addr().unwrap())),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Kuwo));
+        let base = json!({"platform":"kuwo","credential_mode":"client","principal":"13800000000"});
+        let mut bodies = vec![base.clone()];
+        for value in [json!(false), json!("true"), Value::Null] {
+            let mut body = base.clone();
+            body["allow_account_creation"] = value;
+            bodies.push(body);
+        }
+        for (field, value) in [
+            ("principal", json!("private-invalid-phone")),
+            ("country_code", json!("1")),
+            ("backend", json!("middle")),
+            ("accept_platform_policies", json!(true)),
+            ("account", json!("other")),
+        ] {
+            let mut body = base.clone();
+            body["allow_account_creation"] = json!(true);
+            body[field] = value;
+            bodies.push(body);
+        }
+        for body in bodies {
+            let (status, headers, value) = json_request_with_headers(
+                app.clone(),
+                Method::POST,
+                "/v1/auth/challenges",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(
+                headers
+                    .get(caller_scope::UPDATED_CREDENTIAL_HEADER)
+                    .is_none()
+            );
+            assert!(value.get("data").is_none());
+            assert!(!value.to_string().contains("13800000000"));
+            assert!(!value.to_string().contains("private-invalid-phone"));
+        }
+    }
+
+    #[tokio::test]
+    async fn sms_http_binds_explicit_creation_permission_to_its_original_provider_receipt() {
+        struct ConsentProvider;
+        #[async_trait]
+        impl MusicProvider for ConsentProvider {
+            fn platform(&self) -> Platform {
+                Platform::Kuwo
+            }
+            fn name(&self) -> &'static str {
+                "SMS consent fixture"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([Capability::PhoneLogin])
+            }
+            async fn begin_auth_challenge(
+                &self,
+                request: &AuthChallengeRequest,
+                mode: CredentialMode,
+            ) -> Result<ProviderAuthChallenge> {
+                assert!(request.allow_account_creation);
+                assert_eq!(request.principal, "13800000000");
+                ProviderAuthChallenge::stateful(
+                    Platform::Kuwo,
+                    request.clone(),
+                    mode,
+                    "private-sms-handle".into(),
+                )
+            }
+        }
+        let mut registry = ProviderRegistry::new();
+        registry.register(ConsentProvider).unwrap();
+        let state = AppState::new(registry, Platform::Kuwo);
+        let app = build_router(state.clone());
+        let (status, headers, value) = json_request_with_headers(
+            app,
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(
+                json!({"platform":"kuwo","principal":"13800000000","allow_account_creation":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        let id = value["data"]["transaction_id"].as_str().unwrap();
+        let stored = state.auth_transactions.get(id).unwrap();
+        let StoredAuthKind::Challenge {
+            request,
+            provider_challenge: Some(receipt),
+            ..
+        } = stored.kind
+        else {
+            panic!("expected stored challenge")
+        };
+        assert!(request.allow_account_creation);
+        assert_eq!(&request, receipt.request());
+        for secret in ["13800000000", "private-sms-handle"] {
+            assert!(!value.to_string().contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn kuwo_web_sms_http_binds_platform_policy_acceptance_to_the_receipt() {
+        struct PolicyProvider;
+        #[async_trait]
+        impl MusicProvider for PolicyProvider {
+            fn platform(&self) -> Platform {
+                Platform::Kuwo
+            }
+            fn name(&self) -> &'static str {
+                "Web SMS policy fixture"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([Capability::PhoneLogin])
+            }
+            async fn begin_auth_challenge(
+                &self,
+                request: &AuthChallengeRequest,
+                mode: CredentialMode,
+            ) -> Result<ProviderAuthChallenge> {
+                assert_eq!(request.backend, AuthChallengeBackend::Middle);
+                assert!(request.allow_account_creation);
+                assert!(request.accept_platform_policies);
+                ProviderAuthChallenge::stateful(
+                    Platform::Kuwo,
+                    request.clone(),
+                    mode,
+                    "private-web-sms-handle".into(),
+                )
+            }
+            async fn auth_challenge_status(
+                &self,
+                _challenge: &ProviderAuthChallenge,
+            ) -> Result<AuthChallengeStatus> {
+                Ok(AuthChallengeStatus::Waiting)
+            }
+        }
+        let mut registry = ProviderRegistry::new();
+        registry.register(PolicyProvider).unwrap();
+        let state = AppState::new(registry, Platform::Kuwo);
+        let app = build_router(state.clone());
+        let (status, headers, value) = json_request_with_headers(
+            app,
+            Method::POST,
+            "/v1/auth/challenges",
+            Some(json!({
+                "platform":"kuwo",
+                "credential_mode":"client",
+                "principal":"13800000000",
+                "backend":"middle",
+                "allow_account_creation":true,
+                "accept_platform_policies":true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        let id = value["data"]["transaction_id"].as_str().unwrap();
+        let stored = state.auth_transactions.get(id).unwrap();
+        let StoredAuthKind::Challenge {
+            request,
+            provider_challenge: Some(receipt),
+            ..
+        } = stored.kind
+        else {
+            panic!("expected stored Web SMS challenge")
+        };
+        assert_eq!(request.backend, AuthChallengeBackend::Middle);
+        assert!(request.accept_platform_policies);
+        assert_eq!(&request, receipt.request());
+        for secret in ["13800000000", "private-web-sms-handle"] {
+            assert!(!value.to_string().contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn qr_verification_http_preserves_ownership_and_delivers_credentials_only_after_confirmation()
+     {
+        use tuneweave_core::{
+            ProviderQrPoll, QrVerification, QrVerificationAction, QrVerificationMethod,
+        };
+        struct MfaProvider {
+            step: Mutex<u8>,
+        }
+        fn instructions() -> ProviderQrPoll {
+            ProviderQrPoll {
+                state: AuthState::VerificationRequired,
+                message: None,
+                profile: None,
+                credential: None,
+                verification: Some(QrVerification {
+                    methods: vec![QrVerificationMethod::Sms],
+                    masked_destination: Some("138****00".to_owned()),
+                    resend_after_secs: Some(60),
+                    up_sms: None,
+                }),
+            }
+        }
+        #[async_trait]
+        impl MusicProvider for MfaProvider {
+            fn platform(&self) -> Platform {
+                Platform::Soda
+            }
+            fn name(&self) -> &'static str {
+                "MFA test provider"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([
+                    Capability::QrLogin,
+                    Capability::QrLoginVerification,
+                    Capability::CallerManagedCredentials,
+                ])
+            }
+            async fn start_qr_login(&self, _login_type: Option<&str>) -> Result<ProviderQrStart> {
+                Ok(ProviderQrStart {
+                    provider_transaction_id: "private-qr-key".to_owned(),
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_owned(),
+                    image_data_url: None,
+                    expires_at: None,
+                })
+            }
+            async fn poll_qr_login_with_mode(
+                &self,
+                id: &str,
+                account: &str,
+                mode: CredentialMode,
+            ) -> Result<ProviderQrPoll> {
+                assert_eq!(id, "private-qr-key");
+                assert_eq!(account, "personal");
+                assert_eq!(mode, CredentialMode::Both);
+                if *self.step.lock().unwrap() < 2 {
+                    return Ok(instructions());
+                }
+                let mut profile = AccountProfile::authenticated(Platform::Soda, account);
+                profile.user_id = Some("10001234".to_owned());
+                Ok(ProviderQrPoll {
+                    state: AuthState::Confirmed,
+                    message: None,
+                    profile: Some(profile),
+                    verification: None,
+                    credential: Some(ProviderCredential::new(
+                        Platform::Soda,
+                        "test",
+                        "account-session",
+                        None,
+                    )?),
+                })
+            }
+            async fn verify_qr_login(
+                &self,
+                id: &str,
+                account: &str,
+                mode: CredentialMode,
+                action: &QrVerificationAction,
+            ) -> Result<ProviderQrPoll> {
+                assert_eq!(id, "private-qr-key");
+                assert_eq!(account, "personal");
+                assert_eq!(mode, CredentialMode::Both);
+                let mut step = self.step.lock().unwrap();
+                match action {
+                    QrVerificationAction::SendSms => {
+                        assert_eq!(*step, 0);
+                        *step = 1;
+                        Ok(instructions())
+                    }
+                    QrVerificationAction::SubmitSms { code } => {
+                        assert_eq!(*step, 1);
+                        assert_eq!(code, "864209");
+                        *step = 2;
+                        Ok(ProviderQrPoll {
+                            state: AuthState::Scanned,
+                            message: None,
+                            profile: None,
+                            credential: None,
+                            verification: None,
+                        })
+                    }
+                    QrVerificationAction::VerifyUpSms => {
+                        Err(TuneWeaveError::invalid_request("unsupported method"))
+                    }
+                }
+            }
+        }
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(MfaProvider {
+                step: Mutex::new(0),
+            })
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Soda));
+        let (status, created) = json_request_from(
+            app.clone(),
+            Method::POST,
+            "/v1/auth/qr",
+            Some(json!({"platform":"soda","account":"personal","credential_mode":"both"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["data"]["transaction_id"].as_str().unwrap();
+        let poll_path = format!("/v1/auth/qr/{id}");
+        let action_path = format!("{poll_path}/verification");
+        let (status, pending) = json_request_from(app.clone(), Method::GET, &poll_path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pending["data"]["state"], "verification_required");
+        assert!(pending["data"].get("caller_credential").is_none());
+        for field in ["account", "credential_mode", "token", "encrypt_uid"] {
+            let mut request = json!({"action":"send_sms"});
+            request[field] = json!("override");
+            let (status, _) =
+                json_request_from(app.clone(), Method::POST, &action_path, Some(request)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, headers, sent) = json_request_with_headers(
+            app.clone(),
+            Method::POST,
+            &action_path,
+            Some(json!({"action":"send_sms"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            headers[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .contains("no-store")
+        );
+        assert_eq!(sent["data"]["verification"]["methods"], json!(["sms"]));
+        let (status, verified) = json_request_from(
+            app.clone(),
+            Method::POST,
+            &action_path,
+            Some(json!({"action":"submit_sms","code":"864209"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["data"]["state"], "scanned");
+        assert!(verified["data"].get("caller_credential").is_none());
+        assert!(!serde_json::to_string(&verified).unwrap().contains("864209"));
+        let (status, confirmed) =
+            json_request_from(app.clone(), Method::GET, &poll_path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(confirmed["data"]["state"], "confirmed");
+        assert_eq!(confirmed["meta"]["account"], "personal");
+        assert!(confirmed["data"]["caller_credential"]["value"].is_string());
+        let (status, _) = json_request_from(
+            app,
+            Method::POST,
+            &action_path,
+            Some(json!({"action":"send_sms"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     #[test]
     fn password_auth_accepts_netease_secure_captcha_aliases() {
         for alias in ["secure_captcha", "secureCaptcha", "sca"] {
@@ -37446,6 +39909,436 @@ mod tests {
         assert_eq!(json["data"]["authenticated"], true);
         assert_eq!(json["data"]["account"], "personal");
         assert_eq!(json["meta"]["platform"], "netease");
+    }
+
+    #[tokio::test]
+    async fn account_reads_deliver_rotated_caller_credentials_with_no_store() {
+        struct RotatingProvider {
+            caller: bool,
+        }
+        #[async_trait]
+        impl MusicProvider for RotatingProvider {
+            fn platform(&self) -> Platform {
+                Platform::Soda
+            }
+            fn name(&self) -> &'static str {
+                "Rotating test account"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([
+                    Capability::AccountProfile,
+                    Capability::CallerManagedCredentials,
+                ])
+            }
+            fn with_caller_credential(
+                &self,
+                credential: &ProviderCredential,
+            ) -> Result<Arc<dyn MusicProvider>> {
+                assert_eq!(credential.platform, Platform::Soda);
+                assert_eq!(credential.secret(), "original-test-session");
+                Ok(Arc::new(Self { caller: true }))
+            }
+            async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+                let mut profile = AccountProfile::authenticated(Platform::Soda, account);
+                profile.user_id = Some("123456".to_owned());
+                Ok(profile)
+            }
+            async fn user_profile(
+                &self,
+                id: &str,
+                _backend: UserProfileBackend,
+                _account: Option<&str>,
+            ) -> Result<UserProfile> {
+                let mut profile = sample_user_profile(id);
+                profile.user.platform = Platform::Soda;
+                profile.user.resource_ref = ResourceRef::new(Platform::Soda, id).unwrap();
+                Ok(profile)
+            }
+            async fn user_membership(
+                &self,
+                _id: Option<&str>,
+                _account: Option<&str>,
+            ) -> Result<MembershipSummary> {
+                Ok(MembershipSummary {
+                    user_ref: Some(ResourceRef::new(Platform::Soda, "123456").unwrap()),
+                    active: Some(true),
+                    level: None,
+                    annual_count: None,
+                    expires_at: None,
+                    icon_url: None,
+                    extensions: Extensions::new(),
+                })
+            }
+            async fn user_membership_client_info(
+                &self,
+                id: Option<&str>,
+                account: Option<&str>,
+            ) -> Result<MembershipSummary> {
+                self.user_membership(id, account).await
+            }
+            async fn account_playlists(&self, request: &PageRequest) -> Result<Page<Playlist>> {
+                Ok(Page {
+                    items: Vec::new(),
+                    pagination: PageMeta {
+                        limit: request.limit,
+                        offset: request.offset,
+                        total: Some(0),
+                        has_more: false,
+                        next_offset: None,
+                        extensions: Extensions::new(),
+                    },
+                })
+            }
+            async fn track(&self, id: &str, _account: Option<&str>) -> Result<Track> {
+                Ok(Track::new(
+                    ResourceRef::new(Platform::Soda, id).unwrap(),
+                    "account song",
+                ))
+            }
+            async fn lyrics_with_options(
+                &self,
+                id: &str,
+                _request: &LyricsRequest,
+            ) -> Result<Lyrics> {
+                Ok(Lyrics {
+                    track_ref: ResourceRef::new(Platform::Soda, id).unwrap(),
+                    format: "lrc".to_owned(),
+                    plain: Some("account lyric".to_owned()),
+                    translated: None,
+                    romanized: None,
+                    word_synced: None,
+                    singing_annotations: None,
+                    singing_annotations_timestamp: None,
+                    contributors: Vec::new(),
+                    extensions: Extensions::new(),
+                })
+            }
+            async fn track_availability(
+                &self,
+                id: &str,
+                request: &TrackAvailabilityRequest,
+            ) -> Result<TrackAvailability> {
+                Ok(TrackAvailability {
+                    track_ref: ResourceRef::new(Platform::Soda, id).unwrap(),
+                    playable: true,
+                    requested_bitrate: request.bitrate,
+                    actual_bitrate: Some(128000),
+                    platform_code: None,
+                    message: "account authorized".to_owned(),
+                    extensions: Extensions::new(),
+                })
+            }
+            async fn set_playlist_subscription(
+                &self,
+                id: &str,
+                subscribed: bool,
+                _account: Option<&str>,
+            ) -> Result<SubscriptionResult> {
+                Ok(SubscriptionResult {
+                    resource_ref: ResourceRef::new(Platform::Soda, id).unwrap(),
+                    subscribed,
+                    extensions: Extensions::new(),
+                })
+            }
+            fn take_response_credential(&self) -> Result<Option<ProviderCredential>> {
+                self.caller
+                    .then(|| {
+                        ProviderCredential::new(
+                            Platform::Soda,
+                            "test",
+                            "rotated-test-session",
+                            None,
+                        )
+                    })
+                    .transpose()
+            }
+        }
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(RotatingProvider { caller: false })
+            .unwrap();
+        let app = build_router(AppState::new(registry, Platform::Soda));
+        let caller = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Soda, "test", "original-test-session", None)
+                .unwrap(),
+        )
+        .unwrap();
+        for (method, path) in [
+            (Method::GET, "/v1/auth/session?platform=soda"),
+            (Method::GET, "/v1/account?platform=soda"),
+            (Method::GET, "/v1/account/profile?platform=soda"),
+            (Method::GET, "/v1/account/membership?platform=soda"),
+            (
+                Method::GET,
+                "/v1/account/membership?platform=soda&backend=client",
+            ),
+            (Method::GET, "/v1/users/soda:123456/membership"),
+            (
+                Method::GET,
+                "/v1/users/soda:123456/membership?backend=client",
+            ),
+            (Method::GET, "/v1/account/playlists?platform=soda"),
+            (Method::GET, "/v1/tracks/soda:123"),
+            (Method::GET, "/v1/tracks/soda:123/lyrics"),
+            (Method::GET, "/v1/tracks/soda:123/availability"),
+            (Method::PUT, "/v1/account/favorites/playlists/soda:21"),
+            (Method::DELETE, "/v1/account/favorites/playlists/soda:21"),
+        ] {
+            for caller_managed in [false, true] {
+                let uri = if !caller_managed && path.starts_with("/v1/tracks/") {
+                    format!("{path}?account=default")
+                } else {
+                    path.to_owned()
+                };
+                let mut request = Request::builder().method(method.clone()).uri(uri);
+                if caller_managed {
+                    request = request.header(CALLER_CREDENTIAL_HEADER, &caller.value);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(
+                    response.headers()[header::CACHE_CONTROL]
+                        .to_str()
+                        .unwrap()
+                        .contains("no-store")
+                );
+                let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+                let json: Value = serde_json::from_slice(&bytes).unwrap();
+                if path.starts_with("/v1/tracks/") {
+                    if path.ends_with("/availability") {
+                        assert_eq!(json["data"]["playable"], true);
+                    } else if path.ends_with("/lyrics") {
+                        assert_eq!(json["data"]["plain"], "account lyric");
+                    } else {
+                        assert_eq!(json["data"]["name"], "account song");
+                    }
+                } else if path.contains("/membership") {
+                    assert_eq!(json["data"]["active"], true);
+                } else if path.contains("/account/playlists") {
+                    assert_eq!(json["data"], json!([]));
+                    assert_eq!(json["meta"]["pagination"]["total"], 0);
+                } else if path.contains("/account/profile") {
+                    assert_eq!(json["data"]["user"]["id"], "123456");
+                } else if path.contains("/favorites/playlists/") {
+                    assert_eq!(json["data"]["resource_ref"], "soda:21");
+                    assert_eq!(json["data"]["subscribed"], method == Method::PUT);
+                } else {
+                    assert_eq!(json["data"]["authenticated"], true);
+                }
+                if caller_managed {
+                    let credential = CallerCredential::parse(
+                        json["meta"]["caller_credential"]["value"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(credential.secret(), "rotated-test-session");
+                    assert!(json["meta"].get("account").is_none());
+                } else {
+                    assert!(json["meta"].get("caller_credential").is_none());
+                    assert_eq!(json["meta"]["account"], "default");
+                }
+                assert!(!String::from_utf8_lossy(&bytes).contains("rotated-test-session"));
+            }
+        }
+    }
+
+    #[test]
+    fn read_credential_contract_rejects_foreign_or_server_owned_secrets() {
+        let credential =
+            || ProviderCredential::new(Platform::Soda, "test", "secret", None).unwrap();
+        assert!(finalize_read_credential(Platform::Migu, true, Some(credential())).is_err());
+        assert!(finalize_read_credential(Platform::Soda, false, Some(credential())).is_err());
+        assert!(
+            finalize_read_credential(Platform::Soda, false, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_account_reads_return_prior_rotation_except_for_invalidated_sessions() {
+        struct FailingReadProvider {
+            code: ErrorCode,
+            caller: bool,
+        }
+        #[async_trait]
+        impl MusicProvider for FailingReadProvider {
+            fn platform(&self) -> Platform {
+                Platform::Soda
+            }
+            fn name(&self) -> &'static str {
+                "Failing account read"
+            }
+            fn capabilities(&self) -> BTreeSet<Capability> {
+                BTreeSet::from([Capability::CallerManagedCredentials])
+            }
+            fn with_caller_credential(
+                &self,
+                credential: &ProviderCredential,
+            ) -> Result<Arc<dyn MusicProvider>> {
+                assert_eq!(credential.secret(), "before-read");
+                Ok(Arc::new(Self {
+                    code: self.code,
+                    caller: true,
+                }))
+            }
+            async fn session_profile(&self, account: &str) -> Result<AccountProfile> {
+                let mut profile = AccountProfile::authenticated(Platform::Soda, account);
+                profile.user_id = Some("123456".to_owned());
+                Ok(profile)
+            }
+            async fn user_profile(
+                &self,
+                _id: &str,
+                _backend: UserProfileBackend,
+                _account: Option<&str>,
+            ) -> Result<UserProfile> {
+                Err(
+                    TuneWeaveError::new(self.code, "Later profile request failed")
+                        .with_platform(Platform::Soda),
+                )
+            }
+            async fn user_membership(
+                &self,
+                _id: Option<&str>,
+                _account: Option<&str>,
+            ) -> Result<MembershipSummary> {
+                Err(
+                    TuneWeaveError::new(self.code, "Later membership request failed")
+                        .with_platform(Platform::Soda),
+                )
+            }
+            async fn account_playlists(&self, _request: &PageRequest) -> Result<Page<Playlist>> {
+                Err(TuneWeaveError::new(self.code, "Later library page failed")
+                    .with_platform(Platform::Soda))
+            }
+            async fn track(&self, _id: &str, _account: Option<&str>) -> Result<Track> {
+                Err(TuneWeaveError::new(self.code, "Later account track failed")
+                    .with_platform(Platform::Soda))
+            }
+            async fn lyrics_with_options(
+                &self,
+                _id: &str,
+                _request: &LyricsRequest,
+            ) -> Result<Lyrics> {
+                Err(TuneWeaveError::new(self.code, "Later account lyric failed")
+                    .with_platform(Platform::Soda))
+            }
+            async fn track_availability(
+                &self,
+                _id: &str,
+                _request: &TrackAvailabilityRequest,
+            ) -> Result<TrackAvailability> {
+                Err(
+                    TuneWeaveError::new(self.code, "Later account availability failed")
+                        .with_platform(Platform::Soda),
+                )
+            }
+            async fn set_playlist_subscription(
+                &self,
+                _id: &str,
+                _subscribed: bool,
+                _account: Option<&str>,
+            ) -> Result<SubscriptionResult> {
+                Err(TuneWeaveError::new(self.code, "Collection readback failed")
+                    .with_platform(Platform::Soda))
+            }
+            fn take_response_credential(&self) -> Result<Option<ProviderCredential>> {
+                self.caller
+                    .then(|| {
+                        ProviderCredential::new(
+                            Platform::Soda,
+                            "test",
+                            "rotated-before-failure",
+                            None,
+                        )
+                    })
+                    .transpose()
+            }
+        }
+        let caller = CallerCredential::issue(
+            &ProviderCredential::new(Platform::Soda, "test", "before-read", None).unwrap(),
+        )
+        .unwrap();
+        for (code, status, returns_credential) in [
+            (ErrorCode::UpstreamError, StatusCode::BAD_GATEWAY, true),
+            (ErrorCode::RateLimited, StatusCode::TOO_MANY_REQUESTS, true),
+            (
+                ErrorCode::AuthenticationRequired,
+                StatusCode::UNAUTHORIZED,
+                false,
+            ),
+            (ErrorCode::Conflict, StatusCode::CONFLICT, false),
+        ] {
+            let mut registry = ProviderRegistry::new();
+            registry
+                .register(FailingReadProvider {
+                    code,
+                    caller: false,
+                })
+                .unwrap();
+            let app = build_router(AppState::new(registry, Platform::Soda));
+            for (method, path) in [
+                (Method::GET, "/v1/account/profile?platform=soda"),
+                (Method::GET, "/v1/account/membership?platform=soda"),
+                (Method::GET, "/v1/users/soda:123456/membership"),
+                (Method::GET, "/v1/account/playlists?platform=soda"),
+                (Method::GET, "/v1/tracks/soda:123"),
+                (Method::GET, "/v1/tracks/soda:123/lyrics"),
+                (Method::GET, "/v1/tracks/soda:123/availability"),
+                (Method::PUT, "/v1/account/favorites/playlists/soda:21"),
+                (Method::DELETE, "/v1/account/favorites/playlists/soda:21"),
+            ] {
+                for caller_managed in [false, true] {
+                    let logs = CapturedTestLogs::default();
+                    let subscriber = tracing_subscriber::fmt()
+                        .json()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_writer(logs.clone())
+                        .finish();
+                    let mut request = Request::builder().method(method.clone()).uri(path);
+                    if caller_managed {
+                        request = request.header(CALLER_CREDENTIAL_HEADER, &caller.value);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .with_subscriber(subscriber)
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), status);
+                    if caller_managed && returns_credential {
+                        assert!(
+                            response.headers()[header::CACHE_CONTROL]
+                                .to_str()
+                                .unwrap()
+                                .contains("no-store")
+                        );
+                    }
+                    let body: Value = serde_json::from_slice(
+                        &to_bytes(response.into_body(), 65536).await.unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(body["ok"], false);
+                    assert_eq!(body["error"]["code"], code.as_str());
+                    if caller_managed && returns_credential {
+                        let credential = CallerCredential::parse(
+                            body["meta"]["caller_credential"]["value"].as_str().unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(credential.secret(), "rotated-before-failure");
+                    } else {
+                        assert!(body["meta"].get("caller_credential").is_none());
+                    }
+                    assert!(!logs.text().contains("rotated-before-failure"));
+                    assert!(!logs.text().contains(&caller.value));
+                }
+            }
+        }
     }
 
     #[tokio::test]

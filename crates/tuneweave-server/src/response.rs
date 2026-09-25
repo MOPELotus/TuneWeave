@@ -142,6 +142,9 @@ pub(crate) fn record_request_provider_access(
     platform: Platform,
     credential_source: RequestCredentialSource,
 ) {
+    if credential_source != RequestCredentialSource::Anonymous {
+        crate::caller_scope::mark_sensitive();
+    }
     let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
         let mut summary = summary.borrow_mut();
         summary.observe_platform(platform);
@@ -183,6 +186,18 @@ pub struct ApiResponse<T> {
 
 impl<T> ApiResponse<T> {
     #[must_use]
+    pub(crate) fn with_caller_credential(
+        mut self,
+        credential: Option<tuneweave_core::CallerCredential>,
+    ) -> Self {
+        if let Some(credential) = &credential {
+            crate::caller_scope::record_update(credential);
+        }
+        self.meta.caller_credential = credential;
+        self
+    }
+
+    #[must_use]
     pub fn new(data: T) -> Self {
         Self {
             ok: true,
@@ -200,6 +215,7 @@ impl<T> ApiResponse<T> {
 
     #[must_use]
     pub fn with_account(mut self, account: impl Into<String>) -> Self {
+        crate::caller_scope::mark_sensitive();
         self.meta.account = Some(account.into());
         let _ = CURRENT_REQUEST_SUMMARY.try_with(|summary| {
             summary
@@ -232,6 +248,8 @@ impl<T> ApiResponse<T> {
 
 #[derive(Debug, Serialize)]
 pub struct ResponseMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_credential: Option<tuneweave_core::CallerCredential>,
     request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     platform: Option<Platform>,
@@ -250,6 +268,7 @@ impl ResponseMeta {
 
     fn with_request_id(request_id: String) -> Self {
         Self {
+            caller_credential: None,
             request_id,
             platform: None,
             account: None,
@@ -291,11 +310,41 @@ pub(crate) async fn request_context_middleware(
             CURRENT_REQUEST_ID.scope(
                 scoped_request_id,
                 async move {
-                    let mut response = if let Some(message) = rejection {
-                        ApiError::from(TuneWeaveError::invalid_request(message)).into_response()
-                    } else {
-                        next.run(request).await
-                    };
+                    let caller_present = request
+                        .headers()
+                        .contains_key(crate::CALLER_CREDENTIAL_HEADER);
+                    // Explicit account reads and writes stay private even when
+                    // parsing or request-ID validation fails before selection.
+                    let account_present = request.uri().query().is_some_and(|query| {
+                        url::form_urlencoded::parse(query.as_bytes())
+                            .any(|(name, _)| name == "account")
+                    });
+                    let sensitive = caller_present
+                        || account_present
+                        || route.starts_with("/v1/account/cloud/uploads/transfers")
+                        || (route.starts_with("/v1/auth/") && route != "/v1/auth/country-codes")
+                        || matches!(
+                            route.as_str(),
+                            "/v1/account/playlists/order"
+                                | "/v1/account/favorites/playlists/order"
+                                | "/v1/account/playlist-submissions"
+                                | "/v1/account/playlist-submissions/{reference}"
+                                | "/v1/account/purchases/tracks"
+                                | "/v1/account/purchases/albums"
+                                | "/v1/account/membership"
+                                | "/v1/auth/session/revoke"
+                                | "/v1/users/{reference}/membership"
+                                | "/v1/playlists/{reference}/cover"
+                                | "/v1/playlists/{reference}/submission"
+                        );
+                    let mut response = crate::caller_scope::scope(sensitive, async {
+                        if let Some(message) = rejection {
+                            ApiError::from(TuneWeaveError::invalid_request(message)).into_response()
+                        } else {
+                            next.run(request).await
+                        }
+                    })
+                    .await;
                     response.headers_mut().insert(
                         REQUEST_ID_HEADER,
                         HeaderValue::from_str(&request_id)
@@ -478,21 +527,50 @@ struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct ApiError(TuneWeaveError);
+pub struct ApiError {
+    error: TuneWeaveError,
+    caller_credential: Option<Box<tuneweave_core::CallerCredential>>,
+    no_store: bool,
+}
 
 impl From<TuneWeaveError> for ApiError {
     fn from(error: TuneWeaveError) -> Self {
-        Self(error)
+        Self {
+            error,
+            caller_credential: None,
+            no_store: false,
+        }
+    }
+}
+
+impl ApiError {
+    pub(crate) fn with_caller_credential(
+        mut self,
+        credential: Option<tuneweave_core::CallerCredential>,
+    ) -> Self {
+        if let Some(credential) = &credential {
+            crate::caller_scope::record_update(credential);
+        }
+        self.caller_credential = credential.map(Box::new);
+        self.no_store = true;
+        self
     }
 }
 
 impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
+    fn into_response(mut self) -> Response {
+        if matches!(
+            self.error.code,
+            ErrorCode::AuthenticationRequired | ErrorCode::Conflict
+        ) {
+            crate::caller_scope::invalidate(self.error.platform);
+            self.caller_credential = None;
+        }
         let request_id = current_request_id();
-        if let Some(platform) = self.0.platform {
+        if let Some(platform) = self.error.platform {
             record_request_platform(platform);
         }
-        let status = match self.0.code {
+        let status = match self.error.code {
             ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
             ErrorCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
             ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
@@ -507,23 +585,36 @@ impl IntoResponse for ApiError {
             ErrorCode::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        log_api_error(&self.0, status, &request_id);
+        log_api_error(&self.error, status, &request_id);
         let error = ErrorBody {
-            code: self.0.code,
-            message: self.0.message,
-            platform: self.0.platform,
-            retryable: self.0.retryable,
-            details: self.0.details,
+            code: self.error.code,
+            message: self.error.message,
+            platform: self.error.platform,
+            retryable: self.error.retryable,
+            details: self.error.details,
         };
-        (
+        let mut meta = ResponseMeta::with_request_id(request_id);
+        meta.caller_credential = self.caller_credential.map(|credential| *credential);
+        let mut response = (
             status,
             Json(ErrorEnvelope {
                 ok: false,
                 error,
-                meta: ResponseMeta::with_request_id(request_id),
+                meta,
             }),
         )
-            .into_response()
+            .into_response();
+        if self.no_store {
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            response.headers_mut().insert(
+                axum::http::header::PRAGMA,
+                HeaderValue::from_static("no-cache"),
+            );
+        }
+        response
     }
 }
 
