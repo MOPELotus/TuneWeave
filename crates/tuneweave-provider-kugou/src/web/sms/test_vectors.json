@@ -1,0 +1,21 @@
+{
+  "provenance": "Synthetic phone; independent OpenSSL AES, Python uppercase MD5, existing independent RSA vector",
+  "device": {
+    "guid": "12345678-1234-4234-8234-123456789abc",
+    "mid": "8b24a211ab448ed0b361923045ebe493",
+    "dfid": null
+  },
+  "phone": "13800000000",
+  "milliseconds": 1700000000123,
+  "query": {
+    "appid": "1014",
+    "srcappid": "2919",
+    "clientver": "1000",
+    "clienttime": "1700000000123",
+    "mid": "8b24a211ab448ed0b361923045ebe493",
+    "uuid": "8b24a211ab448ed0b361923045ebe493",
+    "dfid": "-"
+  },
+  "body": "{\"plat\":4,\"clienttime_ms\":1700000000123,\"businessid\":5,\"pk\":\"a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017\",\"params\":\"9701ba232146623f585416002dd3c36622539b99ad0554e101eb1ae989ab1a69\",\"mobile\":\"13********0\"}",
+  "signature": "183D526906FF76653B7B8B09B442C89C"
+}

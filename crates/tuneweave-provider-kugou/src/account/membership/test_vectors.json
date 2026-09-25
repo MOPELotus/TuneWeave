@@ -1,0 +1,47 @@
+[
+  {
+    "client": "standard",
+    "query": {
+      "clienttime": "1789600000",
+      "mid": "128213641183200084773438082360631096398",
+      "dfid": "-",
+      "uuid": "-",
+      "appid": "1005",
+      "clientappid": "1005",
+      "kugouid": "123456789",
+      "clienttoken": "fixture-standard-token",
+      "clientver": "20489",
+      "infotype": "1",
+      "level_flag": "1",
+      "tone_flag": "1",
+      "tone_packet": "1",
+      "nameplate_flag": "1",
+      "fancy_flag": "1"
+    },
+    "body": "",
+    "canonical_query": "appid=1005clientappid=1005clienttime=1789600000clienttoken=fixture-standard-tokenclientver=20489dfid=-fancy_flag=1infotype=1kugouid=123456789level_flag=1mid=128213641183200084773438082360631096398nameplate_flag=1tone_flag=1tone_packet=1uuid=-",
+    "signature": "99a3fb6274c9f3ebf403c055be8819ca",
+    "source": "Independent Python hashlib using current official installed-client signing; fictitious test identity only",
+    "guid": "01234567-89ab-4cde-8fab-0123456789ab"
+  },
+  {
+    "client": "concept",
+    "query": {
+      "clienttime": "1789600000",
+      "mid": "128213641183200084773438082360631096398",
+      "dfid": "-",
+      "uuid": "-",
+      "appid": "3116",
+      "clientver": "11440",
+      "userid": "123456789",
+      "token": "fixture-concept-token",
+      "busi_type": "concept",
+      "opt_product_types": "dvip,qvip,wvip"
+    },
+    "body": "",
+    "canonical_query": "appid=3116busi_type=conceptclienttime=1789600000clientver=11440dfid=-mid=128213641183200084773438082360631096398opt_product_types=dvip,qvip,wviptoken=fixture-concept-tokenuserid=123456789uuid=-",
+    "signature": "2a9579c403cb0db9173fda7da59649aa",
+    "source": "Independent Python hashlib using current official installed-client signing; fictitious test identity only",
+    "guid": "01234567-89ab-4cde-8fab-0123456789ab"
+  }
+]

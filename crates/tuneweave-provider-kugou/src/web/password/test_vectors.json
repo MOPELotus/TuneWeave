@@ -1,0 +1,132 @@
+{
+  "provenance": "Synthetic inputs; OpenSSL AES plus independent Python MD5/signature; RSA pk from independent Web RSA vector",
+  "device": {
+    "guid": "12345678-1234-4234-8234-123456789abc",
+    "mid": "8b24a211ab448ed0b361923045ebe493",
+    "dfid": null
+  },
+  "cases": [
+    {
+      "principal_type": "username",
+      "principal": "synthetic-user",
+      "plain": {
+        "pwd": "synthetic 密码+pass"
+      },
+      "query": {
+        "appid": "1014",
+        "srcappid": "2919",
+        "clientver": "1000",
+        "clienttime": "1700000000123",
+        "clienttime_ms": "1700000000123",
+        "mid": "8b24a211ab448ed0b361923045ebe493",
+        "uuid": "8b24a211ab448ed0b361923045ebe493",
+        "dfid": "-",
+        "dev": "web",
+        "plat": "4",
+        "support_third": "0",
+        "support_multi": "0",
+        "support_face_verify": "0",
+        "support_verify": "1",
+        "from_sdk": "1",
+        "expire_day": "1",
+        "autologin": "false",
+        "username": "synthetic-user",
+        "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+        "params": "f785c8d93f90cf58f5462195c5678b6024dbe1a150fba9f259d65affbe9e576a",
+        "signature": "8FE5CC21D098D055D0123702A0A04250"
+      }
+    },
+    {
+      "principal_type": "email",
+      "principal": "synthetic@example.test",
+      "plain": {
+        "pwd": "synthetic 密码+pass"
+      },
+      "query": {
+        "appid": "1014",
+        "srcappid": "2919",
+        "clientver": "1000",
+        "clienttime": "1700000000123",
+        "clienttime_ms": "1700000000123",
+        "mid": "8b24a211ab448ed0b361923045ebe493",
+        "uuid": "8b24a211ab448ed0b361923045ebe493",
+        "dfid": "-",
+        "dev": "web",
+        "plat": "4",
+        "support_third": "0",
+        "support_multi": "0",
+        "support_face_verify": "0",
+        "support_verify": "1",
+        "from_sdk": "1",
+        "expire_day": "1",
+        "autologin": "false",
+        "username": "synthetic@example.test",
+        "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+        "params": "f785c8d93f90cf58f5462195c5678b6024dbe1a150fba9f259d65affbe9e576a",
+        "signature": "61645FA31239D2422DD90BE5E53181A7"
+      }
+    },
+    {
+      "principal_type": "phone",
+      "principal": "13800000000",
+      "plain": {
+        "pwd": "synthetic 密码+pass",
+        "username": "13800000000"
+      },
+      "query": {
+        "appid": "1014",
+        "srcappid": "2919",
+        "clientver": "1000",
+        "clienttime": "1700000000123",
+        "clienttime_ms": "1700000000123",
+        "mid": "8b24a211ab448ed0b361923045ebe493",
+        "uuid": "8b24a211ab448ed0b361923045ebe493",
+        "dfid": "-",
+        "dev": "web",
+        "plat": "4",
+        "support_third": "0",
+        "support_multi": "0",
+        "support_face_verify": "0",
+        "support_verify": "1",
+        "from_sdk": "1",
+        "expire_day": "1",
+        "autologin": "false",
+        "username": "13********0",
+        "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+        "params": "f785c8d93f90cf58f5462195c5678b60b7a5c713b3cd539c7008d77e1a1e20476a836e860d7f0d3ebe313e3a548fe056c809fd499771424e88f16ced4e5b0ca8",
+        "signature": "1F838105BC62E308CC1A89098DEFD59C"
+      }
+    },
+    {
+      "principal_type": "username",
+      "principal": "13800000000",
+      "plain": {
+        "pwd": "synthetic 密码+pass",
+        "username": "13800000000"
+      },
+      "query": {
+        "appid": "1014",
+        "srcappid": "2919",
+        "clientver": "1000",
+        "clienttime": "1700000000123",
+        "clienttime_ms": "1700000000123",
+        "mid": "8b24a211ab448ed0b361923045ebe493",
+        "uuid": "8b24a211ab448ed0b361923045ebe493",
+        "dfid": "-",
+        "dev": "web",
+        "plat": "4",
+        "support_third": "0",
+        "support_multi": "0",
+        "support_face_verify": "0",
+        "support_verify": "1",
+        "from_sdk": "1",
+        "expire_day": "1",
+        "autologin": "false",
+        "username": "13********0",
+        "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+        "params": "f785c8d93f90cf58f5462195c5678b60b7a5c713b3cd539c7008d77e1a1e20476a836e860d7f0d3ebe313e3a548fe056c809fd499771424e88f16ced4e5b0ca8",
+        "signature": "1F838105BC62E308CC1A89098DEFD59C"
+      }
+    }
+  ]
+}

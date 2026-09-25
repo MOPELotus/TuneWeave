@@ -32,6 +32,27 @@ use tuneweave_core::{
 use url::Url;
 
 use crate::device::{DeviceStore, KugouDeviceIdentity};
+use crate::signing::ANDROID_SALT as ANDROID_SIGNATURE_SALT;
+
+pub(crate) mod account_history;
+mod account_lyrics;
+pub(crate) mod account_media;
+pub(crate) mod albums;
+pub(crate) mod artist_catalog;
+pub(crate) mod artist_videos;
+pub(crate) mod artists;
+mod assets;
+pub(crate) mod catalog;
+pub(crate) mod charts;
+pub(crate) mod concept_album;
+pub(crate) mod concept_collection;
+mod dto;
+mod openapi;
+pub(crate) mod search_default;
+pub(crate) mod search_suggestions;
+pub(crate) mod video_streams;
+pub(crate) mod videos;
+mod web_media;
 
 const SEARCH_ENDPOINT: &str = "https://songsearch.kugou.com/song_search_v2";
 const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
@@ -45,7 +66,7 @@ const WEB_REFERER: &str = "https://www.kugou.com/";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                              (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const ANDROID_USER_AGENT: &str = "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi";
-const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
+#[cfg(test)]
 const DEVICE_RSA_MODULUS: &str = "c8006ed03842d2628209bd314984ca5ed6cfe06e30c95f9d4704d9c49791d7a935ba950ecb0bc8ebf5f5994f0bac927a7eb151b3c1de343303fa539c83136eccfd7d7e511e2dbce18eaa9f784c9b50d443e75865979e0a5e216e46c684066a8d6b998580bbaa22d73f5790286bb14742e83244e44db6d707ffe162c5c7002d45";
 const DEVICE_RSA_EXPONENT: u32 = 65_537;
 const DEVICE_RSA_BYTES: usize = 128;
@@ -62,6 +83,7 @@ const KRC_XOR_KEY: [u8; 16] = [
 pub struct KugouConfig {
     pub proxy_url: Option<String>,
     pub device_path: Option<PathBuf>,
+    pub credential_store: Option<Arc<dyn tuneweave_core::AccountCredentialStore>>,
 }
 
 impl fmt::Debug for KugouConfig {
@@ -73,16 +95,23 @@ impl fmt::Debug for KugouConfig {
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
             .field("device_path", &self.device_path)
+            .field("credential_store", &self.credential_store.is_some())
             .finish()
     }
 }
 
 #[derive(Clone)]
 pub struct KugouClient {
-    http: Client,
+    pub(crate) http: Client,
     proxy_configured: bool,
     device: Arc<Mutex<DeviceStore>>,
     registration_refresh: Arc<AsyncMutex<()>>,
+    #[cfg(test)]
+    pub(crate) login_test_origin: Option<Url>,
+    #[cfg(test)]
+    pub(crate) cloud_test_seed: Option<String>,
+    #[cfg(test)]
+    pub(crate) password_test_seed: Option<String>,
 }
 
 impl fmt::Debug for KugouClient {
@@ -1091,6 +1120,7 @@ impl KugouClient {
         let mut builder = Client::builder()
             .user_agent(WEB_USER_AGENT)
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20));
         let proxy_url = config
@@ -1117,6 +1147,12 @@ impl KugouClient {
             proxy_configured: proxy_url.is_some(),
             device: Arc::new(Mutex::new(DeviceStore::open(config.device_path.clone())?)),
             registration_refresh: Arc::new(AsyncMutex::new(())),
+            #[cfg(test)]
+            login_test_origin: None,
+            #[cfg(test)]
+            cloud_test_seed: None,
+            #[cfg(test)]
+            password_test_seed: None,
         })
     }
 
@@ -1132,6 +1168,14 @@ impl KugouClient {
 
     fn device_identity(&self) -> Result<KugouDeviceIdentity> {
         Ok(self.lock_device()?.device().identity())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_test_device(&self) {
+        self.lock_device()
+            .unwrap()
+            .register("0123456789ABCDEF01234567".into(), unix_seconds_now())
+            .unwrap();
     }
 
     async fn registered_device(&self) -> Result<KugouDeviceIdentity> {
@@ -1295,9 +1339,16 @@ impl KugouClient {
         let started = Instant::now();
         let mut http_status = None;
         let outcome = async {
+            let target = SEARCH_ENDPOINT.to_owned();
+            #[cfg(test)]
+            let target = self
+                .login_test_origin
+                .as_ref()
+                .map(|origin| origin.join("/song_search_v2").unwrap().to_string())
+                .unwrap_or(target);
             let response = self
                 .http
-                .get(SEARCH_ENDPOINT)
+                .get(target)
                 .header(REFERER, WEB_REFERER)
                 .query(&request)
                 .send()
@@ -1977,7 +2028,7 @@ impl KugouClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn log_upstream_request<T>(
+    pub(crate) fn log_upstream_request<T>(
         &self,
         operation: &'static str,
         upstream_host: &'static str,
@@ -2049,9 +2100,16 @@ impl KugouClient {
             clienttime,
             signature,
         };
+        let target = format!("{ANDROID_GATEWAY}{}", endpoint.path());
+        #[cfg(test)]
+        let target = self
+            .login_test_origin
+            .as_ref()
+            .map(|origin| origin.join(endpoint.path()).unwrap().to_string())
+            .unwrap_or(target);
         let mut request = self
             .http
-            .post(format!("{ANDROID_GATEWAY}{}", endpoint.path()))
+            .post(target)
             .header("x-router", endpoint.router())
             .header(CONTENT_TYPE, "application/json")
             .header("dfid", identity.dfid())
@@ -2212,7 +2270,7 @@ fn parse_audio_metadata(bytes: &[u8], audio_id: &str) -> Result<AudioMetadata> {
     Ok(audio)
 }
 
-fn validate_collection_id(value: &str) -> Result<&str> {
+pub(crate) fn validate_collection_id(value: &str) -> Result<&str> {
     let trimmed = value.trim();
     if trimmed != value {
         return Err(kugou_invalid_media_request(
@@ -3196,6 +3254,11 @@ fn select_media_spec(track: &Track, request: &StreamRequest) -> Result<SelectedM
             "KuGou public media does not accept immersive_type",
         ));
     }
+    if matches!(request.quality, Quality::Vinyl | Quality::Dtsx) {
+        return Err(kugou_invalid_media_request(
+            "KuGou does not support vinyl or DTS:X quality",
+        ));
+    }
     let requested_quality = request.quality;
     let target = if let Some(bitrate) = request.bitrate {
         match bitrate {
@@ -3214,7 +3277,12 @@ fn select_media_spec(track: &Track, request: &StreamRequest) -> Result<SelectedM
             Quality::Lossless => Quality::Lossless,
             Quality::Hires => Quality::Hires,
             Quality::Master => Quality::Master,
-            Quality::Surround | Quality::Spatial | Quality::Dolby | Quality::Vivid => {
+            Quality::Surround
+            | Quality::Spatial
+            | Quality::Dolby
+            | Quality::Vivid
+            | Quality::Dtsx
+            | Quality::Vinyl => {
                 return Err(kugou_invalid_media_request(
                     "KuGou public media does not yet expose immersive quality families",
                 ));
@@ -4251,7 +4319,7 @@ fn insert_optional_u64(extensions: &mut Extensions, key: &str, value: Option<u64
     }
 }
 
-fn normalize_image_url(value: &str) -> Option<String> {
+pub(crate) fn normalize_image_url(value: &str) -> Option<String> {
     let value = nonempty(value)?;
     let mut value = value.replace("{size}", "400");
     if let Some(rest) = value.strip_prefix("//") {
@@ -4321,16 +4389,7 @@ fn android_signature_with_identity(dfid: &str, mid: &str, clienttime: u64, body:
 }
 
 fn android_signature_for_parameters(parameters: &BTreeMap<&str, String>, body: &[u8]) -> String {
-    let mut digest = Md5::new();
-    digest.update(ANDROID_SIGNATURE_SALT);
-    for (key, value) in parameters {
-        digest.update(key.as_bytes());
-        digest.update(b"=");
-        digest.update(value.as_bytes());
-    }
-    digest.update(body);
-    digest.update(ANDROID_SIGNATURE_SALT);
-    hex::encode(digest.finalize())
+    crate::signing::android_signature(parameters, body)
 }
 
 fn md5_hex(value: impl AsRef<[u8]>) -> String {
@@ -4353,7 +4412,7 @@ fn device_profile_key_and_iv(seed: &str) -> ([u8; 16], [u8; 16]) {
     (key, iv)
 }
 
-fn encrypt_device_profile(plaintext: &[u8], seed: &str) -> Result<String> {
+pub(crate) fn encrypt_device_profile(plaintext: &[u8], seed: &str) -> Result<String> {
     let (key, iv) = device_profile_key_and_iv(seed);
     let message_len = plaintext.len();
     let padded_len = message_len
@@ -4381,7 +4440,10 @@ fn encrypt_device_profile(plaintext: &[u8], seed: &str) -> Result<String> {
     Ok(BASE64.encode(encrypted))
 }
 
-fn decrypt_device_registration_response(ciphertext: &[u8], seed: &str) -> Result<Vec<u8>> {
+pub(crate) fn decrypt_device_registration_response(
+    ciphertext: &[u8],
+    seed: &str,
+) -> Result<Vec<u8>> {
     let (key, iv) = device_profile_key_and_iv(seed);
     let mut buffer = ciphertext.to_vec();
     cbc::Decryptor::<Aes128>::new(&key.into(), &iv.into())
@@ -4393,6 +4455,13 @@ fn decrypt_device_registration_response(ciphertext: &[u8], seed: &str) -> Result
 }
 
 fn rsa_pkcs1_v15_encrypt_hex(plaintext: &[u8]) -> Result<String> {
+    rsa_pkcs1_v15_encrypt_for_client(crate::KugouLoginClient::Standard, plaintext)
+}
+
+pub(crate) fn rsa_pkcs1_v15_encrypt_for_client(
+    client: crate::KugouLoginClient,
+    plaintext: &[u8],
+) -> Result<String> {
     let padding_len = DEVICE_RSA_BYTES
         .checked_sub(plaintext.len())
         .and_then(|remaining| remaining.checked_sub(3))
@@ -4413,7 +4482,8 @@ fn rsa_pkcs1_v15_encrypt_hex(plaintext: &[u8]) -> Result<String> {
     encoded[separator] = 0;
     encoded[separator + 1..].copy_from_slice(plaintext);
 
-    let modulus = BigUint::parse_bytes(DEVICE_RSA_MODULUS.as_bytes(), 16).ok_or_else(|| {
+    let modulus = BigUint::parse_bytes(crate::login::crypto::rsa_modulus(client)?.as_bytes(), 16)
+        .ok_or_else(|| {
         TuneWeaveError::new(
             ErrorCode::InternalError,
             "KuGou device registration public key is invalid",

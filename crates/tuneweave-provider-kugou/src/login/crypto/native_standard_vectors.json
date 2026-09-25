@@ -1,0 +1,32 @@
+[
+  {
+    "previous_token": "",
+    "android_id": "",
+    "imei": "",
+    "model": "TuneWeave",
+    "milliseconds": 1700000000123,
+    "t1": "c8194f76fea010ecfe84bd132f525eda",
+    "t2": "4af276e93b7423620bf50e0dc89dc432c931568b29e06ad78855bec4f68babf18833bf5826b688b1463f639f06ffda86c4bc99fa2b1d6e6de7a19a8bbf67cdf9ee3ec7890754b84026d7dec4b0629cb1",
+    "clienttime_ms": "1700000000628"
+  },
+  {
+    "previous_token": "previous-device-token",
+    "android_id": "0123456789abcdef",
+    "imei": "123456789012345",
+    "model": "Synthetic Model",
+    "milliseconds": 1700000000999,
+    "t1": "46d51719c3887269633d523406286fa8564ab4e713de8183f58f9a34519658d30f098245bcb8ce8f33dd185954c94c6a",
+    "t2": "c0dd26d35504836952bf299a4f1fd604b0abb8c91155462605e62fd53969b465efa68d40b4158571e15c86a4a792334a481ca825009bea427c88aef5a91fd87a6b25dccc83a4c155f44761ed29d999a020772e882485371e029ab35d6b9e4674389cc0b33a03daba860b3a763ed251f0fd314cd4fdc4acbb9c3942e5ac3adf03",
+    "clienttime_ms": "1700000000405"
+  },
+  {
+    "previous_token": "another-device-token",
+    "android_id": "fedcba9876543210",
+    "imei": "",
+    "model": "TuneWeave",
+    "milliseconds": 1700000001000,
+    "t1": "40c8bce192d47f32dde3801daef58b6152810a3e3d9cd14d37b991fb6e61141e64043e827bcf331872642f842e8712e1",
+    "t2": "8836c112ca159fdb3661337957e6ce23f5d61e8f5d58285f9bda09ad9ad5f5a39d4cdb42d5cb3fbe1cb135a31acf5d7166060e3c940e99f2216fdf5649ddb2c9ea0af2d03d443f4943731f3cc17fca9e7e1f198ad4a7fd35a8008507837d2e3e9bd02d64f4678850d0f0f4c3eb355e3f",
+    "clienttime_ms": "1700000001556"
+  }
+]

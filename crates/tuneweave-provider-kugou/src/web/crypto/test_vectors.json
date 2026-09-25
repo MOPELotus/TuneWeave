@@ -1,0 +1,39 @@
+{
+  "provenance": "Synthetic inputs; independent Python modular exponentiation and OpenSSL AES-256-CBC",
+  "seed": "0123456789ABCDEF",
+  "milliseconds": 1700000000123,
+  "pk_plain": "{\"clienttime_ms\":1700000000123,\"key\":\"0123456789ABCDEF\"}",
+  "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+  "zero_rsa": "0000",
+  "cases": [
+    {
+      "token": "synthetic-web-token",
+      "params": "25eba8fc8e95ece1501c4eee8ca3eb316ebe2f13956c5ac6c64d473410870c5b"
+    },
+    {
+      "token": "synthetic+token/with=punctuation",
+      "params": "25eba8fc8e95ece1501c4eee8ca3eb31dfa766848aa92d68ba7cf5db7ce9989831287cb96d04f95ebb5fb57c52d1f55a"
+    },
+    {
+      "token": "synthetic\"quote\\slash",
+      "params": "25eba8fc8e95ece1501c4eee8ca3eb31f83c54ff05799f5f4a1d8ba82f7aedb9b3b9af5596837b05fd5c4f1be78f88d1"
+    }
+  ],
+  "sign_params": {
+    "appid": "1014",
+    "clientver": "1000",
+    "clienttime": "1700000000",
+    "clienttime_ms": "1700000000123",
+    "mid": "8b24a211ab448ed0b361923045ebe493",
+    "uuid": "8b24a211ab448ed0b361923045ebe493",
+    "dfid": "-",
+    "dev": "web",
+    "userid": "111",
+    "plat": "4",
+    "pk": "a377886b779556126f4298075bf28720f55daed697be9fa4fed717617bd42cbe6355bf54f423a74b66ada0f639966c2a3c4307c9af9903634e6edb790b04404b1636153953c453a00a5d3f5b37b0db783165842b58bb72e8d89867919d1d5f8b21329c3232476cdce3a5adde017bdd969b17607a59c3e153f9486dd01b4ab017",
+    "params": "25eba8fc8e95ece1501c4eee8ca3eb316ebe2f13956c5ac6c64d473410870c5b",
+    "srcappid": "2919",
+    "expire_day": "1"
+  },
+  "signature": "FF1DBC1231920D7BC4E7D684E811A92E"
+}

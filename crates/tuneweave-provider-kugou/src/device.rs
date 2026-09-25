@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -10,6 +10,7 @@ use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
 const DEVICE_SCHEMA_VERSION: u8 = 2;
 const DFID_LENGTH: usize = 24;
+const MAX_DEVICE_BYTES: u64 = 16_384;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct KugouDevice {
@@ -99,7 +100,8 @@ impl KugouDevice {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct KugouDeviceIdentity {
     pub guid: String,
     pub mid: String,
@@ -116,6 +118,23 @@ impl std::fmt::Debug for KugouDeviceIdentity {
 }
 
 impl KugouDeviceIdentity {
+    pub(crate) fn into_web(mut self) -> Self {
+        self.mid = hex::encode(Md5::digest(self.guid.as_bytes()));
+        self
+    }
+
+    pub(crate) fn valid_web(&self) -> bool {
+        valid_guid(&self.guid)
+            && self.mid == hex::encode(Md5::digest(self.guid.as_bytes()))
+            && self.dfid.as_deref().is_none_or(valid_dfid)
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        valid_guid(&self.guid)
+            && self.mid == derive_mid(&self.guid)
+            && self.dfid.as_deref().is_none_or(valid_dfid)
+    }
+
     pub(crate) fn dfid(&self) -> &str {
         self.dfid.as_deref().unwrap_or("-")
     }
@@ -131,6 +150,7 @@ impl DeviceStore {
         if let Some(path) = path.as_deref() {
             recover_interrupted_publish(path)?;
         }
+        let initialize = path.as_deref().is_some_and(|path| !path.exists());
         let device = path
             .as_deref()
             .filter(|path| path.exists())
@@ -138,9 +158,13 @@ impl DeviceStore {
             .transpose()?
             .unwrap_or_default()
             .normalize()?;
-        let store = Self { path, device };
-        if store.path.as_deref().is_some_and(|path| !path.exists()) {
-            store.save()?;
+        let mut store = Self { path, device };
+        if initialize {
+            store.save_mode(true)?;
+            // Concurrent initializers all adopt the one atomically published device.
+            if let Some(path) = store.path.as_deref() {
+                store.device = read_device(path)?.normalize()?;
+            }
         }
         Ok(store)
     }
@@ -172,6 +196,10 @@ impl DeviceStore {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
+        self.save_mode(false)
+    }
+
+    fn save_mode(&self, initialize: bool) -> Result<()> {
         let Some(path) = self.path.as_deref() else {
             return Ok(());
         };
@@ -198,6 +226,16 @@ impl DeviceStore {
         if let Err(error) = file.write_all(&encoded).and_then(|()| file.sync_all()) {
             let _ = fs::remove_file(&temporary);
             return Err(device_io_error("write", error));
+        }
+        drop(file);
+        if initialize {
+            let result = match fs::hard_link(&temporary, path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(device_io_error("initialize", error)),
+            };
+            let _ = fs::remove_file(&temporary);
+            return result;
         }
         if let Err(error) = publish_file(&temporary, path) {
             let _ = fs::remove_file(&temporary);
@@ -226,7 +264,7 @@ fn generate_guid() -> String {
     )
 }
 
-fn valid_dfid(value: &str) -> bool {
+pub(crate) fn valid_dfid(value: &str) -> bool {
     value.len() == DFID_LENGTH && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
@@ -275,7 +313,22 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 fn read_device(path: &Path) -> Result<KugouDevice> {
-    let bytes = fs::read(path).map_err(|error| device_io_error("read", error))?;
+    let metadata = fs::metadata(path).map_err(|error| device_io_error("inspect", error))?;
+    if !metadata.is_file() || metadata.len() > MAX_DEVICE_BYTES {
+        return Err(device_data_error(
+            "stored KuGou device state is not a bounded regular file",
+        ));
+    }
+    let file = fs::File::open(path).map_err(|error| device_io_error("read", error))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_DEVICE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| device_io_error("read", error))?;
+    if bytes.len() as u64 > MAX_DEVICE_BYTES {
+        return Err(device_data_error(
+            "stored KuGou device state exceeds its size limit",
+        ));
+    }
     serde_json::from_slice(&bytes).map_err(|_| {
         TuneWeaveError::new(
             ErrorCode::InternalError,
@@ -463,5 +516,61 @@ mod tests {
         assert!(persisted.dfid.is_none());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_first_open_adopts_one_complete_persistent_device() {
+        use std::sync::{Arc, Barrier};
+        let path = temporary_path("concurrent-open");
+        let barrier = Arc::new(Barrier::new(16));
+        let tasks = (0..16)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    DeviceStore::open(Some(path)).unwrap().device().identity()
+                })
+            })
+            .collect::<Vec<_>>();
+        let identities = tasks
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect::<Vec<_>>();
+        let persisted = DeviceStore::open(Some(path.clone()))
+            .unwrap()
+            .device()
+            .identity();
+        for identity in identities {
+            assert_eq!(identity.guid, persisted.guid);
+            assert_eq!(identity.mid, persisted.mid);
+            assert!(identity.dfid.is_none());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn device_store_rejects_oversized_non_file_and_malformed_state_without_replacing_it() {
+        let path = temporary_path("bounded-read");
+        fs::create_dir(&path).unwrap();
+        assert!(DeviceStore::open(Some(path.clone())).is_err());
+        fs::remove_dir(&path).unwrap();
+        for bytes in [
+            vec![b'x'; MAX_DEVICE_BYTES as usize + 1],
+            b"{broken".to_vec(),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(DeviceStore::open(Some(path.clone())).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_file(path).unwrap();
     }
 }
