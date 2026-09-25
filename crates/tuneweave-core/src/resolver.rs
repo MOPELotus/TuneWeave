@@ -129,6 +129,7 @@ impl StreamResolver {
                 let page = match provider.search(&search).await {
                     Ok(page) => page,
                     Err(error) => {
+                        provider.discard_response_credential_after_error(error.code)?;
                         attempts.push(failed_attempt(
                             platform,
                             account.clone(),
@@ -255,6 +256,7 @@ impl StreamResolver {
                     return Ok(stream);
                 }
                 Err(error) => {
+                    provider.discard_response_credential_after_error(error.code)?;
                     attempts.push(failed_attempt(
                         platform,
                         account,

@@ -79,11 +79,15 @@ pub enum Quality {
     High,
     Lossless,
     Hires,
+    /// Kuwo's DTS:X audio tier; not a generic surround or spatial quality.
+    Dtsx,
     Surround,
     Spatial,
     Dolby,
     Master,
     Vivid,
+    /// An independently offered vinyl edition, not a generic lossless tier.
+    Vinyl,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -516,6 +520,7 @@ pub struct ListeningRightsStatus {
 pub enum SearchItem {
     Track(Track),
     Album(Album),
+    DigitalAlbum(DigitalAlbum),
     Artist(Artist),
     Playlist(Playlist),
     User(User),
@@ -1179,6 +1184,7 @@ pub enum PodcastCatalog {
     Hot,
     CategoryFeatured,
     CategoryHot,
+    CategoryNewest,
     Personalized,
     TodayPreferred,
     Paid,
@@ -2051,6 +2057,66 @@ impl AlbumListRequest {
     }
 }
 
+/// A platform's curated public playlist listing, separate from account recommendations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistCatalogKind {
+    Latest,
+    Hot,
+    Tag,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistCatalogRequest {
+    pub catalog: PlaylistCatalogKind,
+    pub tag_id: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
+    pub account: Option<String>,
+}
+
+impl PlaylistCatalogRequest {
+    #[must_use]
+    pub fn new(catalog: PlaylistCatalogKind, limit: u32, offset: u32) -> Self {
+        Self {
+            catalog,
+            tag_id: None,
+            limit,
+            offset,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistCatalogTaxonomyRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistCatalogTag {
+    pub id: String,
+    pub name: String,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistCatalogTagGroup {
+    pub id: String,
+    pub name: String,
+    pub tags: Vec<PlaylistCatalogTag>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistCatalogTaxonomy {
+    pub platform: Platform,
+    pub groups: Vec<PlaylistCatalogTagGroup>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DigitalAlbumListRequest {
     pub limit: u32,
@@ -2494,6 +2560,7 @@ pub enum ArtistArea {
     Western,
     Japanese,
     Korean,
+    JapaneseKorean,
     Other,
 }
 
@@ -2635,6 +2702,9 @@ pub enum ArtistTrackOrder {
     #[default]
     Hot,
     Time,
+    /// Uses the provider's native catalogue order without promising a ranking.
+    #[serde(rename = "platform_default")]
+    PlatformDefault,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3905,6 +3975,41 @@ pub struct VideoStreamRequest {
     pub account: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MiguNativeMvFormat {
+    #[default]
+    Auto,
+    Pq,
+    Hq,
+    Sq,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MiguNativeMvStreamRequest {
+    #[serde(default)]
+    pub format: MiguNativeMvFormat,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+impl Default for MiguNativeMvStreamRequest {
+    fn default() -> Self {
+        Self {
+            format: MiguNativeMvFormat::Auto,
+            account: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VideoSourceRange {
+    /// Start position in the original source time line, inclusive.
+    pub start_ms: u64,
+    /// End position in the original source time line, exclusive.
+    pub end_ms: u64,
+}
+
 impl VideoStreamRequest {
     pub const DEFAULT_RESOLUTION: u32 = 1080;
 
@@ -3933,6 +4038,8 @@ pub struct VideoStream {
     pub height: Option<u32>,
     pub size: Option<u64>,
     pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_range: Option<VideoSourceRange>,
     pub requested_resolution: u32,
     pub actual_resolution: Option<u32>,
     pub platform_code: Option<i64>,
@@ -3964,6 +4071,104 @@ pub struct Album {
     pub track_count: Option<u64>,
     pub company: Option<String>,
     pub kind: Option<String>,
+    pub extensions: Extensions,
+}
+
+/// The moderation status of a playlist submission, independent of publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaylistSubmissionStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Unknown,
+}
+
+/// An account's submission record, not a public playlist or a playback grant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistSubmission {
+    pub playlist_ref: ResourceRef,
+    pub owner_id: String,
+    pub name: Option<String>,
+    pub cover_url: Option<String>,
+    pub track_count: Option<u64>,
+    pub play_count: Option<u64>,
+    pub review_status: PlaylistSubmissionStatus,
+    /// Approval alone does not establish whether the playlist is currently online.
+    pub published: Option<bool>,
+    pub extensions: Extensions,
+}
+
+/// Submit the saved playlist, optionally saving these metadata changes first.
+/// This never implicitly changes visibility, uploads a cover, or retries a write.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistSubmissionRequest {
+    /// Optional nonempty recommendation text. Supported providers validate their
+    /// corresponding submission form and save protocol before submitting it.
+    pub recommendation: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub account: Option<String>,
+}
+
+/// A submission acknowledgement and independently observed playlist/record state.
+/// Records cannot be attributed to this request without an upstream submission ID.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistSubmissionResult {
+    pub playlist_ref: ResourceRef,
+    pub accepted: bool,
+    pub metadata_updated: bool,
+    pub published: Option<bool>,
+    pub playlist: Playlist,
+    pub records: Vec<PlaylistSubmission>,
+    pub extensions: Extensions,
+}
+
+/// Removes submission-history records for one playlist; it does not request
+/// ordinary playlist deletion or assert withdrawal from publication.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistSubmissionRecordDeleteRequest {
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistSubmissionRecordDeleteResult {
+    pub playlist_ref: ResourceRef,
+    pub confirmed: bool,
+    pub changed: bool,
+    pub removed_records: u64,
+    /// Absence is scoped to this account's ordinary created directory, not proof
+    /// that the playlist was globally deleted or unpublished.
+    pub owned_playlist_present: bool,
+    pub playlist: Option<Playlist>,
+    pub published: Option<bool>,
+    pub extensions: Extensions,
+}
+
+/// A purchase-library entry. Catalogue identity can be unresolved independently of
+/// the purchase record; this does not establish current playback/download rights.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PurchasedTrack {
+    pub track: Option<Track>,
+    pub name: Option<String>,
+    pub artists: Vec<ArtistSummary>,
+    pub cover_url: Option<String>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PurchasedAlbum {
+    pub album: Option<Album>,
+    /// A distinct digital-album resource. Providers populate at most one of
+    /// `album` and `digital_album`; both may be absent for unresolved records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digital_album: Option<Box<DigitalAlbum>>,
+    pub name: Option<String>,
+    pub artists: Vec<ArtistSummary>,
+    pub cover_url: Option<String>,
     pub extensions: Extensions,
 }
 
@@ -4109,6 +4314,8 @@ pub struct ChartTrackListRequest {
     pub offset: u32,
     pub include_tags: bool,
     pub account: Option<String>,
+    #[serde(default)]
+    pub period: crate::ChartPeriod,
 }
 
 impl ChartTrackListRequest {
@@ -4119,6 +4326,7 @@ impl ChartTrackListRequest {
             offset,
             include_tags: true,
             account: None,
+            period: crate::ChartPeriod::Current,
         }
     }
 }
@@ -4728,6 +4936,8 @@ pub enum PlaylistVisibility {
     #[default]
     Public,
     Private,
+    /// Let the platform choose visibility, without promising public or private access.
+    PlatformDefault,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -4793,6 +5003,33 @@ impl PlaylistUpdateRequest {
 impl Default for PlaylistUpdateRequest {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// An explicit visibility change; `PlatformDefault` is not a mutation target.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaylistVisibilityUpdateRequest {
+    pub visibility: PlaylistVisibility,
+    pub account: Option<String>,
+}
+
+impl PlaylistVisibilityUpdateRequest {
+    #[must_use]
+    pub fn new(visibility: PlaylistVisibility) -> Self {
+        Self {
+            visibility,
+            account: None,
+        }
+    }
+
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.visibility == PlaylistVisibility::PlatformDefault {
+            return Err(crate::TuneWeaveError::invalid_request(
+                "visibility changes require public or private",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -4864,6 +5101,31 @@ pub struct PlaylistItemMutationResult {
     pub action: PlaylistItemMutationAction,
     pub snapshot_id: Option<String>,
     pub cloud_track_count: Option<u64>,
+    pub extensions: Extensions,
+}
+
+/// A playlist-local occurrence. The catalogue track may be unavailable, but the
+/// occurrence identity and position remain usable for lossless list management.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistTrackOccurrence {
+    pub id: String,
+    pub position: u64,
+    pub track: Option<Track>,
+    pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistOccurrenceOrderRequest {
+    pub occurrence_ids: Vec<String>,
+    pub snapshot_id: String,
+    pub account: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistOccurrenceOrderResult {
+    pub playlist_ref: ResourceRef,
+    pub occurrence_ids: Vec<String>,
+    pub snapshot_id: String,
     pub extensions: Extensions,
 }
 
@@ -4990,6 +5252,9 @@ pub enum StreamVariant {
     Default,
     Legacy,
     Modern,
+    /// An explicitly selected sing-along mix. Retains guide vocals; it does not
+    /// mean a purely instrumental track or a higher-fidelity recording.
+    SingAlong,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -5164,7 +5429,7 @@ pub struct AudioFileBatch {
     pub extensions: Extensions,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaStream {
     pub url: String,
     pub backup_urls: Vec<String>,
@@ -5185,11 +5450,32 @@ pub struct MediaStream {
     pub attempts: Vec<ResolutionAttempt>,
 }
 
+impl fmt::Debug for MediaStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaStream")
+            .field("resolved_track", &self.resolved_track)
+            .field("resolved_platform", &self.resolved_platform)
+            .field("url", &"[redacted]")
+            .field("backup_url_count", &self.backup_urls.len())
+            .field("headers", &"[redacted]")
+            .field("format", &self.format)
+            .field("codec", &self.codec)
+            .field("bitrate", &self.bitrate)
+            .field("actual_quality", &self.actual_quality)
+            .field("trial", &self.trial)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct AudioContent {
     pub track_ref: ResourceRef,
     pub bytes: Vec<u8>,
     pub content_type: String,
     pub filename: String,
+    /// The delivered bytes are a preview at this position on the original
+    /// track's timeline. `None` denotes full audio, never an unknown preview.
+    pub trial: Option<TrialWindow>,
 }
 
 impl fmt::Debug for AudioContent {
@@ -5200,11 +5486,12 @@ impl fmt::Debug for AudioContent {
             .field("bytes", &format_args!("[{} bytes]", self.bytes.len()))
             .field("content_type", &self.content_type)
             .field("filename", &self.filename)
+            .field("trial", &self.trial)
             .finish()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaDownload {
     #[serde(rename = "ref")]
     pub track_ref: ResourceRef,
@@ -5226,6 +5513,24 @@ pub struct MediaDownload {
     pub extensions: Extensions,
 }
 
+impl fmt::Debug for MediaDownload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaDownload")
+            .field("track_ref", &self.track_ref)
+            .field("platform", &self.platform)
+            .field("available", &self.available)
+            .field("url", &self.url.as_ref().map(|_| "[redacted]"))
+            .field("headers", &"[redacted]")
+            .field("format", &self.format)
+            .field("codec", &self.codec)
+            .field("bitrate", &self.bitrate)
+            .field("actual_quality", &self.actual_quality)
+            .field("platform_code", &self.platform_code)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderDescriptor {
     pub platform: Platform,
@@ -5236,6 +5541,132 @@ pub struct ProviderDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_catalogue_requires_an_explicit_kind_and_rejects_unknown_filters() {
+        for (kind, wire) in [
+            (PlaylistCatalogKind::Latest, "latest"),
+            (PlaylistCatalogKind::Hot, "hot"),
+            (PlaylistCatalogKind::Tag, "tag"),
+        ] {
+            let request = PlaylistCatalogRequest::new(kind, 20, 19);
+            assert!(request.account.is_none());
+            assert!(request.tag_id.is_none());
+            let value = serde_json::to_value(&request).unwrap();
+            assert_eq!(value["catalog"], wire);
+            assert_eq!(
+                serde_json::from_value::<PlaylistCatalogRequest>(value.clone()).unwrap(),
+                request
+            );
+            let mut unknown = value.clone();
+            unknown["tag"] = serde_json::json!("unverified");
+            assert!(serde_json::from_value::<PlaylistCatalogRequest>(unknown).is_err());
+            let mut missing = value;
+            missing.as_object_mut().unwrap().remove("catalog");
+            assert!(serde_json::from_value::<PlaylistCatalogRequest>(missing).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(crate::Capability::PlaylistCatalog).unwrap(),
+            "playlist_catalog"
+        );
+
+        let mut request = PlaylistCatalogRequest::new(PlaylistCatalogKind::Tag, 20, 0);
+        request.tag_id = Some("2189".into());
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["catalog"], "tag");
+        assert_eq!(value["tag_id"], "2189");
+        assert_eq!(
+            serde_json::from_value::<PlaylistCatalogRequest>(value).unwrap(),
+            request
+        );
+
+        let taxonomy = PlaylistCatalogTaxonomy {
+            platform: Platform::Kuwo,
+            groups: vec![PlaylistCatalogTagGroup {
+                id: "5".into(),
+                name: "主题".into(),
+                tags: vec![PlaylistCatalogTag {
+                    id: "2189".into(),
+                    name: "短视频".into(),
+                    extensions: Extensions::new(),
+                }],
+                extensions: Extensions::new(),
+            }],
+            extensions: Extensions::new(),
+        };
+        let value = serde_json::to_value(&taxonomy).unwrap();
+        assert_eq!(value["platform"], "kuwo");
+        assert_eq!(value["groups"][0]["tags"][0]["id"], "2189");
+        assert_eq!(
+            serde_json::from_value::<PlaylistCatalogTaxonomy>(value).unwrap(),
+            taxonomy
+        );
+    }
+
+    #[test]
+    fn purchased_album_old_json_remains_compatible_with_distinct_digital_resources() {
+        let legacy = serde_json::json!({"album":null,"name":"Unresolved record","artists":[],"cover_url":null,"extensions":{"goods_id":"99"}});
+        let mut record: PurchasedAlbum = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(record.digital_album.is_none());
+        assert_eq!(serde_json::to_value(&record).unwrap(), legacy);
+        record.digital_album = Some(Box::new(DigitalAlbum {
+            resource_ref: ResourceRef::new(Platform::Migu, "77").unwrap(),
+            platform: Platform::Migu,
+            id: "77".into(),
+            name: "Digital album".into(),
+            artists: vec![],
+            description: String::new(),
+            cover_url: None,
+            published_at: None,
+            price: None,
+            is_free: None,
+            purchasable: None,
+            purchased: None,
+            sale_count: None,
+            track_count: None,
+            tags: vec![],
+            extensions: Extensions::new(),
+        }));
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value["album"].is_null());
+        assert_eq!(value["digital_album"]["ref"], "migu:77");
+        assert_eq!(
+            serde_json::from_value::<PurchasedAlbum>(value).unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn playlist_visibility_update_requires_an_explicit_target_and_strict_fields() {
+        for visibility in [PlaylistVisibility::Public, PlaylistVisibility::Private] {
+            let r = PlaylistVisibilityUpdateRequest::new(visibility);
+            r.validate().unwrap();
+            assert_eq!(
+                serde_json::from_value::<PlaylistVisibilityUpdateRequest>(
+                    serde_json::to_value(&r).unwrap()
+                )
+                .unwrap(),
+                r
+            );
+        }
+        assert!(
+            PlaylistVisibilityUpdateRequest::new(PlaylistVisibility::PlatformDefault)
+                .validate()
+                .is_err()
+        );
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"visibility":null}),
+            serde_json::json!({"visibility":10}),
+            serde_json::json!({"visibility":"private","name":"ignored"}),
+        ] {
+            assert!(serde_json::from_value::<PlaylistVisibilityUpdateRequest>(body).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(crate::Capability::PlaylistVisibilityWrite).unwrap(),
+            "playlist_visibility_write"
+        );
+    }
 
     #[test]
     fn track_constructor_keeps_reference_fields_consistent() {
@@ -5254,6 +5685,7 @@ mod tests {
             bytes: b"private-decrypted-media".to_vec(),
             content_type: "audio/mp4".to_owned(),
             filename: "soda-123.m4a".to_owned(),
+            trial: None,
         };
 
         let debug = format!("{content:?}");
@@ -5650,6 +6082,10 @@ mod tests {
         assert_eq!(value["offset"], 60);
         assert_eq!(value["page"], 2);
         assert_eq!(value["account"], "spoken-word");
+
+        let newest = PodcastListRequest::new(PodcastCatalog::CategoryNewest, 10, 20);
+        let value = serde_json::to_value(newest).expect("serialize newest podcast request");
+        assert_eq!(value["catalog"], "category_newest");
     }
 
     #[test]
@@ -6260,13 +6696,23 @@ mod tests {
 
     #[test]
     fn stream_contract_preserves_modern_quality_tiers_variants_and_batch_failures() {
+        assert_eq!(
+            serde_json::to_value(StreamVariant::SingAlong).unwrap(),
+            "sing_along"
+        );
+        assert_eq!(
+            serde_json::from_value::<StreamVariant>(serde_json::json!("sing_along")).unwrap(),
+            StreamVariant::SingAlong
+        );
         for (quality, name) in [
             (Quality::Higher, "higher"),
             (Quality::High, "high"),
+            (Quality::Dtsx, "dtsx"),
             (Quality::Surround, "surround"),
             (Quality::Spatial, "spatial"),
             (Quality::Dolby, "dolby"),
             (Quality::Master, "master"),
+            (Quality::Vinyl, "vinyl"),
         ] {
             assert_eq!(
                 serde_json::to_value(quality).expect("serialize quality"),
@@ -6804,6 +7250,11 @@ mod tests {
             serde_json::to_value(ArtistArea::HongKongTaiwan)
                 .expect("serialize split Chinese artist area"),
             "hong_kong_taiwan"
+        );
+        assert_eq!(
+            serde_json::to_value(ArtistArea::JapaneseKorean)
+                .expect("serialize combined Japanese/Korean artist area"),
+            "japanese_korean"
         );
         assert_eq!(
             serde_json::to_value(ArtistGenre::RAndB).expect("serialize artist genre"),
@@ -7543,6 +7994,7 @@ mod tests {
             height: Some(1080),
             size: Some(177_950_120),
             duration_ms: Some(266_000),
+            source_range: None,
             requested_resolution: 1080,
             actual_resolution: Some(1080),
             platform_code: Some(200),

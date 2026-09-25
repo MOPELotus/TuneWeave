@@ -3,7 +3,10 @@ use std::{
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +17,9 @@ use crate::{ErrorCode, Platform, Result, TuneWeaveError};
 
 const CREDENTIAL_FILE_VERSION: u32 = 1;
 static CREDENTIAL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+// Coordinate independently opened stores as well as clones within this server process.
+// Network requests must complete before entering a store operation.
+static CREDENTIAL_STORE_LOCK: Mutex<()> = Mutex::new(());
 
 /// A provider-owned secret associated with one stable platform/account alias pair.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -99,9 +105,35 @@ pub trait AccountCredentialStore: Send + Sync {
     fn load_platform(&self, platform: Platform) -> Result<Vec<StoredAccountCredential>>;
     fn put(&self, credential: &StoredAccountCredential) -> Result<()>;
     fn remove(&self, platform: Platform, account: &str) -> Result<bool>;
+
+    /// Publish a first login only while its platform/account alias is still absent.
+    /// The absence check and publication must be atomic with every other store mutation.
+    fn insert_if_absent(&self, _credential: &StoredAccountCredential) -> Result<bool> {
+        Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            "account storage does not support conditional first credential writes",
+        ))
+    }
+
+    /// Replace or remove an unchanged credential. Returns false after logout, replacement,
+    /// or another refresh. Implementations must perform comparison and mutation atomically.
+    /// Providers should include a fresh session generation in each new login's secret.
+    fn compare_exchange(
+        &self,
+        _expected: &StoredAccountCredential,
+        _replacement: Option<&StoredAccountCredential>,
+    ) -> Result<bool> {
+        Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            "account storage does not support conditional credential updates",
+        ))
+    }
 }
 
 /// A compact, generation-based file store rooted below TuneWeave's private data directory.
+/// Reads and mutations share an advisory OS lock across cooperating processes on the
+/// same filesystem. All writers must use this store's locking protocol; the reserved
+/// `.credential-store.lock` file must not be removed while a store is in use.
 ///
 /// Secrets are intentionally excluded from Debug and errors. Files are published by an atomic
 /// same-directory rename; Unix files/directories are created with `0600`/`0700` permissions.
@@ -173,8 +205,8 @@ impl FileAccountCredentialStore {
     }
 }
 
-impl AccountCredentialStore for FileAccountCredentialStore {
-    fn load_platform(&self, platform: Platform) -> Result<Vec<StoredAccountCredential>> {
+impl FileAccountCredentialStore {
+    fn load_platform_unlocked(&self, platform: Platform) -> Result<Vec<StoredAccountCredential>> {
         let result = (|| {
             let platform_dir = self.platform_dir(platform);
             let entries = match fs::read_dir(&platform_dir) {
@@ -205,12 +237,12 @@ impl AccountCredentialStore for FileAccountCredentialStore {
         result
     }
 
-    fn put(&self, credential: &StoredAccountCredential) -> Result<()> {
+    fn put_unlocked(&self, credential: &StoredAccountCredential) -> Result<()> {
         let result = (|| {
             credential.validate()?;
             let account_dir = self.account_dir(credential.platform, &credential.account);
             create_private_dir_all(&account_dir)?;
-            let generation = credential_generation()?;
+            let generation = credential_generation(&account_dir)?;
             let temporary_path = account_dir.join(format!("{generation}.tmp"));
             let final_path = account_dir.join(format!("{generation}.json"));
             let file = CredentialFile {
@@ -240,7 +272,7 @@ impl AccountCredentialStore for FileAccountCredentialStore {
         result
     }
 
-    fn remove(&self, platform: Platform, account: &str) -> Result<bool> {
+    fn remove_unlocked(&self, platform: Platform, account: &str) -> Result<bool> {
         let result = (|| {
             let account = account.trim();
             if account.is_empty() || account.len() > 64 {
@@ -274,6 +306,151 @@ impl AccountCredentialStore for FileAccountCredentialStore {
         }
         result
     }
+}
+
+impl AccountCredentialStore for FileAccountCredentialStore {
+    fn load_platform(&self, platform: Platform) -> Result<Vec<StoredAccountCredential>> {
+        let _guard = self.lock()?;
+        self.load_platform_unlocked(platform)
+    }
+
+    fn put(&self, credential: &StoredAccountCredential) -> Result<()> {
+        let _guard = self.lock()?;
+        self.put_unlocked(credential)
+    }
+
+    fn remove(&self, platform: Platform, account: &str) -> Result<bool> {
+        let _guard = self.lock()?;
+        self.remove_unlocked(platform, account)
+    }
+
+    fn insert_if_absent(&self, credential: &StoredAccountCredential) -> Result<bool> {
+        credential.validate()?;
+        let _guard = self.lock()?;
+        let current = self.load_platform_unlocked(credential.platform)?;
+        if current
+            .iter()
+            .any(|value| value.account == credential.account)
+        {
+            return Ok(false);
+        }
+        self.put_unlocked(credential)?;
+        Ok(true)
+    }
+
+    fn compare_exchange(
+        &self,
+        expected: &StoredAccountCredential,
+        replacement: Option<&StoredAccountCredential>,
+    ) -> Result<bool> {
+        expected.validate()?;
+        if let Some(replacement) = replacement {
+            replacement.validate()?;
+            if replacement.platform != expected.platform || replacement.account != expected.account
+            {
+                return Err(TuneWeaveError::invalid_request(
+                    "conditional credential updates must preserve the platform and account",
+                ));
+            }
+        }
+        let _guard = self.lock()?;
+        let current = self.load_platform_unlocked(expected.platform)?;
+        if current
+            .iter()
+            .find(|entry| entry.account == expected.account)
+            != Some(expected)
+        {
+            return Ok(false);
+        }
+        match replacement {
+            Some(replacement) => self.put_unlocked(replacement)?,
+            None => {
+                self.remove_unlocked(expected.platform, &expected.account)?;
+            }
+        }
+        Ok(true)
+    }
+}
+
+// Keep the file first: closing it releases the OS lock before another local thread
+// can enter. The fixed lock file must never be removed or replaced during normal operation.
+struct CredentialStoreGuard {
+    _file: fs::File,
+    _local: MutexGuard<'static, ()>,
+}
+const LOCK_FILE: &str = ".credential-store.lock";
+impl FileAccountCredentialStore {
+    fn lock(&self) -> Result<CredentialStoreGuard> {
+        let local = CREDENTIAL_STORE_LOCK.lock().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "account credential storage lock is unavailable",
+            )
+        })?;
+        create_private_dir_all(&self.root)?;
+        let path = self.root.join(LOCK_FILE);
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                validate_lock_file(&path)?;
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| store_io_error("open account credential lock", e))?
+            }
+            Err(e) => return Err(store_io_error("create account credential lock", e)),
+        };
+        let path_metadata = validate_lock_file(&path)?;
+        let file_metadata = file
+            .metadata()
+            .map_err(|e| store_io_error("inspect account credential lock", e))?;
+        if !file_metadata.is_file() || file_metadata.len() != 0 {
+            return Err(invalid_lock_file());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if path_metadata.dev() != file_metadata.dev()
+                || path_metadata.ino() != file_metadata.ino()
+                || file_metadata.nlink() != 1
+            {
+                return Err(invalid_lock_file());
+            }
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| store_io_error("protect account credential lock", e))?;
+        }
+        #[cfg(not(unix))]
+        let _ = path_metadata;
+        // Fully qualify the extension method to honor the crate's Rust 1.85 MSRV.
+        fs4::FileExt::lock(&file)
+            .map_err(|e| store_io_error("lock account credential storage", e))?;
+        Ok(CredentialStoreGuard {
+            _file: file,
+            _local: local,
+        })
+    }
+}
+fn invalid_lock_file() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::InternalError,
+        "account credential lock file is invalid",
+    )
+}
+fn validate_lock_file(path: &Path) -> Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| store_io_error("inspect account credential lock", e))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != 0 {
+        return Err(invalid_lock_file());
+    }
+    Ok(metadata)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -369,8 +546,8 @@ fn write_private_file(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn credential_generation() -> Result<String> {
-    let nanos = SystemTime::now()
+fn credential_generation(account_dir: &Path) -> Result<String> {
+    let mut nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| {
             TuneWeaveError::new(
@@ -379,6 +556,44 @@ fn credential_generation() -> Result<String> {
             )
         })?
         .as_nanos();
+    // Publication must remain newer than every previous generation even when the
+    // wall clock moves backwards. This also makes a crash before cleanup harmless.
+    // The caller holds the store's process and OS locks throughout this operation.
+    for entry in fs::read_dir(account_dir)
+        .map_err(|error| store_io_error("read account credential generations", error))?
+    {
+        let entry = entry.map_err(|error| store_io_error("read credential entry", error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| store_io_error("inspect credential generation", error))?
+            .is_file()
+            || !is_credential_generation(&entry.path())
+        {
+            continue;
+        }
+        let invalid = || {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "stored credential generation name is invalid",
+            )
+        };
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(invalid)?;
+        let stem = name.rsplit_once('.').ok_or_else(invalid)?.0;
+        let bytes = stem.as_bytes();
+        if bytes.len() != 67
+            || bytes[39] != b'-'
+            || bytes[50] != b'-'
+            || !bytes[..39].iter().all(u8::is_ascii_digit)
+            || !bytes[40..50].iter().all(u8::is_ascii_digit)
+            || !bytes[51..].iter().all(u8::is_ascii_hexdigit)
+        {
+            return Err(invalid());
+        }
+        let previous: u128 = stem[..39].parse().map_err(|_| invalid())?;
+        let next = previous.checked_add(1).ok_or_else(invalid)?;
+        nanos = nanos.max(next);
+    }
     let sequence = CREDENTIAL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     Ok(format!("{nanos:039}-{:010}-{sequence:016x}", process::id()))
 }
@@ -402,7 +617,7 @@ fn remove_old_generations(account_dir: &Path, keep: &Path) -> Result<()> {
             .file_type()
             .map_err(|error| store_io_error("inspect credential generation", error))?;
         if file_type.is_file()
-            && is_published_credential(&path)
+            && is_credential_generation(&path)
             && entry.file_name().as_os_str() < keep_name
         {
             fs::remove_file(path)
@@ -431,8 +646,68 @@ fn store_io_error(operation: &str, error: std::io::Error) -> TuneWeaveError {
 }
 
 #[cfg(test)]
+mod process_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conditional_updates_preserve_other_accounts_and_reject_stale_sources() {
+        let directory = TestDirectory::new();
+        let store = FileAccountCredentialStore::new(&directory.0);
+        let original =
+            StoredAccountCredential::new(Platform::Soda, "a", "session", "generation-1").unwrap();
+        let rotated =
+            StoredAccountCredential::new(Platform::Soda, "a", "session", "generation-2").unwrap();
+        let other =
+            StoredAccountCredential::new(Platform::Soda, "b", "session", "other-session").unwrap();
+        store.put(&original).unwrap();
+        store.put(&other).unwrap();
+        assert!(store.compare_exchange(&original, Some(&other)).is_err());
+        assert!(store.compare_exchange(&original, Some(&rotated)).unwrap());
+        assert!(!store.compare_exchange(&original, None).unwrap());
+        assert_eq!(
+            store.load_platform(Platform::Soda).unwrap(),
+            vec![rotated.clone(), other.clone()]
+        );
+        assert!(store.compare_exchange(&rotated, None).unwrap());
+        assert!(!store.compare_exchange(&rotated, Some(&original)).unwrap());
+        assert_eq!(store.load_platform(Platform::Soda).unwrap(), vec![other]);
+    }
+
+    #[test]
+    fn simultaneous_refreshes_have_one_winner_across_store_instances() {
+        let directory = TestDirectory::new();
+        let original =
+            StoredAccountCredential::new(Platform::Migu, "a", "session", "initial").unwrap();
+        let store = FileAccountCredentialStore::new(&directory.0);
+        store.put(&original).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let store = FileAccountCredentialStore::new(&directory.0);
+                let original = original.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let next = StoredAccountCredential::new(
+                        Platform::Migu,
+                        "a",
+                        "session",
+                        format!("rotated-{index}"),
+                    )
+                    .unwrap();
+                    barrier.wait();
+                    store.compare_exchange(&original, Some(&next)).unwrap()
+                })
+            })
+            .collect();
+        let winners = workers
+            .into_iter()
+            .map(|worker| usize::from(worker.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(winners, 1);
+    }
 
     #[test]
     fn credential_store_operation_names_are_stable() {

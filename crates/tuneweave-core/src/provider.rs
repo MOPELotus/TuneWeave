@@ -30,27 +30,29 @@ use crate::{
     ListeningRightsAdRequest, ListeningRightsGainRequest, ListeningRightsGainResult,
     ListeningRightsStatus, ListeningRightsStatusRequest, LocalTrackMatchRequest,
     LocalTrackMatchResult, Lyrics, LyricsRequest, MediaDownload, MediaStream, MembershipSummary,
-    MultiStyleLyricTranslations, MusicVideoListRequest, Page, PageRequest, PasswordLoginRequest,
-    PersonalFmRequest, Platform, PlatformApiRequest, PlatformBatchRequest, PlaybackHistoryEntry,
-    PlaybackHistoryRequest, Playlist, PlaylistCoverUpdateResult, PlaylistCreateRequest,
-    PlaylistDeleteRequest, PlaylistDeleteResult, PlaylistItemMutationAction,
-    PlaylistItemMutationRequest, PlaylistItemMutationResult, PlaylistMutationResult,
-    PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem, PlaylistTrackOrderRequest,
-    PlaylistTrackOrderResult, PlaylistUpdateRequest, Podcast, PodcastCategoryRecommendations,
-    PodcastChartEntry, PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest,
-    PodcastEpisode, PodcastEpisodeChartEntry, PodcastEpisodeChartRequest,
-    PodcastEpisodeDeleteRequest, PodcastEpisodeDeleteResult, PodcastEpisodeListRequest,
-    PodcastEpisodeLyrics, PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult,
-    PodcastEpisodePlaybackHistoryEntry, PodcastEpisodeRecommendationRequest, PodcastEpisodeStream,
-    PodcastEpisodeUploadRequest, PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest,
-    PodcastListRequest, PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult,
-    ProviderCredential, ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart,
-    RadioPlaybackQueue, RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest,
-    RadioStyleCatalog, RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest,
-    RecentAlbumHistoryEntry, RecentPlaylistHistoryEntry, RecentTrackHistoryEntry,
-    RecommendationDislikeRequest, RecommendationDislikeResult, RecommendationFeed,
-    RecommendationFeedRequest, RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest,
-    RelatedVideoList, RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
+    MiguNativeMvStreamRequest, MultiStyleLyricTranslations, MusicVideoListRequest, Page,
+    PageRequest, PasswordLoginRequest, PersonalFmRequest, Platform, PlatformApiRequest,
+    PlatformBatchRequest, PlaybackHistoryEntry, PlaybackHistoryRequest, Playlist,
+    PlaylistCoverUpdateResult, PlaylistCreateRequest, PlaylistDeleteRequest, PlaylistDeleteResult,
+    PlaylistItemMutationAction, PlaylistItemMutationRequest, PlaylistItemMutationResult,
+    PlaylistMutationResult, PlaylistOccurrenceOrderRequest, PlaylistOccurrenceOrderResult,
+    PlaylistOrderRequest, PlaylistOrderResult, PlaylistPlayableItem, PlaylistTrackOccurrence,
+    PlaylistTrackOrderRequest, PlaylistTrackOrderResult, PlaylistUpdateRequest,
+    PlaylistVisibilityUpdateRequest, Podcast, PodcastCategoryRecommendations, PodcastChartEntry,
+    PodcastChartRequest, PodcastCreatorChartEntry, PodcastCreatorChartRequest, PodcastEpisode,
+    PodcastEpisodeChartEntry, PodcastEpisodeChartRequest, PodcastEpisodeDeleteRequest,
+    PodcastEpisodeDeleteResult, PodcastEpisodeListRequest, PodcastEpisodeLyrics,
+    PodcastEpisodeOrderRequest, PodcastEpisodeOrderResult, PodcastEpisodePlaybackHistoryEntry,
+    PodcastEpisodeRecommendationRequest, PodcastEpisodeStream, PodcastEpisodeUploadRequest,
+    PodcastEpisodeUploadResult, PodcastEpisodeWorkbenchSearchRequest, PodcastListRequest,
+    PodcastTaxonomy, PodcastTaxonomyRequest, ProviderAuthResult, ProviderCredential,
+    ProviderDescriptor, ProviderLogoutResult, ProviderQrPoll, ProviderQrStart, RadioPlaybackQueue,
+    RadioPlaybackQueueRequest, RadioStation, RadioStationListRequest, RadioStyleCatalog,
+    RadioStyleCatalogRequest, RadioTaxonomy, RadioTaxonomyRequest, RecentAlbumHistoryEntry,
+    RecentPlaylistHistoryEntry, RecentTrackHistoryEntry, RecommendationDislikeRequest,
+    RecommendationDislikeResult, RecommendationFeed, RecommendationFeedRequest,
+    RecommendationRequest, RelatedPlaylistList, RelatedPlaylistRequest, RelatedVideoList,
+    RelatedVideoRequest, ResolutionStatus, Result, SearchDefaultKeyword,
     SearchDefaultKeywordRequest, SearchItem, SearchKind, SearchMultiMatch, SearchMultiMatchRequest,
     SearchQuery, SearchSuggestionList, SearchSuggestionRequest, SearchTrendingList,
     SearchTrendingRequest, SheetMusicAvailability, SheetMusicList, SheetMusicSource,
@@ -96,6 +98,25 @@ pub trait MusicProvider: Send + Sync {
             self.platform(),
             Capability::CallerManagedCredentials,
         ))
+    }
+
+    /// Collects a credential rotated by an operation on a request-scoped caller view.
+    /// Server-owned providers return None. HTTP adapters must return this material to the
+    /// caller with no-store caching; it must never appear in logs or resource extensions.
+    fn take_response_credential(&self) -> Result<Option<ProviderCredential>> {
+        Ok(None)
+    }
+
+    /// Discards a pending caller update after the operation invalidated its session.
+    /// Resolvers and batch adapters must call this when they catch such an error and continue.
+    fn discard_response_credential_after_error(&self, code: ErrorCode) -> Result<()> {
+        if matches!(
+            code,
+            ErrorCode::AuthenticationRequired | ErrorCode::Conflict
+        ) {
+            let _ = self.take_response_credential()?;
+        }
+        Ok(())
     }
 
     fn supports(&self, capability: Capability) -> bool {
@@ -676,10 +697,41 @@ pub trait MusicProvider: Send + Sync {
         Ok(results)
     }
 
+    async fn set_digital_album_subscription(
+        &self,
+        _id: &str,
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<SubscriptionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DigitalAlbumSubscriptionWrite,
+        ))
+    }
+
+    async fn set_digital_album_subscriptions(
+        &self,
+        _ids: &[String],
+        _subscribed: bool,
+        _account: Option<&str>,
+    ) -> Result<Vec<SubscriptionResult>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DigitalAlbumSubscriptionWrite,
+        ))
+    }
+
     async fn digital_album(&self, _id: &str, _account: Option<&str>) -> Result<DigitalAlbum> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::DigitalAlbumDetail,
+        ))
+    }
+
+    async fn digital_album_tracks(&self, _id: &str, _request: &PageRequest) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::DigitalAlbumTracks,
         ))
     }
 
@@ -710,7 +762,19 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn chart_periods(
+        &self,
+        _id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<crate::ChartPeriodSummary>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ChartPeriods,
+        ))
+    }
+
     async fn chart_tracks(&self, id: &str, request: &ChartTrackListRequest) -> Result<Page<Track>> {
+        request.period.require_current(self.platform())?;
         self.playlist_tracks(
             id,
             &PageRequest {
@@ -910,6 +974,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn artist_digital_albums(
+        &self,
+        _id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<DigitalAlbum>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistDigitalAlbums,
+        ))
+    }
+
     async fn artist_fans(&self, _id: &str, _request: &PageRequest) -> Result<Page<User>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
@@ -1045,6 +1120,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn migu_native_mv_stream(
+        &self,
+        _id: &str,
+        _request: &MiguNativeMvStreamRequest,
+    ) -> Result<VideoStream> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::VideoStream,
+        ))
+    }
+
     async fn video_streams(
         &self,
         ids: &[String],
@@ -1097,6 +1183,26 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::ArtistSubscriptionWrite,
+        ))
+    }
+
+    async fn playlist_catalog(
+        &self,
+        _request: &crate::PlaylistCatalogRequest,
+    ) -> Result<Page<Playlist>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistCatalog,
+        ))
+    }
+
+    async fn playlist_catalog_taxonomy(
+        &self,
+        _request: &crate::PlaylistCatalogTaxonomyRequest,
+    ) -> Result<crate::PlaylistCatalogTaxonomy> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistCatalog,
         ))
     }
 
@@ -1203,6 +1309,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    /// Changes visibility without changing the playlist's other metadata.
+    async fn update_playlist_visibility(
+        &self,
+        _id: &str,
+        _request: &PlaylistVisibilityUpdateRequest,
+    ) -> Result<PlaylistMutationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistVisibilityWrite,
+        ))
+    }
+
     async fn delete_playlists(
         &self,
         _request: &PlaylistDeleteRequest,
@@ -1222,6 +1340,28 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PlaylistWrite,
+        ))
+    }
+
+    async fn playlist_track_occurrences(
+        &self,
+        _id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<PlaylistTrackOccurrence>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistOccurrenceRead,
+        ))
+    }
+
+    async fn reorder_playlist_occurrences(
+        &self,
+        _id: &str,
+        _request: &PlaylistOccurrenceOrderRequest,
+    ) -> Result<PlaylistOccurrenceOrderResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistOccurrenceWrite,
         ))
     }
 
@@ -1246,6 +1386,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    /// Reorders the collected playlist directory, distinct from self-created lists.
+    async fn reorder_collected_playlists(
+        &self,
+        _request: &PlaylistOrderRequest,
+    ) -> Result<PlaylistOrderResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistCollectionOrderWrite,
+        ))
+    }
+
     async fn update_playlist_cover(
         &self,
         _id: &str,
@@ -1264,6 +1415,58 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn account_playlist_submissions(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<crate::PlaylistSubmission>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountPlaylistSubmissions,
+        ))
+    }
+
+    async fn submit_playlist(
+        &self,
+        _id: &str,
+        _request: &crate::PlaylistSubmissionRequest,
+    ) -> Result<crate::PlaylistSubmissionResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistSubmissionWrite,
+        ))
+    }
+
+    async fn delete_playlist_submission_records(
+        &self,
+        _id: &str,
+        _request: &crate::PlaylistSubmissionRecordDeleteRequest,
+    ) -> Result<crate::PlaylistSubmissionRecordDeleteResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PlaylistSubmissionRecordDelete,
+        ))
+    }
+
+    async fn account_purchased_tracks(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<crate::PurchasedTrack>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountPurchasedTracks,
+        ))
+    }
+
+    async fn account_purchased_albums(
+        &self,
+        _request: &PageRequest,
+    ) -> Result<Page<crate::PurchasedAlbum>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountPurchasedAlbums,
+        ))
+    }
+
     async fn account_albums(&self, _request: &PageRequest) -> Result<Page<Album>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
@@ -1279,6 +1482,24 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountAlbums,
+        ))
+    }
+
+    async fn account_digital_albums(&self, _request: &PageRequest) -> Result<Page<DigitalAlbum>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountDigitalAlbums,
+        ))
+    }
+
+    async fn user_favorite_digital_albums(
+        &self,
+        _user_id: &str,
+        _request: &PageRequest,
+    ) -> Result<Page<DigitalAlbum>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountDigitalAlbums,
         ))
     }
 
@@ -1709,6 +1930,19 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    /// Full downloadable bytes. Implementations must check download rights;
+    /// the default must never reuse playback authorization or `audio_content`.
+    async fn audio_download_content(
+        &self,
+        _track: &Track,
+        _request: &StreamRequest,
+    ) -> Result<AudioContent> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AudioDownload,
+        ))
+    }
+
     async fn streams(&self, tracks: &[Track], request: &StreamRequest) -> Result<StreamBatch> {
         let mut outcomes = Vec::with_capacity(tracks.len());
         for track in tracks {
@@ -1721,20 +1955,32 @@ pub trait MusicProvider: Send + Sync {
                     error: None,
                     extensions: Extensions::new(),
                 }),
-                Err(error) => outcomes.push(StreamOutcome {
-                    track_ref: track.resource_ref.clone(),
-                    status: stream_error_status(error.code),
-                    stream: None,
-                    error_code: Some(error.code),
-                    error: Some(error.message),
-                    extensions: Extensions::from([("details".to_owned(), error.details)]),
-                }),
+                Err(error) => {
+                    self.discard_response_credential_after_error(error.code)?;
+                    outcomes.push(StreamOutcome {
+                        track_ref: track.resource_ref.clone(),
+                        status: stream_error_status(error.code),
+                        stream: None,
+                        error_code: Some(error.code),
+                        error: Some(error.message),
+                        extensions: Extensions::from([("details".to_owned(), error.details)]),
+                    });
+                }
             }
         }
         Ok(StreamBatch {
             outcomes,
             extensions: Extensions::new(),
         })
+    }
+
+    /// Whether downloading needs a separate provider authorization for this account scope.
+    ///
+    /// When true, a stream URL (including a full, untruncated stream) is not a download
+    /// grant. Consumers must call `download` and honor its result without converting a
+    /// denied download back into a successful stream-based download.
+    fn requires_download_authorization(&self, _account: Option<&str>) -> bool {
+        false
     }
 
     async fn download(&self, _track: &Track, _request: &StreamRequest) -> Result<MediaDownload> {
@@ -1760,6 +2006,17 @@ pub trait MusicProvider: Send + Sync {
         self.start_qr_login(login_type).await
     }
 
+    /// Bind the destination alias when creating a QR transaction where supported.
+    /// The default preserves providers whose existing implementation binds at polling.
+    async fn start_qr_login_for_account(
+        &self,
+        login_type: Option<&str>,
+        _account: &str,
+        mode: CredentialMode,
+    ) -> Result<ProviderQrStart> {
+        self.start_qr_login_with_mode(login_type, mode).await
+    }
+
     async fn poll_qr_login(
         &self,
         _provider_transaction_id: &str,
@@ -1781,6 +2038,20 @@ pub trait MusicProvider: Send + Sync {
         self.poll_qr_login(provider_transaction_id, account).await
     }
 
+    /// Continues an existing QR transaction without changing its account or ownership.
+    async fn verify_qr_login(
+        &self,
+        _provider_transaction_id: &str,
+        _account: &str,
+        _mode: CredentialMode,
+        _action: &crate::QrVerificationAction,
+    ) -> Result<ProviderQrPoll> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::QrLoginVerification,
+        ))
+    }
+
     async fn password_login(&self, _request: &PasswordLoginRequest) -> Result<AccountProfile> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
@@ -1799,6 +2070,59 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    /// Verifies an imported credential with the platform before storing or returning it.
+    /// A successful import starts a new login generation, with the requested ownership.
+    async fn import_credential(
+        &self,
+        _request: &crate::CredentialImportRequest,
+        _mode: CredentialMode,
+    ) -> Result<ProviderAuthResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CredentialImport,
+        ))
+    }
+
+    /// Starts password authentication, retaining no password in a pending challenge receipt.
+    /// The default adapter preserves providers with a single-step password flow.
+    async fn begin_password_login(
+        &self,
+        request: &PasswordLoginRequest,
+        mode: CredentialMode,
+    ) -> Result<crate::PasswordLoginProgress> {
+        self.password_login_with_mode(request, mode)
+            .await
+            .map(crate::PasswordLoginProgress::Confirmed)
+    }
+
+    /// Starts password authentication with client browser context when a provider's
+    /// documented human challenge requires it. Existing providers reject this context.
+    async fn begin_password_login_with_context(
+        &self,
+        request: &PasswordLoginRequest,
+        context: Option<&crate::PasswordLoginContext>,
+        mode: CredentialMode,
+    ) -> Result<crate::PasswordLoginProgress> {
+        if context.is_some() {
+            return Err(TuneWeaveError::invalid_request(
+                "This provider does not accept password login browser context",
+            )
+            .with_platform(self.platform()));
+        }
+        self.begin_password_login(request, mode).await
+    }
+
+    async fn advance_password_login(
+        &self,
+        _challenge: &crate::ProviderPasswordChallenge,
+        _action: &crate::PasswordChallengeAction,
+    ) -> Result<crate::PasswordLoginProgress> {
+        Err(TuneWeaveError::invalid_request(
+            "This provider does not support password challenge actions",
+        )
+        .with_platform(self.platform()))
+    }
+
     async fn start_auth_challenge(&self, _request: &AuthChallengeRequest) -> Result<()> {
         Err(TuneWeaveError::unsupported(
             self.platform(),
@@ -1811,8 +2135,75 @@ pub trait MusicProvider: Send + Sync {
         request: &AuthChallengeRequest,
         mode: CredentialMode,
     ) -> Result<()> {
+        request.reject_account_creation_option(self.platform())?;
         self.require_credential_mode(mode)?;
         self.start_auth_challenge(request).await
+    }
+
+    /// Sends a challenge and returns the receipt required by `complete_auth_challenge`.
+    /// The default adapter preserves existing stateless provider implementations.
+    async fn begin_auth_challenge(
+        &self,
+        request: &AuthChallengeRequest,
+        mode: CredentialMode,
+    ) -> Result<crate::ProviderAuthChallenge> {
+        self.start_auth_challenge_with_mode(request, mode).await?;
+        Ok(crate::ProviderAuthChallenge::stateless(
+            self.platform(),
+            request.clone(),
+            mode,
+        ))
+    }
+
+    /// Verifies the original receipt without accepting a different principal or ownership.
+    /// Providers issuing stateful receipts must override this method and enforce one-time use.
+    async fn complete_auth_challenge(
+        &self,
+        challenge: &crate::ProviderAuthChallenge,
+        code: &str,
+    ) -> Result<ProviderAuthResult> {
+        if challenge.platform() != self.platform() || challenge.provider_transaction_id().is_some()
+        {
+            return Err(TuneWeaveError::invalid_request(
+                "Authentication challenge does not belong to this provider protocol",
+            )
+            .with_platform(self.platform()));
+        }
+        self.verify_auth_challenge_with_mode(challenge.request(), code, challenge.credential_mode())
+            .await
+    }
+
+    /// Reads a receipt's current nonterminal state without sending another challenge.
+    /// Stateful providers with additional verification must override this method.
+    async fn auth_challenge_status(
+        &self,
+        challenge: &crate::ProviderAuthChallenge,
+    ) -> Result<crate::AuthChallengeStatus> {
+        if challenge.platform() != self.platform() {
+            return Err(
+                TuneWeaveError::invalid_request("Challenge platform does not match")
+                    .with_platform(self.platform()),
+            );
+        }
+        Ok(crate::AuthChallengeStatus::Waiting)
+    }
+
+    /// Continues the original transaction; only Confirmed can contain credentials.
+    async fn advance_auth_challenge(
+        &self,
+        challenge: &crate::ProviderAuthChallenge,
+        action: &crate::AuthChallengeAction,
+    ) -> Result<crate::AuthChallengeProgress> {
+        match action {
+            crate::AuthChallengeAction::SubmitCode { code } => self
+                .complete_auth_challenge(challenge, code)
+                .await
+                .map(crate::AuthChallengeProgress::Confirmed),
+            _ => Err(TuneWeaveError::invalid_request(
+                "This provider does not support the requested challenge action",
+            )
+            .with_platform(self.platform())),
+        }
     }
 
     async fn validate_auth_challenge(
@@ -1873,6 +2264,7 @@ pub trait MusicProvider: Send + Sync {
         code: &str,
         mode: CredentialMode,
     ) -> Result<ProviderAuthResult> {
+        request.reject_account_creation_option(self.platform())?;
         self.require_credential_mode(mode)?;
         Ok(ProviderAuthResult::server_managed(
             self.verify_auth_challenge(request, code).await?,
@@ -1908,6 +2300,19 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::SessionManagement,
+        ))
+    }
+
+    /// Explicitly revoke the selected upstream session, independently of local logout.
+    async fn revoke_session_with_ownership(
+        &self,
+        _account: &str,
+        _source_credential: Option<&ProviderCredential>,
+        _mode: CredentialMode,
+    ) -> Result<crate::ProviderSessionRevocationResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SessionRevocation,
         ))
     }
 
@@ -1959,6 +2364,59 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountCloudDirectUpload,
+        ))
+    }
+
+    /// Stateful direct-upload planning. No provider-specific response parsing belongs in clients.
+    async fn begin_cloud_upload_transfer(
+        &self,
+        _request: &crate::CloudUploadTransferRequest,
+    ) -> Result<crate::CloudUploadTransfer> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUploadTransfer,
+        ))
+    }
+    async fn cloud_upload_transfer(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<crate::CloudUploadTransfer> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUploadTransfer,
+        ))
+    }
+    async fn advance_cloud_upload_transfer(
+        &self,
+        _id: &str,
+        _response: &crate::CloudUploadStepResponse,
+        _account: Option<&str>,
+    ) -> Result<crate::CloudUploadTransfer> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUploadTransfer,
+        ))
+    }
+    async fn cancel_cloud_upload_transfer(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<bool> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUploadTransfer,
+        ))
+    }
+    async fn publish_cloud_upload_transfer(
+        &self,
+        _id: &str,
+        _metadata: &crate::CloudUploadPublishMetadata,
+        _account: Option<&str>,
+    ) -> Result<CloudUploadResult> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::AccountCloudUploadTransfer,
         ))
     }
 
