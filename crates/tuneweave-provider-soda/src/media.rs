@@ -6,6 +6,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::fmt;
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
 
+mod clear;
+#[cfg(test)]
+mod clear_tests;
+pub(crate) mod plaintext;
+
 const MAX_MEDIA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const MAX_SAMPLE_COUNT: usize = 2_000_000;
 const MAX_CHUNK_COUNT: usize = 2_000_000;
@@ -91,6 +96,7 @@ struct SubsampleEncryption {
 
 struct EncryptedSampleEntry {
     header: BoxHeader,
+    protection: BoxHeader,
     description_index: u32,
     original_format: SodaAudioFormat,
     original_fourcc: [u8; 4],
@@ -209,6 +215,10 @@ fn decrypt_cenc_audio_internal(
         sample_entry.description_index,
         &media_payloads,
     )?;
+    // Plan container changes before touching samples. Unsupported protection
+    // groups must not be erased and presented as successfully decrypted media.
+    let protection_boxes =
+        clear::protection_boxes(media, &top_level, moov, &children, &sample_entry)?;
 
     for ((range, encryption), expected_size) in
         sample_ranges.iter().zip(&encryption).zip(&sample_sizes)
@@ -224,6 +234,7 @@ fn decrypt_cenc_audio_internal(
 
     media[sample_entry.header.offset + 4..sample_entry.header.offset + 8]
         .copy_from_slice(&sample_entry.original_fourcc);
+    clear::retire_protection_boxes(media, &protection_boxes);
     Ok(InternalDecryption {
         metadata: DecryptedSodaMedia {
             format: sample_entry.original_format,
@@ -508,6 +519,7 @@ fn encrypted_sample_entry(media: &[u8], stsd: BoxHeader) -> Result<Option<Encryp
         let (per_sample_iv_size, key_id) = parse_tenc(media, tenc)?;
         encrypted = Some(EncryptedSampleEntry {
             header: entry,
+            protection: sinf,
             description_index: u32::try_from(index + 1)
                 .map_err(|_| media_error("Soda media has too many sample descriptions"))?,
             original_format,

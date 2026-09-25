@@ -1,6 +1,8 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
+    path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -12,13 +14,43 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tuneweave_core::{
-    Album, AlbumSummary, ArtistSummary, AudioContent, ErrorCode, Extensions, LyricContributor,
-    Lyrics, Platform, Playlist, Quality, ResourceRef, Result, Track, TrackAvailability,
-    TrackAvailabilityRequest, TuneWeaveError, UpstreamBusinessClass, UpstreamOutcome,
-    UpstreamRequestSummary,
+    AccountCredentialStore, Album, AlbumSummary, ArtistSummary, AudioContent, DigitalAlbum,
+    ErrorCode, Extensions, LyricContributor, Lyrics, Platform, Playlist, Quality, ResourceRef,
+    Result, Track, TrackAvailability, TrackAvailabilityRequest, TuneWeaveError,
+    UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
 
+mod account_album;
+mod account_digital_albums;
+mod account_media;
+pub(crate) mod account_search;
+pub(crate) use account_album::SodaAccountAlbum;
+#[cfg(test)]
+pub(crate) use account_album::test_fixture as test_account_album_fixture;
+pub(crate) use account_digital_albums::{
+    BACKEND as ACCOUNT_DIGITAL_ALBUMS_BACKEND, SodaAccountDigitalAlbums,
+};
+mod account_playlist;
+mod artist;
+pub(crate) mod artist_catalog;
+mod artist_collection;
+mod playlist_sort;
+pub(crate) use account_media::SodaAccountTrack;
+pub(crate) use account_playlist::SodaAccountPlaylistPage;
+pub(crate) use artist_catalog::SodaArtistCatalogue;
+mod catalog;
+mod lyrics;
+pub(crate) mod membership;
+pub(crate) mod player_info;
+pub(crate) mod session_revocation;
+mod suggestions;
+pub(crate) use catalog::SodaCatalogKind;
+#[cfg(test)]
+pub(crate) use player_info::test_secondary_fixture;
+pub(crate) use suggestions::validate_suggestion_query;
+
+use crate::device::{SodaDeviceState, SodaDeviceStore};
 use crate::identity::{
     SodaTrackIdentity, SodaTrackIdentityInput, classify_track_identity,
     parse_short_redirect_location,
@@ -26,6 +58,8 @@ use crate::identity::{
 use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decrypt_cenc_audio};
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
+pub(crate) const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
+pub(crate) const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 128;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/search/track";
 const TRACK_DETAIL_ENDPOINT: &str = "https://beta-luna.douyin.com/luna/h5/seo_track";
 const PLAYLIST_DETAIL_ENDPOINT: &str = "https://api.qishui.com/luna/pc/playlist/detail";
@@ -41,6 +75,8 @@ const USER_AGENT: &str = "TuneWeave/0.1 (Soda public music provider)";
 #[derive(Clone, Default)]
 pub struct SodaConfig {
     pub proxy_url: Option<String>,
+    pub device_path: Option<PathBuf>,
+    pub credential_store: Option<Arc<dyn AccountCredentialStore>>,
 }
 
 impl fmt::Debug for SodaConfig {
@@ -51,6 +87,11 @@ impl fmt::Debug for SodaConfig {
                 "proxy_url",
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
             )
+            .field("device_path", &self.device_path)
+            .field(
+                "credential_store_configured",
+                &self.credential_store.is_some(),
+            )
             .finish()
     }
 }
@@ -59,6 +100,9 @@ impl fmt::Debug for SodaConfig {
 pub struct SodaClient {
     http: Client,
     proxy_configured: bool,
+    device: Arc<SodaDeviceStore>,
+    #[cfg(test)]
+    auth_origin: Option<Url>,
 }
 
 impl fmt::Debug for SodaClient {
@@ -146,7 +190,53 @@ struct SodaSeoTrack {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SodaLyricPayload {
+    #[serde(rename = "type")]
+    kind: Option<String>,
     content: String,
+    translations: Option<SodaLyricTranslations>,
+    lyric_contributor: Option<SodaLyricContributorPayload>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SodaLyricTranslations {
+    cn: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaLyricLanguageTranslations {
+    #[serde(rename = "CHINESE")]
+    chinese: Option<SodaChineseLyricTranslation>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaChineseLyricTranslation {
+    content: String,
+    lyric_contributor: Option<SodaLyricContributorPayload>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaLyricContributorPayload {
+    user: Option<SodaLyricContributorUser>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaLyricContributorUser {
+    nickname: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+struct SodaTrackLyricPayload {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    content: String,
+    lang_translations: Option<SodaLyricLanguageTranslations>,
+    lyric_contributor: Option<SodaLyricContributorPayload>,
 }
 
 #[derive(Default, Deserialize)]
@@ -154,7 +244,8 @@ struct SodaLyricPayload {
 struct SodaTrackPlayer {
     expire_at: u64,
     media_id: String,
-    video_model: String,
+    video_model: Option<String>,
+    url_player_info: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -293,6 +384,7 @@ struct SodaPlaylistMetadata {
     title: String,
     public_title: String,
     desc: String,
+    is_private: Option<bool>,
     url_cover: SodaImage,
     count_tracks: u64,
     owner: SodaPlaylistOwner,
@@ -415,6 +507,8 @@ struct SodaTrack {
     id: String,
     name: String,
     duration: u64,
+    #[serde(skip_serializing)]
+    lyric: Option<SodaTrackLyricPayload>,
     vid: String,
     artists: Vec<SodaArtist>,
     album: SodaAlbum,
@@ -454,7 +548,7 @@ struct SodaAlbum {
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
-struct SodaImage {
+pub(crate) struct SodaImage {
     uri: String,
     urls: Vec<String>,
     template_prefix: String,
@@ -514,6 +608,7 @@ struct SodaQualityBenefit {
 #[serde(default)]
 struct SodaTrackState {
     offline: Option<bool>,
+    is_collected: Option<bool>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -605,6 +700,7 @@ impl SodaClient {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .user_agent(USER_AGENT);
         if let Some(proxy_url) = config.proxy_url.as_deref() {
             let proxy = Proxy::all(proxy_url).map_err(|_| {
@@ -619,7 +715,44 @@ impl SodaClient {
         Ok(Self {
             http,
             proxy_configured: config.proxy_url.is_some(),
+            device: Arc::new(SodaDeviceStore::new(config.device_path.clone())),
+            #[cfg(test)]
+            auth_origin: None,
         })
+    }
+
+    /// Initializes the private device identity used by Soda account flows.
+    /// Public anonymous music operations do not call this method.
+    pub fn initialize_login_device(&self) -> Result<()> {
+        self.device.initialize()
+    }
+
+    pub(crate) fn login_request(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> reqwest::RequestBuilder {
+        #[cfg(test)]
+        let url = if let Some(origin) = &self.auth_origin {
+            let mut target = origin.clone();
+            target.set_path(url.path());
+            target.set_query(url.query());
+            target
+        } else {
+            url
+        };
+        self.http.request(method, url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_auth_test_origin(mut self, origin: Url) -> Self {
+        assert_eq!(origin.host_str(), Some("127.0.0.1"));
+        self.auth_origin = Some(origin);
+        self
+    }
+
+    pub(crate) fn login_device(&self) -> Result<SodaDeviceState> {
+        self.device.snapshot()
     }
 
     #[cfg(test)]
@@ -805,7 +938,27 @@ impl SodaClient {
         let body = self
             .fetch_track_body(identity, "Soda track availability")
             .await?;
-        parse_track_availability_response(&body, identity, request)
+        self.availability_body(&body, identity, request).await
+    }
+
+    async fn availability_body(
+        &self,
+        body: &[u8],
+        identity: &SodaTrackIdentity,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let envelope = parse_track_envelope(body)?;
+        let track = validate_media_track(&envelope, identity, "Soda availability")?;
+        let model = if track.state.offline != Some(true) {
+            if let Some(player) = &envelope.track_player {
+                Some(self.player_model(player, envelope.status_info.now).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        map_track_availability(envelope, identity, request, model)
     }
 
     pub(crate) async fn playback(
@@ -816,12 +969,7 @@ impl SodaClient {
         let media = self
             .authorized_media(identity, requested_bitrate, "Soda playback")
             .await?;
-        if media.selected.spec.size > MAX_MEDIA_RESPONSE_BYTES {
-            return Err(soda_upstream_error(
-                "Soda media exceeds the local delivery size limit",
-            ));
-        }
-        Ok(media.playback())
+        media.deliverable_playback()
     }
 
     pub(crate) async fn audio_content(
@@ -832,6 +980,14 @@ impl SodaClient {
         let media = self
             .authorized_media(identity, requested_bitrate, "Soda audio content")
             .await?;
+        self.deliver_audio_content(identity, media).await
+    }
+
+    async fn deliver_audio_content(
+        &self,
+        identity: &SodaTrackIdentity,
+        media: ValidatedSodaMedia,
+    ) -> Result<AudioContent> {
         let track_ref = identity.resource_ref()?;
         let bytes = self.download_authorized_variant(&media.selected).await?;
         let decrypted = if media.selected.spec.encrypted {
@@ -841,7 +997,8 @@ impl SodaClient {
             let key_id = media.selected.key_id.as_deref().ok_or_else(|| {
                 soda_upstream_error("Soda encrypted media omitted its key identifier")
             })?;
-            decrypt_cenc_audio(bytes, spade_a, key_id)?
+            let decrypted = decrypt_cenc_audio(bytes, spade_a, key_id)?;
+            crate::media::plaintext::validate(decrypted.bytes, decrypted.format)?
         } else {
             validate_unencrypted_audio(bytes, &media.selected.spec)?
         };
@@ -855,6 +1012,13 @@ impl SodaClient {
             bytes: decrypted.bytes,
             content_type: content_type.to_owned(),
             filename: format!("soda-{}.{}", identity.id(), extension),
+            trial: media.preview.then(|| tuneweave_core::TrialWindow {
+                start_ms: media.preview_start_ms.expect("validated preview start"),
+                end_ms: media.preview_start_ms.expect("validated preview start")
+                    + media
+                        .preview_duration_ms
+                        .expect("validated preview duration"),
+            }),
         })
     }
 
@@ -865,38 +1029,7 @@ impl SodaClient {
         operation: &'static str,
     ) -> Result<ValidatedSodaMedia> {
         let body = self.fetch_track_body(identity, operation).await?;
-        let envelope = parse_track_envelope(&body)?;
-        validate_status_metadata(&envelope.status_info, operation)?;
-        if envelope.risk_result.is_some_and(|value| value != 0) {
-            return Err(soda_upstream_error(format!(
-                "{operation} was rejected by platform risk control"
-            )));
-        }
-        let track = envelope
-            .track
-            .ok_or_else(|| soda_upstream_error(format!("{operation} omitted the track payload")))?;
-        if track.id.trim() != identity.id()
-            || (!track.media_type.trim().is_empty() && track.media_type.trim() != "track")
-        {
-            return Err(soda_upstream_error(format!(
-                "{operation} returned a mismatched track identity"
-            )));
-        }
-        if track.state.offline == Some(true) {
-            return Err(TuneWeaveError::new(
-                ErrorCode::ResourceNotFound,
-                "Soda reported that this track is offline",
-            )
-            .with_platform(Platform::Soda));
-        }
-        let player = envelope.track_player.ok_or_else(|| {
-            TuneWeaveError::new(
-                ErrorCode::PermissionDenied,
-                "Soda did not authorize anonymous media",
-            )
-            .with_platform(Platform::Soda)
-        })?;
-        validate_player_model(&track, &player, requested_bitrate, envelope.status_info.now)
+        parse_authorized_media(self, &body, identity, requested_bitrate, operation).await
     }
 
     async fn download_authorized_variant(&self, media: &SodaAuthorizedVariant) -> Result<Vec<u8>> {
@@ -913,9 +1046,11 @@ impl SodaClient {
             let started = Instant::now();
             let mut http_status = None;
             let outcome = async {
+                // URLs have already passed the media allowlist. Never forward account cookies.
+                let url = Url::parse(url)
+                    .map_err(|_| soda_upstream_error("Soda media URL is invalid"))?;
                 let response = self
-                    .http
-                    .get(url)
+                    .login_request(reqwest::Method::GET, url)
                     .send()
                     .await
                     .map_err(soda_network_error)?;
@@ -993,7 +1128,7 @@ impl SodaClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn log_upstream_request<T>(
+    pub(crate) fn log_upstream_request<T>(
         &self,
         operation: &'static str,
         upstream_host: &'static str,
@@ -1311,6 +1446,9 @@ fn map_playlist(
     let raw_total = (source.resource_cnt.track_cnt > 0).then_some(source.resource_cnt.track_cnt);
     let mut extensions = Extensions::new();
     extensions.insert("backend".to_owned(), json!("official_pc_playlist_detail"));
+    if let Some(is_private) = source.is_private {
+        extensions.insert("is_private".to_owned(), json!(is_private));
+    }
     extensions.insert(
         "canonical_share_url".to_owned(),
         json!(format!("https://www.qishui.com/playlist/{playlist_id}")),
@@ -1521,14 +1659,14 @@ fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
     let marker_start = body
         .windows(MARKER.len())
         .position(|window| window == MARKER)
-        .ok_or_else(|| soda_upstream_error("Soda album share page omitted its router data"))?;
+        .ok_or_else(|| soda_upstream_error("Soda share page omitted its router data"))?;
     let mut start = marker_start.saturating_add(MARKER.len());
     while body.get(start).is_some_and(u8::is_ascii_whitespace) {
         start = start.saturating_add(1);
     }
     if body.get(start) != Some(&b'{') {
         return Err(soda_upstream_error(
-            "Soda album share page contained invalid router data",
+            "Soda share page contained invalid router data",
         ));
     }
 
@@ -1549,19 +1687,17 @@ fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
         match byte {
             b'"' => in_string = true,
             b'{' => {
-                depth = depth.checked_add(1).ok_or_else(|| {
-                    soda_upstream_error("Soda album router data nested too deeply")
-                })?;
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| soda_upstream_error("Soda router data nested too deeply"))?;
                 if depth > 128 {
-                    return Err(soda_upstream_error(
-                        "Soda album router data nested too deeply",
-                    ));
+                    return Err(soda_upstream_error("Soda router data nested too deeply"));
                 }
             }
             b'}' => {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    soda_upstream_error("Soda album router data closed unexpectedly")
-                })?;
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| soda_upstream_error("Soda router data closed unexpectedly"))?;
                 if depth == 0 {
                     return Ok(&body[start..=start.saturating_add(relative)]);
                 }
@@ -1570,7 +1706,7 @@ fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
         }
     }
     Err(soda_upstream_error(
-        "Soda album share page contained incomplete router data",
+        "Soda share page contained incomplete router data",
     ))
 }
 
@@ -1646,7 +1782,74 @@ fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Ly
             "Soda lyrics returned a non-track media type",
         ));
     }
-    let parsed = parse_word_synced_lyrics(&envelope.lyric.content)?;
+    let android_lyric = track.lyric.as_ref();
+    let use_android_lyric = envelope.lyric.content.trim().is_empty()
+        && envelope.lyric.kind.is_none()
+        && envelope.lyric.translations.is_none()
+        && android_lyric.is_some();
+    let (kind, content) = if use_android_lyric {
+        let lyric = android_lyric.expect("checked Android lyric is present");
+        (lyric.kind.as_deref(), lyric.content.as_str())
+    } else {
+        (
+            envelope.lyric.kind.as_deref(),
+            envelope.lyric.content.as_str(),
+        )
+    };
+    let mut extensions = Extensions::new();
+    extensions.insert("backend".to_owned(), json!("official_seo_track"));
+    let (plain, word_synced, format) = if kind == Some("text") {
+        // Official TEXT lyrics have no time axis. Only an explicit declaration
+        // selects this branch; malformed timed lyrics must not become plain text.
+        let parsed = lyrics::parse_text(content)?;
+        extensions.insert("line_count".to_owned(), json!(parsed.line_count));
+        extensions.insert("plain_derived_from_word_synced".to_owned(), json!(false));
+        (parsed.content, None, "text")
+    } else if lyrics::is_word_synced(content) {
+        let parsed = parse_word_synced_lyrics(content)?;
+        extensions.insert("line_count".to_owned(), json!(parsed.line_count));
+        extensions.insert("word_count".to_owned(), json!(parsed.word_count));
+        extensions.insert("line_time_unit".to_owned(), json!("milliseconds"));
+        extensions.insert(
+            "word_offset_origin".to_owned(),
+            json!("relative_to_line_start"),
+        );
+        extensions.insert("plain_derived_from_word_synced".to_owned(), json!(true));
+        extensions.insert("unknown_word_tag_field_preserved".to_owned(), json!(true));
+        (parsed.plain, Some(parsed.word_synced), "krc")
+    } else {
+        let parsed = lyrics::parse_lrc(content)?;
+        extensions.insert("line_count".to_owned(), json!(parsed.line_count));
+        extensions.insert("plain_derived_from_word_synced".to_owned(), json!(false));
+        (parsed.content, None, "lrc")
+    };
+    let pc_translation = envelope
+        .lyric
+        .translations
+        .as_ref()
+        .and_then(|translations| translations.cn.as_deref())
+        .filter(|content| !content.trim().is_empty());
+    let android_translation = android_lyric
+        .and_then(|lyric| lyric.lang_translations.as_ref())
+        .and_then(|translations| translations.chinese.as_ref())
+        .map(|translation| translation.content.as_str())
+        .filter(|content| !content.trim().is_empty());
+    let (translated_content, translated_language) = match (pc_translation, android_translation) {
+        (Some(content), _) => (Some(content), Some("zh-CN")),
+        (None, Some(content)) => (Some(content), Some("zh-Hans-CN")),
+        (None, None) => (None, None),
+    };
+    let translated = translated_content
+        .map(lyrics::parse_lrc)
+        .transpose()?
+        .map(|parsed| parsed.content);
+    if translated.is_some() {
+        extensions.insert("translated_format".to_owned(), json!("lrc"));
+        extensions.insert(
+            "translated_language".to_owned(),
+            json!(translated_language.expect("translated content has a language")),
+        );
+    }
     let contributors = track
         .song_maker_team
         .lyricists
@@ -1657,58 +1860,74 @@ fn parse_lyrics_response(body: &[u8], identity: &SodaTrackIdentity) -> Result<Ly
             resource_ref: None,
             name,
         })
-        .collect();
-    let mut extensions = Extensions::new();
-    extensions.insert("backend".to_owned(), json!("official_seo_track"));
-    extensions.insert("line_count".to_owned(), json!(parsed.line_count));
-    extensions.insert("word_count".to_owned(), json!(parsed.word_count));
-    extensions.insert("line_time_unit".to_owned(), json!("milliseconds"));
-    extensions.insert(
-        "word_offset_origin".to_owned(),
-        json!("relative_to_line_start"),
-    );
-    extensions.insert("plain_derived_from_word_synced".to_owned(), json!(true));
-    extensions.insert("unknown_word_tag_field_preserved".to_owned(), json!(true));
+        .collect::<Vec<_>>();
+    let primary_lyric_contributor = if use_android_lyric {
+        android_lyric.and_then(|lyric| lyric.lyric_contributor.as_ref())
+    } else {
+        envelope.lyric.lyric_contributor.as_ref()
+    };
+    let mut contributors = contributors;
+    if let Some(contributor) =
+        map_soda_lyric_contributor(primary_lyric_contributor, "lyric_contributor")
+    {
+        contributors.push(contributor);
+    }
+    // PC exposes a translation_contributor key, but the inspected PC consumer
+    // does not read it. Only attribute a translator when Android's selected
+    // CHINESE translation carries the contributor consumed by its lyric view.
+    if pc_translation.is_none() && android_translation.is_some() {
+        let android_translation_contributor = android_lyric
+            .and_then(|lyric| lyric.lang_translations.as_ref())
+            .and_then(|translations| translations.chinese.as_ref())
+            .and_then(|translation| translation.lyric_contributor.as_ref());
+        if let Some(contributor) =
+            map_soda_lyric_contributor(android_translation_contributor, "translation_contributor")
+        {
+            contributors.push(contributor);
+        }
+    }
     Ok(Lyrics {
         track_ref: identity.resource_ref()?,
-        plain: Some(parsed.plain),
-        translated: None,
+        plain: Some(plain),
+        translated,
         romanized: None,
-        word_synced: Some(parsed.word_synced),
+        word_synced,
         singing_annotations: None,
         singing_annotations_timestamp: None,
-        format: "krc".to_owned(),
+        format: format.to_owned(),
         contributors,
         extensions,
     })
 }
 
+fn map_soda_lyric_contributor(
+    payload: Option<&SodaLyricContributorPayload>,
+    role: &str,
+) -> Option<LyricContributor> {
+    let name = payload?.user.as_ref()?.nickname.as_deref()?;
+    Some(LyricContributor {
+        role: role.to_owned(),
+        resource_ref: None,
+        name: bounded_text(name, 1_000)?,
+    })
+}
+
+#[cfg(test)]
 fn parse_track_availability_response(
     body: &[u8],
     identity: &SodaTrackIdentity,
     request: &TrackAvailabilityRequest,
 ) -> Result<TrackAvailability> {
-    let envelope = parse_track_envelope(body)?;
-    validate_status_metadata(&envelope.status_info, "Soda availability")?;
-    if envelope.risk_result.is_some_and(|value| value != 0) {
-        return Err(soda_upstream_error(
-            "Soda availability was rejected by platform risk control",
-        ));
-    }
-    let track = envelope
-        .track
-        .ok_or_else(|| soda_upstream_error("Soda availability omitted the track payload"))?;
-    if track.id.trim() != identity.id() {
-        return Err(soda_upstream_error(
-            "Soda availability returned a mismatched track identity",
-        ));
-    }
-    if !track.media_type.trim().is_empty() && track.media_type.trim() != "track" {
-        return Err(soda_upstream_error(
-            "Soda availability returned a non-track media type",
-        ));
-    }
+    map_track_availability(parse_track_envelope(body)?, identity, request, None)
+}
 
+fn map_track_availability(
+    envelope: SodaTrackDetailEnvelope,
+    identity: &SodaTrackIdentity,
+    request: &TrackAvailabilityRequest,
+    model: Option<SodaVideoModel>,
+) -> Result<TrackAvailability> {
+    let track = validate_media_track(&envelope, identity, "Soda availability")?;
     let mut extensions = Extensions::new();
     extensions.insert("backend".to_owned(), json!("official_seo_track"));
     extensions.insert(
@@ -1728,7 +1947,7 @@ fn parse_track_availability_response(
         });
     }
 
-    let Some(player) = envelope.track_player else {
+    let Some(player) = envelope.track_player.as_ref() else {
         extensions.insert("preview_available".to_owned(), json!(false));
         return Ok(TrackAvailability {
             track_ref: identity.resource_ref()?,
@@ -1736,11 +1955,21 @@ fn parse_track_availability_response(
             requested_bitrate: request.bitrate,
             actual_bitrate: None,
             platform_code: None,
-            message: "Soda did not authorize anonymous media".to_owned(),
+            message: "Soda did not authorize media for this request".to_owned(),
             extensions,
         });
     };
-    let media = validate_player_model(&track, &player, request.bitrate, envelope.status_info.now)?;
+    let media = if let Some(model) = model {
+        validate_decoded_player_model(
+            track,
+            player,
+            model,
+            request.bitrate,
+            envelope.status_info.now,
+        )?
+    } else {
+        validate_player_model(track, player, request.bitrate, envelope.status_info.now)?
+    };
     extensions.insert("preview_available".to_owned(), json!(media.preview));
     extensions.insert("encrypted".to_owned(), json!(media.encrypted));
     extensions.insert(
@@ -1783,6 +2012,66 @@ fn parse_track_availability_response(
     })
 }
 
+fn validate_media_track<'a>(
+    envelope: &'a SodaTrackDetailEnvelope,
+    identity: &SodaTrackIdentity,
+    operation: &str,
+) -> Result<&'a SodaTrack> {
+    validate_status_metadata(&envelope.status_info, operation)?;
+    if envelope.risk_result.is_some_and(|value| value != 0) {
+        return Err(soda_upstream_error(format!(
+            "{operation} was rejected by platform risk control"
+        )));
+    }
+    let track = envelope
+        .track
+        .as_ref()
+        .ok_or_else(|| soda_upstream_error(format!("{operation} omitted the track payload")))?;
+    if track.id.trim() != identity.id()
+        || (!track.media_type.trim().is_empty() && track.media_type.trim() != "track")
+    {
+        return Err(soda_upstream_error(format!(
+            "{operation} returned a mismatched track identity"
+        )));
+    }
+    Ok(track)
+}
+
+async fn parse_authorized_media(
+    client: &SodaClient,
+    body: &[u8],
+    identity: &SodaTrackIdentity,
+    requested_bitrate: u64,
+    operation: &str,
+) -> Result<ValidatedSodaMedia> {
+    let envelope = parse_track_envelope(body)?;
+    let track = validate_media_track(&envelope, identity, operation)?;
+    if track.state.offline == Some(true) {
+        return Err(TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Soda reported that this track is offline",
+        )
+        .with_platform(Platform::Soda));
+    }
+    let player = envelope.track_player.as_ref().ok_or_else(|| {
+        TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "Soda did not authorize media for this request",
+        )
+        .with_platform(Platform::Soda)
+    })?;
+    let model = client
+        .player_model(player, envelope.status_info.now)
+        .await?;
+    validate_decoded_player_model(
+        track,
+        player,
+        model,
+        requested_bitrate,
+        envelope.status_info.now,
+    )
+}
+
 struct ValidatedSodaMedia {
     preview: bool,
     preview_start_ms: Option<u64>,
@@ -1798,6 +2087,15 @@ struct ValidatedSodaMedia {
 }
 
 impl ValidatedSodaMedia {
+    fn deliverable_playback(&self) -> Result<SodaPlayback> {
+        if self.selected.spec.size > MAX_MEDIA_RESPONSE_BYTES {
+            return Err(soda_upstream_error(
+                "Soda media exceeds the local delivery size limit",
+            ));
+        }
+        Ok(self.playback())
+    }
+
     fn playback(&self) -> SodaPlayback {
         SodaPlayback {
             preview: self.preview,
@@ -1821,13 +2119,33 @@ fn validate_player_model(
     requested_bitrate: u64,
     upstream_now: u64,
 ) -> Result<ValidatedSodaMedia> {
-    if player.video_model.is_empty() || player.video_model.len() > MAX_API_RESPONSE_BYTES as usize {
+    validate_decoded_player_model(
+        track,
+        player,
+        decode_direct_player_model(player)?,
+        requested_bitrate,
+        upstream_now,
+    )
+}
+
+fn decode_direct_player_model(player: &SodaTrackPlayer) -> Result<SodaVideoModel> {
+    let source = player.video_model.as_deref().unwrap_or_default();
+    if source.is_empty() || source.len() > MAX_API_RESPONSE_BYTES as usize {
         return Err(soda_upstream_error(
             "Soda availability omitted a bounded player model",
         ));
     }
-    let model: SodaVideoModel = serde_json::from_str(&player.video_model)
-        .map_err(|_| soda_upstream_error("Soda availability returned a malformed player model"))?;
+    serde_json::from_str(source)
+        .map_err(|_| soda_upstream_error("Soda availability returned a malformed player model"))
+}
+
+fn validate_decoded_player_model(
+    track: &SodaTrack,
+    player: &SodaTrackPlayer,
+    model: SodaVideoModel,
+    requested_bitrate: u64,
+    upstream_now: u64,
+) -> Result<ValidatedSodaMedia> {
     let duration_ms = seconds_to_milliseconds(model.video_duration).ok_or_else(|| {
         soda_upstream_error("Soda availability returned an invalid media duration")
     })?;
@@ -2083,7 +2401,9 @@ fn validated_preview_window(track: &SodaTrack, media_duration_ms: u64) -> Result
         .ok_or_else(|| soda_upstream_error("Soda availability omitted its preview window"))?;
     if duration == 0
         || duration.abs_diff(media_duration_ms) > 2_000
-        || start.saturating_add(duration) > track.duration.saturating_add(2_000)
+        || start
+            .checked_add(duration)
+            .is_none_or(|end| end > track.duration.saturating_add(2_000))
     {
         return Err(soda_upstream_error(
             "Soda availability returned an invalid preview window",
@@ -2206,10 +2526,9 @@ fn parse_word_payload(
             .find('>')
             .ok_or_else(|| soda_upstream_error("Soda lyrics contained an open word timing tag"))?;
         let (offset, duration, _unknown) = parse_triplet(&remaining[1..close], "word tag")?;
-        if duration == 0
-            || offset < previous_offset
-            || offset.saturating_add(duration) > line_duration
-        {
+        // Official KRC can contain instantaneous text segments with zero duration.
+        // Keep the original timing rather than dropping text or inventing a duration.
+        if offset < previous_offset || offset.saturating_add(duration) > line_duration {
             return Err(soda_upstream_error(
                 "Soda lyrics contained an invalid word time range",
             ));
@@ -2467,7 +2786,7 @@ fn map_quality(value: &str) -> Option<Quality> {
     }
 }
 
-fn normalize_image(image: &SodaImage) -> Option<String> {
+pub(crate) fn normalize_image(image: &SodaImage) -> Option<String> {
     let uri = image.uri.trim();
     if uri.is_empty()
         || uri.len() > 1_024
@@ -2547,7 +2866,7 @@ fn canonical_nonnegative_decimal(value: &str) -> Option<&str> {
     .then_some(value)
 }
 
-fn unix_rfc3339(timestamp: u64) -> Option<String> {
+pub(crate) fn unix_rfc3339(timestamp: u64) -> Option<String> {
     let days = i64::try_from(timestamp / 86_400).ok()?;
     let seconds = timestamp % 86_400;
     let shifted_days = days.checked_add(719_468)?;
@@ -2574,7 +2893,10 @@ fn unix_rfc3339(timestamp: u64) -> Option<String> {
     ))
 }
 
-async fn read_bounded_response(response: reqwest::Response, operation: &str) -> Result<Vec<u8>> {
+pub(crate) async fn read_bounded_response(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<Vec<u8>> {
     let mut response = response;
     let status = response.status();
     if !status.is_success() {
@@ -2658,26 +2980,17 @@ fn validate_unencrypted_audio(
     spec: &SodaPublicMediaSpec,
 ) -> Result<DecryptedSodaAudio> {
     let codec = spec.codec.to_ascii_lowercase();
-    let (format, container) = match codec.as_str() {
-        "aac" if bytes.get(4..8) == Some(b"ftyp") => {
-            (SodaAudioFormat::Aac, SodaAudioContainer::IsoBaseMedia)
-        }
-        "alac" if bytes.get(4..8) == Some(b"ftyp") => {
-            (SodaAudioFormat::Alac, SodaAudioContainer::IsoBaseMedia)
-        }
-        "flac" if bytes.starts_with(b"fLaC") => (SodaAudioFormat::Flac, SodaAudioContainer::Flac),
+    let format = match codec.as_str() {
+        "aac" => SodaAudioFormat::Aac,
+        "alac" => SodaAudioFormat::Alac,
+        "flac" => SodaAudioFormat::Flac,
         _ => {
             return Err(soda_upstream_error(
                 "Soda returned an unrecognized unencrypted audio container",
             ));
         }
     };
-    Ok(DecryptedSodaAudio {
-        bytes,
-        format,
-        container,
-        sample_count: 0,
-    })
+    crate::media::plaintext::validate(bytes, format)
 }
 
 fn validate_decrypted_codec(audio: &DecryptedSodaAudio, declared_codec: &str) -> Result<()> {
@@ -2703,7 +3016,7 @@ fn validate_decrypted_codec(audio: &DecryptedSodaAudio, declared_codec: &str) ->
     Ok(())
 }
 
-fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
+pub(crate) fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
     let code = if error.is_timeout() {
         ErrorCode::UpstreamTimeout
     } else {
@@ -2714,7 +3027,7 @@ fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
         .retryable(true)
 }
 
-fn soda_http_error(status: StatusCode) -> TuneWeaveError {
+pub(crate) fn soda_http_error(status: StatusCode) -> TuneWeaveError {
     let code = if status == StatusCode::TOO_MANY_REQUESTS {
         ErrorCode::RateLimited
     } else {
@@ -2742,8 +3055,22 @@ fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Soda)
 }
 
-fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
+pub(crate) fn soda_upstream_error(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::UpstreamError, message).with_platform(Platform::Soda)
+}
+
+#[cfg(test)]
+pub(crate) fn test_account_playlist_fixture() -> serde_json::Value {
+    serde_json::from_slice(&tests::playlist_fixture(false)).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn test_account_track_fixture(preview: bool) -> Vec<u8> {
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&tests::availability_fixture(preview)).unwrap();
+    body["status_code"] = json!(0);
+    body["lyric"] = json!({"content":"[0,1000]<0,500,0>测试"});
+    serde_json::to_vec(&body).unwrap()
 }
 
 #[cfg(test)]
@@ -2985,11 +3312,132 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_map_pc_original_contributor_and_keep_android_and_unproven_pc_translation_credits_out()
+    {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let mut response: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        response["lyric"] = json!({
+            "type": "lrc",
+            "content": "[00:00.00]PC original",
+            "lyric_contributor": {"user": {"nickname": "PC author"}},
+            "translation_contributor": {},
+            "translations": {"cn": "[00:00.00]PC translation"}
+        });
+        response["track"]["lyric"] = json!({
+            "type": "lrc",
+            "content": "[00:00.00]Android original",
+            "lyric_contributor": {"user": {"nickname": "Android author"}},
+            "lang_translations": {
+                "CHINESE": {
+                    "content": "[00:00.00]Android translation",
+                    "lyric_contributor": {"user": {"nickname": "Android translator"}}
+                }
+            }
+        });
+        let body = serde_json::to_vec(&response).expect("serialize lyric fixture");
+
+        let lyrics = parse_lyrics_response(&body, &identity).expect("parse PC lyrics");
+
+        assert_eq!(lyrics.plain.as_deref(), Some("[00:00.00]PC original"));
+        assert_eq!(
+            lyrics.translated.as_deref(),
+            Some("[00:00.00]PC translation")
+        );
+        assert!(lyrics.contributors.iter().any(|contributor| {
+            contributor.role == "lyric_contributor" && contributor.name == "PC author"
+        }));
+        assert!(!lyrics.contributors.iter().any(|contributor| {
+            contributor.role == "lyric_contributor" && contributor.name == "Android author"
+        }));
+        assert!(
+            !lyrics
+                .contributors
+                .iter()
+                .any(|contributor| { contributor.role == "translation_contributor" })
+        );
+
+        for pc_author in [
+            None,
+            Some(json!({})),
+            Some(json!({"user": {}})),
+            Some(json!({"user": {"nickname": " "}})),
+        ] {
+            let mut response_without_author = response.clone();
+            if let Some(pc_author) = pc_author {
+                response_without_author["lyric"]["lyric_contributor"] = pc_author;
+            } else {
+                response_without_author["lyric"]
+                    .as_object_mut()
+                    .expect("PC lyric object")
+                    .remove("lyric_contributor");
+            }
+            let body = serde_json::to_vec(&response_without_author)
+                .expect("serialize missing-author fixture");
+            let lyrics =
+                parse_lyrics_response(&body, &identity).expect("parse missing PC contributor");
+            assert!(!lyrics.contributors.iter().any(|contributor| {
+                matches!(
+                    contributor.role.as_str(),
+                    "lyric_contributor" | "translation_contributor"
+                )
+            }));
+        }
+    }
+
+    #[test]
+    fn lyrics_map_android_original_and_chinese_translation_contributors_and_ignore_empty_users() {
+        let identity =
+            SodaTrackIdentity::parse("7304719759323564095").expect("valid Soda track identity");
+        let mut response: serde_json::Value =
+            serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
+        response["lyric"] = json!({});
+        response["track"]["lyric"] = json!({
+            "type": "lrc",
+            "content": "[00:00.00]Android original",
+            "lyric_contributor": {"user": {"nickname": "Android author"}},
+            "lang_translations": {
+                "CHINESE": {
+                    "content": "[00:00.00]Android translation",
+                    "lyric_contributor": {"user": {"nickname": "Android translator"}}
+                }
+            }
+        });
+        let body = serde_json::to_vec(&response).expect("serialize Android lyric fixture");
+
+        let lyrics = parse_lyrics_response(&body, &identity).expect("parse Android lyrics");
+
+        assert_eq!(lyrics.plain.as_deref(), Some("[00:00.00]Android original"));
+        assert_eq!(
+            lyrics.translated.as_deref(),
+            Some("[00:00.00]Android translation")
+        );
+        assert!(lyrics.contributors.iter().any(|contributor| {
+            contributor.role == "lyric_contributor" && contributor.name == "Android author"
+        }));
+        assert!(lyrics.contributors.iter().any(|contributor| {
+            contributor.role == "translation_contributor"
+                && contributor.name == "Android translator"
+        }));
+
+        response["track"]["lyric"]["lyric_contributor"] = json!({"user": {"nickname": " "}});
+        response["track"]["lyric"]["lang_translations"]["CHINESE"]["lyric_contributor"] = json!({});
+        let body = serde_json::to_vec(&response).expect("serialize empty-contributor fixture");
+        let lyrics = parse_lyrics_response(&body, &identity).expect("parse empty contributors");
+        assert!(!lyrics.contributors.iter().any(|contributor| {
+            matches!(
+                contributor.role.as_str(),
+                "lyric_contributor" | "translation_contributor"
+            )
+        }));
+    }
+
+    #[test]
     fn lyrics_reject_malformed_or_lossy_word_timing_instead_of_downgrading() {
         for raw in [
             "plain text only",
             "[0,1000]text without tag",
-            "[0,1000]<0,0,0>zero duration",
             "[0,1000]<900,200,0>past line end",
             "[0,1000]<0,500,0>",
             "[0,1000]<0,500>missing field",
@@ -3000,7 +3448,7 @@ mod tests {
         assert!(parse_word_synced_lyrics("[0,1000]<0,500,0>好\0").is_err());
     }
 
-    fn availability_fixture(preview: bool) -> Vec<u8> {
+    pub(super) fn availability_fixture(preview: bool) -> Vec<u8> {
         let mut response: serde_json::Value =
             serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
         let full_vid = "v03ad6g10000cli4pgjc77u93k8r7pbg";
@@ -3082,7 +3530,7 @@ mod tests {
         serde_json::to_vec(&response).expect("serialize changed availability")
     }
 
-    fn playlist_fixture(has_more: bool) -> Vec<u8> {
+    pub(super) fn playlist_fixture(has_more: bool) -> Vec<u8> {
         let detail: serde_json::Value =
             serde_json::from_str(TRACK_DETAIL_RESPONSE).expect("detail fixture JSON");
         let track = detail["track"].clone();
@@ -3412,6 +3860,7 @@ mod tests {
 
         let config = SodaConfig {
             proxy_url: Some("http://user:secret@example.test:8080".to_owned()),
+            ..SodaConfig::default()
         };
         let debug = format!("{config:?}");
         assert!(debug.contains("[configured]"));
@@ -3421,6 +3870,28 @@ mod tests {
             format!("{:?}", SodaClient::test_client()),
             "SodaClient { .. }"
         );
+    }
+
+    #[test]
+    fn login_device_is_initialized_lazily_through_the_client() {
+        let root = std::env::temp_dir().join(format!(
+            "tuneweave-soda-client-device-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = root.join("soda-device.json");
+        let client = SodaClient::new(&SodaConfig {
+            proxy_url: None,
+            device_path: Some(path.clone()),
+            credential_store: None,
+        })
+        .expect("build Soda client");
+        assert!(!path.exists());
+        client
+            .initialize_login_device()
+            .expect("initialize login device");
+        assert!(path.exists());
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
@@ -3479,6 +3950,26 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_media_rejects_encrypted_content_even_without_authorization_fields() {
+        let spec = SodaPublicMediaSpec {
+            quality: "higher".into(),
+            format: "m4a".into(),
+            codec: "aac".into(),
+            bitrate: 128000,
+            real_bitrate: 128000,
+            size: player_info::encrypted_tests::AUDIO.len() as u64,
+            sample_rate_hz: Some(44100),
+            encrypted: false,
+            encryption_method: None,
+        };
+        assert!(
+            validate_unencrypted_audio(player_info::encrypted_tests::AUDIO.to_vec(), &spec)
+                .is_err(),
+            "CENC bytes must not be delivered as plaintext just because the metadata says so"
+        );
+    }
+
+    #[test]
     fn unencrypted_audio_must_match_its_declared_codec_and_container() {
         let spec = SodaPublicMediaSpec {
             quality: "medium".to_owned(),
@@ -3486,16 +3977,92 @@ mod tests {
             codec: "aac".to_owned(),
             bitrate: 128_000,
             real_bitrate: 128_000,
-            size: 12,
+            size: crate::media::plaintext::tests::AAC.len() as u64,
             sample_rate_hz: Some(44_100),
             encrypted: false,
             encryption_method: None,
         };
-        let audio = validate_unencrypted_audio(b"\0\0\0\x0cftypisom".to_vec(), &spec)
+        let audio = validate_unencrypted_audio(crate::media::plaintext::tests::AAC.to_vec(), &spec)
             .expect("plain ISO audio");
         validate_decrypted_codec(&audio, "aac").expect("AAC container");
         assert!(validate_decrypted_codec(&audio, "flac").is_err());
         assert!(validate_unencrypted_audio(b"not audio".to_vec(), &spec).is_err());
+    }
+
+    #[tokio::test]
+    async fn soda_audio_content_preserves_validated_preview_window_after_delivery() {
+        let bytes = crate::media::plaintext::tests::AAC;
+        for preview in [false, true] {
+            let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+            let mut body: serde_json::Value =
+                serde_json::from_slice(&availability_fixture(preview)).unwrap();
+            let mut model: serde_json::Value =
+                serde_json::from_str(body["track_player"]["video_model"].as_str().unwrap())
+                    .unwrap();
+            for row in model["video_list"].as_array_mut().unwrap() {
+                row["encrypt_info"] = json!({"encrypt":false});
+                row["video_meta"]["size"] = json!(bytes.len());
+            }
+            body["track_player"]["video_model"] = json!(serde_json::to_string(&model).unwrap());
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let origin =
+                Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let len = socket.read(&mut request).await.unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&request[..len])
+                        .to_ascii_lowercase()
+                        .contains("cookie:")
+                );
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: audio/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await.unwrap();
+                socket.write_all(bytes).await.unwrap();
+                socket.shutdown().await.unwrap();
+            });
+            let client = SodaClient::test_client().with_auth_test_origin(origin);
+            let media = parse_authorized_media(
+                &client,
+                &serde_json::to_vec(&body).unwrap(),
+                &identity,
+                200_000,
+                "Soda audio content",
+            )
+            .await
+            .unwrap();
+            let content = client
+                .deliver_audio_content(&identity, media)
+                .await
+                .unwrap();
+            assert_eq!(content.bytes, bytes);
+            assert_eq!(
+                content.trial,
+                preview.then_some(tuneweave_core::TrialWindow {
+                    start_ms: 107_904,
+                    end_ms: 167_905
+                })
+            );
+            task.await.unwrap();
+        }
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&availability_fixture(true)).unwrap();
+        body["track"]["duration"] = json!(u64::MAX);
+        body["track"]["preview"]["start"] = json!(u64::MAX - 1000);
+        body["track"]["audition_info"]["start_time_ms"] = json!(u64::MAX - 1000);
+        let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+        assert!(
+            parse_authorized_media(
+                &SodaClient::test_client(),
+                &serde_json::to_vec(&body).unwrap(),
+                &identity,
+                200_000,
+                "Soda audio content"
+            )
+            .await
+            .is_err()
+        );
     }
 
     async fn raw_test_response(raw: &'static [u8]) -> reqwest::Response {

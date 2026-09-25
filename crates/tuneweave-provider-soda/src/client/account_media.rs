@@ -1,0 +1,305 @@
+use crate::login::SodaCredential;
+use reqwest::header::ACCEPT;
+
+use super::*;
+
+const ACCOUNT_TRACK_ENDPOINT: &str = "https://api.qishui.com/luna/pc/track_v2";
+const ACCOUNT_TRACK_BACKEND: &str = "official_pc_track_v2";
+
+#[derive(Deserialize)]
+struct AccountTrackStatus {
+    status_code: Option<i64>,
+    status_info: Option<AccountBusinessStatus>,
+}
+
+#[derive(Deserialize)]
+struct AccountBusinessStatus {
+    status_code: Option<i64>,
+}
+
+/// Validated metadata from one account-bound response. Player material stays private.
+pub(crate) struct SodaAccountTrack {
+    pub credential: SodaCredential,
+    pub collected: Option<bool>,
+    identity: SodaTrackIdentity,
+    track: Track,
+    body: Vec<u8>,
+}
+
+impl SodaAccountTrack {
+    pub(crate) async fn playback(
+        &self,
+        client: &SodaClient,
+        requested_bitrate: u64,
+    ) -> Result<SodaPlayback> {
+        parse_authorized_media(
+            client,
+            &self.body,
+            &self.identity,
+            requested_bitrate,
+            "Soda account playback",
+        )
+        .await?
+        .deliverable_playback()
+    }
+
+    pub(crate) async fn audio_content(
+        &self,
+        client: &SodaClient,
+        requested_bitrate: u64,
+    ) -> Result<AudioContent> {
+        let media = parse_authorized_media(
+            client,
+            &self.body,
+            &self.identity,
+            requested_bitrate,
+            "Soda account audio content",
+        )
+        .await?;
+        client.deliver_audio_content(&self.identity, media).await
+    }
+
+    pub(crate) fn into_track(self) -> Track {
+        self.track
+    }
+
+    pub(crate) fn lyrics(&self) -> Result<Lyrics> {
+        let mut lyrics = parse_lyrics_response(&self.body, &self.identity)?;
+        lyrics
+            .extensions
+            .insert("backend".to_owned(), json!(ACCOUNT_TRACK_BACKEND));
+        Ok(lyrics)
+    }
+
+    pub(crate) async fn availability(
+        &self,
+        client: &SodaClient,
+        request: &TrackAvailabilityRequest,
+    ) -> Result<TrackAvailability> {
+        let mut availability = client
+            .availability_body(&self.body, &self.identity, request)
+            .await?;
+        availability
+            .extensions
+            .insert("backend".to_owned(), json!(ACCOUNT_TRACK_BACKEND));
+        if availability.extensions.get("preview_available") == Some(&json!(true)) {
+            availability.message = "Soda only permits a preview for this account".to_owned();
+        }
+        Ok(availability)
+    }
+}
+
+impl SodaClient {
+    pub(crate) async fn account_track(
+        &self,
+        identity: &SodaTrackIdentity,
+        credential: &SodaCredential,
+    ) -> Result<SodaAccountTrack> {
+        let started = Instant::now();
+        let mut http_status = None;
+        let result = async {
+            if credential.user_id().is_none() {
+                return Err(account_media_authentication_required());
+            }
+            let device = self.login_device()?;
+            let mut url = Url::parse(ACCOUNT_TRACK_ENDPOINT)
+                .map_err(|_| soda_upstream_error("Soda account media endpoint is invalid"))?;
+            url.query_pairs_mut()
+                .append_pair("aid", "386088")
+                .append_pair("app_name", "luna_pc")
+                .append_pair("device_id", &device.device_id)
+                .append_pair("iid", &device.install_id)
+                .append_pair("version_code", "30050100")
+                .append_pair("version_name", "3.5.1")
+                .append_pair("device_platform", "windows");
+            let response = self
+                .login_request(reqwest::Method::POST, url)
+                .header(ACCEPT, "application/json")
+                .header(reqwest::header::COOKIE, credential.cookie_header()?)
+                .json(&json!({
+                    "track_id": identity.id(), "media_type": "track",
+                    "queue_type": "search_one_track", "scene_name": "search",
+                }))
+                .send()
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            if response.status() == StatusCode::UNAUTHORIZED {
+                return Err(account_media_authentication_required());
+            }
+            if !response.status().is_success() {
+                return Err(soda_http_error(response.status()));
+            }
+            if response.headers().get(CONTENT_TYPE).is_some_and(|value| {
+                value.to_str().map_or(true, |value| {
+                    !value
+                        .split(';')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .eq_ignore_ascii_case("application/json")
+                })
+            }) {
+                return Err(soda_upstream_error(
+                    "Soda account media returned an unexpected content type",
+                ));
+            }
+            let headers = response.headers().clone();
+            let body = read_bounded_response(response, "Soda account media").await?;
+            let mut snapshot = parse_account_track(body, identity, credential)?;
+            snapshot.credential = credential.with_response_cookies(&headers)?;
+            Ok(snapshot)
+        }
+        .await;
+        self.log_upstream_request(
+            "account_track",
+            "api.qishui.com",
+            "/luna/pc/track_v2",
+            http_status,
+            started,
+            &result,
+        );
+        result
+    }
+}
+
+fn account_media_authentication_required() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::AuthenticationRequired,
+        "Soda account media session is not authenticated",
+    )
+    .with_platform(Platform::Soda)
+}
+
+fn parse_account_track(
+    body: Vec<u8>,
+    identity: &SodaTrackIdentity,
+    credential: &SodaCredential,
+) -> Result<SodaAccountTrack> {
+    let status: AccountTrackStatus = serde_json::from_slice(&body)
+        .map_err(|_| soda_upstream_error("Soda account media returned malformed data"))?;
+    let codes = [
+        status.status_code,
+        status.status_info.and_then(|info| info.status_code),
+    ];
+    if codes.contains(&Some(1_000_016)) {
+        return Err(account_media_authentication_required());
+    }
+    if !codes.contains(&Some(0)) || codes.into_iter().flatten().any(|code| code != 0) {
+        return Err(soda_upstream_error(
+            "Soda account media did not report success",
+        ));
+    }
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(&body)
+        .map_err(|_| soda_upstream_error("Soda account media returned invalid metadata"))?;
+    if envelope.track.is_none() || envelope.seo_track.is_some() {
+        return Err(soda_upstream_error(
+            "Soda account media omitted its own track payload",
+        ));
+    }
+    let mut track = parse_track_detail_response(&body, identity)?;
+    track
+        .extensions
+        .insert("backend".to_owned(), json!(ACCOUNT_TRACK_BACKEND));
+    Ok(SodaAccountTrack {
+        credential: credential.clone(),
+        collected: envelope
+            .track
+            .as_ref()
+            .and_then(|track| track.state.is_collected),
+        identity: identity.clone(),
+        track,
+        body,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_metadata_preserves_actual_rights_and_hides_player_material() {
+        let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+        let credential = SodaCredential::test_credential("test-secret")
+            .bind_user("123456")
+            .unwrap();
+        for preview in [false, true] {
+            let snapshot =
+                parse_account_track(test_account_track_fixture(preview), &identity, &credential)
+                    .unwrap();
+            let availability = snapshot
+                .availability(
+                    &SodaClient::test_client(),
+                    &TrackAvailabilityRequest::new(200_000),
+                )
+                .await
+                .unwrap();
+            assert_eq!(availability.playable, !preview);
+            assert_eq!(availability.extensions["preview_available"], preview);
+            assert_eq!(availability.extensions["backend"], ACCOUNT_TRACK_BACKEND);
+            let lyrics = snapshot.lyrics().unwrap();
+            assert!(lyrics.plain.as_deref().unwrap().contains("测试"));
+            let track = snapshot.into_track();
+            assert_eq!(track.id, identity.id());
+            assert_eq!(track.extensions["backend"], ACCOUNT_TRACK_BACKEND);
+            for serialized in [
+                serde_json::to_string(&track).unwrap(),
+                serde_json::to_string(&lyrics).unwrap(),
+                serde_json::to_string(&availability).unwrap(),
+            ] {
+                for secret in [
+                    "url_player_info",
+                    "video_model",
+                    "spade_a",
+                    "test-secret",
+                    "token=private",
+                ] {
+                    assert!(!serialized.contains(secret));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn account_metadata_rejects_missing_status_wrong_identity_and_anonymous_envelopes() {
+        let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+        let credential = SodaCredential::test_credential("test-secret")
+            .bind_user("123456")
+            .unwrap();
+        for mutation in 0..8 {
+            let mut body: serde_json::Value =
+                serde_json::from_slice(&test_account_track_fixture(false)).unwrap();
+            match mutation {
+                0 => {
+                    body.as_object_mut().unwrap().remove("status_code");
+                }
+                1 => body["status_code"] = json!(1000016),
+                2 => body["status_info"]["status_code"] = json!(99),
+                3 => body["track"]["id"] = json!("999"),
+                4 => body["track"]["media_type"] = json!("video"),
+                5 => body["seo_track"] = json!({"track":body["track"].clone()}),
+                6 => {
+                    body.as_object_mut().unwrap().remove("track");
+                }
+                _ => body["risk_result"] = json!(1),
+            }
+            let error = match parse_account_track(
+                serde_json::to_vec(&body).unwrap(),
+                &identity,
+                &credential,
+            ) {
+                Ok(_) => panic!("invalid account metadata accepted: {mutation}"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.code,
+                if mutation == 1 {
+                    ErrorCode::AuthenticationRequired
+                } else {
+                    ErrorCode::UpstreamError
+                }
+            );
+            assert!(!error.to_string().contains("test-secret"));
+        }
+    }
+}
