@@ -410,6 +410,7 @@ impl MusicProvider for BilibiliProvider {
         id: &str,
         request: &VideoAudioStreamRequest,
     ) -> Result<VideoAudioStream> {
+        bilibili_audio_tier_order(request.quality)?;
         if let Some(codec) = request.codec.as_deref() {
             validate_bilibili_audio_codec(codec)?;
         }
@@ -799,24 +800,28 @@ impl MusicProvider for BilibiliProvider {
         validate_bilibili_login_account(account, mode)?;
         match self.client.poll_qr_login(provider_transaction_id).await? {
             BilibiliQrPoll::Waiting => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Waiting,
                 message: Some("waiting for Bilibili QR scan".to_owned()),
                 profile: None,
                 credential: None,
             }),
             BilibiliQrPoll::Scanned => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Scanned,
                 message: Some("Bilibili QR scanned; waiting for confirmation".to_owned()),
                 profile: None,
                 credential: None,
             }),
             BilibiliQrPoll::Expired => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Expired,
                 message: Some("Bilibili QR login expired".to_owned()),
                 profile: None,
                 credential: None,
             }),
             BilibiliQrPoll::Failed { code, message } => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Failed,
                 message: Some(format!("{message} ({code})")),
                 profile: None,
@@ -834,6 +839,7 @@ impl MusicProvider for BilibiliProvider {
                         .insert("login_timestamp_ms".to_owned(), json!(timestamp_ms));
                 }
                 Ok(ProviderQrPoll {
+                    verification: None,
                     state: AuthState::Confirmed,
                     message: Some("Bilibili account authenticated".to_owned()),
                     profile: Some(result.profile),
@@ -2401,7 +2407,7 @@ fn select_bilibili_audio_stream(
         .as_deref()
         .map(validate_bilibili_audio_codec)
         .transpose()?;
-    let tier_order = bilibili_audio_tier_order(request.quality);
+    let tier_order = bilibili_audio_tier_order(request.quality)?;
     let mut selected = None;
     for tier in tier_order {
         let tracks = match tier {
@@ -2481,7 +2487,7 @@ fn select_bilibili_audio_stream(
     })
 }
 
-fn bilibili_audio_tier_order(quality: Quality) -> &'static [VideoAudioTier] {
+fn bilibili_audio_tier_order(quality: Quality) -> Result<&'static [VideoAudioTier]> {
     const NORMAL: &[VideoAudioTier] = &[VideoAudioTier::Normal];
     const DOLBY: &[VideoAudioTier] = &[VideoAudioTier::Dolby, VideoAudioTier::Normal];
     const LOSSLESS: &[VideoAudioTier] = &[
@@ -2489,12 +2495,17 @@ fn bilibili_audio_tier_order(quality: Quality) -> &'static [VideoAudioTier] {
         VideoAudioTier::Dolby,
         VideoAudioTier::Normal,
     ];
-    match quality {
+    Ok(match quality {
         Quality::Auto => LOSSLESS,
         Quality::Lossless | Quality::Hires | Quality::Master | Quality::Vivid => LOSSLESS,
         Quality::Surround | Quality::Spatial | Quality::Dolby => DOLBY,
         Quality::Low | Quality::Standard | Quality::Higher | Quality::High => NORMAL,
-    }
+        Quality::Dtsx | Quality::Vinyl => {
+            return Err(bilibili_invalid_request(
+                "Bilibili does not expose DTS:X or vinyl audio",
+            ));
+        }
+    })
 }
 
 fn select_bilibili_audio_candidate<'a>(
@@ -2566,7 +2577,7 @@ fn bilibili_audio_downgraded(requested: Quality, tier: VideoAudioTier, actual: Q
     match requested {
         Quality::Auto | Quality::Low => false,
         Quality::Lossless | Quality::Hires => tier != VideoAudioTier::Lossless,
-        Quality::Master | Quality::Vivid => true,
+        Quality::Dtsx | Quality::Master | Quality::Vivid | Quality::Vinyl => true,
         Quality::Surround | Quality::Spatial | Quality::Dolby => tier != VideoAudioTier::Dolby,
         Quality::Standard => actual == Quality::Low,
         Quality::Higher => matches!(actual, Quality::Low | Quality::Standard),
@@ -2964,6 +2975,7 @@ fn map_bilibili_unified_video_stream(
         height: stream.height,
         size: None,
         duration_ms: stream.duration_ms,
+        source_range: None,
         requested_resolution,
         actual_resolution: stream.height,
         platform_code: stream.platform_quality_id.map(i64::from),
@@ -5304,6 +5316,17 @@ mod tests {
         .expect("master fallback");
         assert_eq!(master_fallback.actual_quality, Some(Quality::Hires));
         assert!(master_fallback.downgraded);
+        for quality in [Quality::Dtsx, Quality::Vinyl] {
+            assert_eq!(
+                select_bilibili_audio_stream(
+                    playback_audio_manifest(true, true),
+                    &VideoAudioStreamRequest::new(VideoResourceKind::Video, quality),
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::InvalidRequest
+            );
+        }
 
         let mut unavailable = VideoAudioStreamRequest::new(VideoResourceKind::Video, Quality::Auto);
         unavailable.codec = Some("flac".to_owned());
