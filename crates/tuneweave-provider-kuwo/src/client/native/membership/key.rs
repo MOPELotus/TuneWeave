@@ -1,0 +1,4 @@
+// Fixed public-client protocol material from official Android 12.2.2.0.
+// Not a user credential; this shared response key provides no account authorization.
+pub(super) const MODULUS: &str = "be41cc8e8f7a28fce28d5dfa2f861110cd8722abc26e7f394e1949ded3309d290db0b44d33f3e860658e81474cad3ddde3c7dddb7c9367443dae284f6759d17736b14d91fafeb9873ac683825b2459918197d3df3ab1a33935dd4f6737baac4d1e073176fc24e176deb5ddeceff644b291c66ce1343dc6a45fd29ccb2fce3f8d";
+pub(super) const EXPONENT: &str = "b5cf250dfa77cf615191ac039f946b0c768b338b9522887b1771bd10ad1a20a5118b11d150db3ced993ee3b561c58f8051e235d53fa790a03a9d09b24f5e1a763b7cb8cac066e88f02bb3ef08f2a7a90c48dc6ce806db522c84086ef89aa0e345162be1f4791cf96e9145a213b8efe55342172151a191a26207efd3a7db91335";

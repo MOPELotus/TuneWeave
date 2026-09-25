@@ -12,7 +12,7 @@ use encoding_rs::GBK;
 use flate2::read::ZlibDecoder;
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{ACCEPT, CONTENT_LENGTH, COOKIE, REFERER, SET_COOKIE},
+    header::{ACCEPT, CONTENT_LENGTH, COOKIE, ORIGIN, REFERER, SET_COOKIE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,26 @@ use tuneweave_core::{
 };
 use url::Url;
 
+pub(crate) mod albums;
+pub(crate) mod artists;
+pub(crate) mod catalog;
+pub(crate) mod charts;
+pub(crate) mod discovery;
+mod login;
+mod lyric_tracks;
+pub(crate) mod native;
+pub(crate) mod playlist_catalog;
+pub(crate) mod podcasts;
+pub(crate) mod radio;
+pub(crate) mod video_streams;
+pub(crate) mod videos;
+pub use login::KuwoLoginChallenge;
+pub(crate) use login::{KuwoWebFormChallenge, KuwoWebSmsChallenge};
+pub use native::{
+    KuwoNativeDevice, KuwoNativeDeviceStore, KuwoNativeSessionExchange, KuwoNativeSessionInput,
+    KuwoNativeSmsChallenge, KuwoNativeSmsRequest,
+};
+
 const HOME_ENDPOINT: &str = "https://www.kuwo.cn/";
 const SEARCH_ENDPOINT: &str = "https://www.kuwo.cn/search/searchMusicBykeyWord";
 const TRACK_DETAIL_ENDPOINT: &str = "https://www.kuwo.cn/api/www/music/musicInfo";
@@ -35,7 +55,7 @@ const WORD_LYRIC_ENDPOINT: &str = "https://newlyric.kuwo.cn/newlyric.lrc";
 const MOBILE_LYRIC_ENDPOINT: &str = "https://m.kuwo.cn/newh5/singles/songinfoandlrc";
 const SEARCH_REFERER: &str = "https://www.kuwo.cn/search/list";
 const WEB_REFERER: &str = "https://www.kuwo.cn/";
-const WEB_SESSION_COOKIE: &str = "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324";
+pub(crate) const WEB_SESSION_COOKIE: &str = "Hm_Iuvt_cdb524f42f23cer9b268564v7y735ewrq2324";
 const ALBUM_IMAGE_PREFIX: &str = "https://img2.kuwo.cn/star/albumcover/";
 const ARTIST_IMAGE_PREFIX: &str = "https://img1.kuwo.cn/star/starheads/";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
@@ -55,12 +75,19 @@ const PLAYLIST_TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 #[derive(Clone, Default)]
 pub struct KuwoConfig {
     pub proxy_url: Option<String>,
+    pub credential_store: Option<Arc<dyn tuneweave_core::AccountCredentialStore>>,
+    pub device_path: Option<std::path::PathBuf>,
 }
 
 impl fmt::Debug for KuwoConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("KuwoConfig")
+            .field("credential_store", &self.credential_store.is_some())
+            .field(
+                "device_path",
+                &self.device_path.as_ref().map(|_| "[configured]"),
+            )
             .field(
                 "proxy_url",
                 &self.proxy_url.as_ref().map(|_| "[configured]"),
@@ -72,8 +99,17 @@ impl fmt::Debug for KuwoConfig {
 #[derive(Clone)]
 pub struct KuwoClient {
     http: Client,
+    media_http: Client,
     proxy_configured: bool,
     web_session: Arc<Mutex<Option<KuwoWebSession>>>,
+    #[cfg(test)]
+    login_test_origin: Option<Url>,
+    #[cfg(test)]
+    web_test_origin: Option<Url>,
+    #[cfg(test)]
+    native_test_response_key: Option<[u8; 8]>,
+    #[cfg(test)]
+    pub(crate) native_submission_limits: Option<native::submissions::Limits>,
 }
 
 impl fmt::Debug for KuwoClient {
@@ -109,40 +145,83 @@ enum KuwoSignedResponse {
 #[derive(Clone, Copy)]
 enum KuwoSignedEndpoint {
     TrackDetail,
+    MvDetail,
+    MvPlayback,
+    MvCatalog,
     Playback,
     Playlist,
+    PlaylistCatalog,
+    PlaylistCatalogTag,
+    PlaylistCatalogTaxonomy,
+    Catalog(catalog::CatalogKind),
+    Artist(artists::SignedArtistEndpoint),
+    Chart(charts::Endpoint),
 }
 
 impl KuwoSignedEndpoint {
     const fn url(self) -> &'static str {
         match self {
-            Self::TrackDetail => TRACK_DETAIL_ENDPOINT,
-            Self::Playback => PLAYBACK_ENDPOINT,
+            Self::TrackDetail | Self::MvDetail => TRACK_DETAIL_ENDPOINT,
+            Self::Playback | Self::MvPlayback => PLAYBACK_ENDPOINT,
+            Self::MvCatalog => "https://www.kuwo.cn/api/www/music/mvList",
             Self::Playlist => PLAYLIST_ENDPOINT,
+            Self::PlaylistCatalog => "https://www.kuwo.cn/api/www/classify/playlist/getRcmPlayList",
+            Self::PlaylistCatalogTag => {
+                "https://www.kuwo.cn/api/www/classify/playlist/getTagPlayList"
+            }
+            Self::PlaylistCatalogTaxonomy => "https://www.kuwo.cn/api/www/playlist/getTagList",
+            Self::Catalog(kind) => kind.url(),
+            Self::Artist(kind) => kind.url(),
+            Self::Chart(kind) => kind.url(),
         }
     }
 
     const fn parse_operation(self) -> &'static str {
         match self {
             Self::TrackDetail => "Kuwo track detail",
+            Self::MvDetail => "Kuwo MV detail",
+            Self::MvPlayback => "Kuwo MV playback",
+            Self::MvCatalog => "Kuwo MV catalogue",
             Self::Playback => "Kuwo public playback",
             Self::Playlist => "Kuwo public playlist",
+            Self::PlaylistCatalog => "Kuwo playlist catalogue",
+            Self::PlaylistCatalogTag => "Kuwo tag playlist catalogue",
+            Self::PlaylistCatalogTaxonomy => "Kuwo playlist catalogue taxonomy",
+            Self::Catalog(_) => "Kuwo public catalogue search",
+            Self::Artist(_) => "Kuwo public artist",
+            Self::Chart(_) => "Kuwo public chart",
         }
     }
 
     const fn log_operation(self) -> &'static str {
         match self {
             Self::TrackDetail => "track_detail",
+            Self::MvDetail => "mv_detail",
+            Self::MvPlayback => "mv_playback",
+            Self::MvCatalog => "mv_catalogue",
             Self::Playback => "public_playback",
             Self::Playlist => "playlist_page",
+            Self::PlaylistCatalog => "playlist_catalogue",
+            Self::PlaylistCatalogTag => "playlist_catalogue_tag",
+            Self::PlaylistCatalogTaxonomy => "playlist_catalogue_taxonomy",
+            Self::Catalog(kind) => kind.operation(),
+            Self::Artist(kind) => kind.operation(),
+            Self::Chart(kind) => kind.operation(),
         }
     }
 
     const fn path(self) -> &'static str {
         match self {
-            Self::TrackDetail => "/api/www/music/musicInfo",
-            Self::Playback => "/api/v1/www/music/playUrl",
+            Self::TrackDetail | Self::MvDetail => "/api/www/music/musicInfo",
+            Self::Playback | Self::MvPlayback => "/api/v1/www/music/playUrl",
+            Self::MvCatalog => "/api/www/music/mvList",
             Self::Playlist => "/api/www/playlist/playListInfo",
+            Self::PlaylistCatalog => "/api/www/classify/playlist/getRcmPlayList",
+            Self::PlaylistCatalogTag => "/api/www/classify/playlist/getTagPlayList",
+            Self::PlaylistCatalogTaxonomy => "/api/www/playlist/getTagList",
+            Self::Catalog(kind) => kind.path(),
+            Self::Artist(kind) => kind.path(),
+            Self::Chart(kind) => kind.path(),
         }
     }
 }
@@ -305,7 +384,7 @@ struct KuwoTrackDetail {
     duration: FlexibleText,
     #[serde(rename = "songTimeMinutes")]
     song_time_minutes: String,
-    #[serde(rename = "releaseDate")]
+    #[serde(rename = "releaseDate", alias = "releasedate")]
     release_date: String,
     pic: String,
     pic120: String,
@@ -576,6 +655,7 @@ impl KuwoClient {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .user_agent(USER_AGENT);
         if let Some(proxy_url) = config.proxy_url.as_deref() {
             let proxy = Proxy::all(proxy_url).map_err(|_| {
@@ -587,16 +667,61 @@ impl KuwoClient {
             TuneWeaveError::new(ErrorCode::InternalError, "failed to build Kuwo HTTP client")
                 .with_platform(Platform::Kuwo)
         })?;
+        let mut media_builder = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(Policy::none())
+            .retry(reqwest::retry::never())
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .user_agent(USER_AGENT);
+        if let Some(proxy_url) = config.proxy_url.as_deref() {
+            media_builder = media_builder.proxy(Proxy::all(proxy_url).map_err(|_| {
+                kuwo_invalid_request("Kuwo proxy configuration is not a valid proxy URL")
+            })?);
+        }
+        let media_http = media_builder.build().map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to build Kuwo media HTTP client",
+            )
+            .with_platform(Platform::Kuwo)
+        })?;
         Ok(Self {
             http,
+            media_http,
             proxy_configured: config.proxy_url.is_some(),
             web_session: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            login_test_origin: None,
+            #[cfg(test)]
+            web_test_origin: None,
+            #[cfg(test)]
+            native_test_response_key: None,
+            #[cfg(test)]
+            native_submission_limits: None,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn test_client() -> Self {
         Self::new(&KuwoConfig::default()).expect("create Kuwo test client")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_http_client(&mut self, http: Client) {
+        self.http = http;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_origins(&mut self, login: Url, web: Url) {
+        self.login_test_origin = Some(login);
+        self.web_test_origin = Some(web);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_login_test_origin(&mut self, login: Url) {
+        self.login_test_origin = Some(login);
     }
 
     pub(crate) async fn search_tracks_page(
@@ -654,10 +779,35 @@ impl KuwoClient {
     }
 
     pub(crate) async fn track_detail(&self, music_id: &str) -> Result<Track> {
+        self.track_detail_guarded(music_id, || Ok(())).await
+    }
+
+    pub(crate) async fn track_detail_guarded<F>(&self, music_id: &str, guard: F) -> Result<Track>
+    where
+        F: Fn() -> Result<()> + Sync,
+    {
         for force_refresh in [false, true] {
+            guard()?;
+            let session = self.web_session(force_refresh).await;
+            guard()?;
+            let session = session?;
             let response = self
-                .signed_get_track_detail(music_id, force_refresh)
-                .await?;
+                .signed_get_with_session(
+                    KuwoSignedEndpoint::TrackDetail,
+                    &KuwoTrackDetailQuery {
+                        mid: music_id,
+                        https_status: 1,
+                        request_id: new_request_id(),
+                        plat: "web_www",
+                        from: "",
+                    },
+                    WEB_REFERER,
+                    session,
+                    u8::from(force_refresh),
+                )
+                .await;
+            guard()?;
+            let response = response?;
             let bytes = match response {
                 KuwoSignedResponse::Body(bytes) => bytes,
                 KuwoSignedResponse::SessionRejected if !force_refresh => continue,
@@ -1000,7 +1150,10 @@ impl KuwoClient {
     }
 
     async fn download_word_lyrics(&self, music_id: &str) -> Result<KuwoWordLyrics> {
-        let url = build_word_lyric_url(music_id)?;
+        let original = build_word_lyric_url(music_id)?;
+        let mut url = Url::parse(&self.web_target(WORD_LYRIC_ENDPOINT))
+            .map_err(|_| kuwo_upstream_error("Kuwo lyric endpoint was invalid"))?;
+        url.set_query(original.query());
         let started = Instant::now();
         let mut http_status = None;
         let outcome = async {
@@ -1053,7 +1206,7 @@ impl KuwoClient {
         let outcome = async {
             let response = self
                 .http
-                .get(MOBILE_LYRIC_ENDPOINT)
+                .get(self.web_target(MOBILE_LYRIC_ENDPOINT))
                 .header(ACCEPT, "application/json, text/plain")
                 .header(REFERER, WEB_REFERER)
                 .query(&KuwoMobileLyricQuery {
@@ -1090,27 +1243,6 @@ impl KuwoClient {
             &outcome,
         );
         outcome
-    }
-
-    async fn signed_get_track_detail(
-        &self,
-        music_id: &str,
-        force_refresh: bool,
-    ) -> Result<KuwoSignedResponse> {
-        self.signed_get(
-            KuwoSignedEndpoint::TrackDetail,
-            &KuwoTrackDetailQuery {
-                mid: music_id,
-                https_status: 1,
-                request_id: new_request_id(),
-                plat: "web_www",
-                from: "",
-            },
-            WEB_REFERER,
-            force_refresh,
-            u8::from(force_refresh),
-        )
-        .await
     }
 
     async fn signed_get_playback(
@@ -1175,13 +1307,28 @@ impl KuwoClient {
         Q: Serialize + ?Sized,
     {
         let session = self.web_session(force_refresh).await?;
+        self.signed_get_with_session(endpoint, query, referer, session, retry_count)
+            .await
+    }
+
+    async fn signed_get_with_session<Q>(
+        &self,
+        endpoint: KuwoSignedEndpoint,
+        query: &Q,
+        referer: &str,
+        session: KuwoWebSession,
+        retry_count: u8,
+    ) -> Result<KuwoSignedResponse>
+    where
+        Q: Serialize + ?Sized,
+    {
         let secret = new_web_secret(&session.cookie_value)?;
         let started = Instant::now();
         let mut http_status = None;
         let outcome = async {
             let response = self
                 .http
-                .get(endpoint.url())
+                .get(self.web_target(endpoint.url()))
                 .header(ACCEPT, "application/json")
                 .header(REFERER, referer)
                 .header(
@@ -1200,7 +1347,22 @@ impl KuwoClient {
             ) {
                 return Ok(KuwoSignedResponse::SessionRejected);
             }
-            let bytes = read_bounded_response(response, endpoint.parse_operation()).await?;
+            let bytes = if matches!(
+                endpoint,
+                KuwoSignedEndpoint::Catalog(_)
+                    | KuwoSignedEndpoint::Artist(_)
+                    | KuwoSignedEndpoint::Chart(_)
+                    | KuwoSignedEndpoint::MvDetail
+                    | KuwoSignedEndpoint::MvPlayback
+                    | KuwoSignedEndpoint::MvCatalog
+                    | KuwoSignedEndpoint::PlaylistCatalog
+                    | KuwoSignedEndpoint::PlaylistCatalogTag
+                    | KuwoSignedEndpoint::PlaylistCatalogTaxonomy
+            ) {
+                catalog::read_response(response).await?
+            } else {
+                read_bounded_response(response, endpoint.parse_operation()).await?
+            };
             Ok(KuwoSignedResponse::Body(bytes))
         }
         .await;
@@ -1242,7 +1404,7 @@ impl KuwoClient {
         let outcome = async {
             let response = self
                 .http
-                .get(HOME_ENDPOINT)
+                .get(self.web_target(HOME_ENDPOINT))
                 .header(ACCEPT, "text/html,application/xhtml+xml")
                 .send()
                 .await
@@ -1270,6 +1432,18 @@ impl KuwoClient {
         let session = outcome?;
         *current = Some(session.clone());
         Ok(session)
+    }
+
+    fn web_target(&self, url: &str) -> String {
+        #[cfg(test)]
+        if let Some(origin) = &self.web_test_origin {
+            let path = Url::parse(url).expect("fixed official URL");
+            return origin
+                .join(path.path())
+                .expect("fixed official path")
+                .into();
+        }
+        url.to_owned()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1630,20 +1804,19 @@ fn validate_public_audio_url(value: &str) -> Result<String> {
         .host_str()
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted a media host"))?;
-    let host_prefix = host
-        .strip_suffix(".kuwo.cn")
-        .filter(|prefix| {
+    let trusted_host = host == "kw-bj.kuwo.cn"
+        || host.strip_suffix(".kuwo.cn").is_some_and(|prefix| {
             !prefix.is_empty()
+                && prefix.len() <= 63
                 && !prefix.contains('.')
                 && prefix.ends_with("-sycdn")
                 && prefix
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-        .ok_or_else(|| {
-            kuwo_upstream_error("Kuwo public playback returned an untrusted media host")
-        })?;
-    if host_prefix.len() > 63
+        });
+    // kw-bj is the exact host returned by the official public playback producer
+    // for native anchor programmes. Do not generalize to arbitrary kw-* hosts.
+    if !trusted_host
         || url.scheme() != "https"
         || url.port().is_some()
         || !url.username().is_empty()
@@ -1730,7 +1903,7 @@ fn map_track_detail(
         .and_then(|info| info.vid.as_text())
         .as_deref()
         .and_then(canonical_positive_decimal)
-        .and_then(|id| ResourceRef::new(Platform::Kuwo, id.to_owned()).ok());
+        .and_then(|_| ResourceRef::new(Platform::Kuwo, requested_music_id.to_owned()).ok());
     if detail.online.as_text().as_deref() == Some("0") {
         track.playable = Some(false);
     }
@@ -2092,7 +2265,7 @@ fn map_search_track(item: KuwoSearchTrack) -> Result<Track> {
         .and_then(|info| info.vid.as_text())
         .as_deref()
         .and_then(canonical_positive_decimal)
-        .and_then(|id| ResourceRef::new(Platform::Kuwo, id.to_owned()).ok());
+        .and_then(|_| ResourceRef::new(Platform::Kuwo, track_id.to_owned()).ok());
     if item.online.as_text().as_deref() == Some("0") {
         track.playable = Some(false);
     }
@@ -2253,6 +2426,7 @@ fn map_qualities(specs: &[KuwoMediaSpec]) -> Vec<Quality> {
         Quality::High,
         Quality::Lossless,
         Quality::Hires,
+        Quality::Dtsx,
         Quality::Surround,
     ] {
         if specs
@@ -2272,7 +2446,7 @@ fn quality_for_level(level: &str) -> Option<Quality> {
         "p" => Some(Quality::High),
         "ff" => Some(Quality::Lossless),
         "hr" => Some(Quality::Hires),
-        "dtsx" => Some(Quality::Surround),
+        "dtsx" => Some(Quality::Dtsx),
         _ => None,
     }
 }
@@ -2306,7 +2480,7 @@ fn normalize_official_image_url(value: &str) -> Option<String> {
         || url.fragment().is_some()
         || !matches!(
             url.host_str(),
-            Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn")
+            Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn" | "img4.kuwo.cn")
         )
         || !["/star/albumcover/", "/star/starheads/", "/wmvpic/"]
             .iter()
@@ -2357,7 +2531,7 @@ fn bounded_parts(value: &str, separator: char, limit: usize) -> Vec<String> {
         .collect()
 }
 
-fn canonical_media_track_id(track: &Track) -> Result<&str> {
+pub(crate) fn canonical_media_track_id(track: &Track) -> Result<&str> {
     if track.platform != Platform::Kuwo || track.resource_ref.platform() != Platform::Kuwo {
         return Err(kuwo_invalid_request(
             "Kuwo media resolution requires a Kuwo track",
@@ -2373,6 +2547,21 @@ fn canonical_media_track_id(track: &Track) -> Result<&str> {
 }
 
 fn validate_media_request(request: &StreamRequest) -> Result<()> {
+    if request.variant == StreamVariant::SingAlong {
+        return Err(kuwo_invalid_request(
+            "Kuwo sing-along media requires a native account",
+        ));
+    }
+    if request.quality == Quality::Vinyl {
+        return Err(kuwo_invalid_request(
+            "Kuwo vinyl media requires a native account",
+        ));
+    }
+    if request.quality == Quality::Dtsx {
+        return Err(kuwo_invalid_request(
+            "Kuwo DTS:X media requires a native account",
+        ));
+    }
     if request.variant != StreamVariant::Default {
         return Err(kuwo_invalid_request(
             "Kuwo public media only supports the default stream variant",
@@ -2816,7 +3005,7 @@ mod tests {
         assert_eq!(first.duration_ms, Some(269_000));
         assert_eq!(
             first.mv_ref.as_ref().map(ToString::to_string),
-            Some("kuwo:8132306".to_owned())
+            Some("kuwo:228908".to_owned())
         );
         assert_eq!(
             first.available_qualities,
@@ -2825,7 +3014,7 @@ mod tests {
                 Quality::Standard,
                 Quality::High,
                 Quality::Lossless,
-                Quality::Surround
+                Quality::Dtsx
             ]
         );
         assert_eq!(first.playable, None);
@@ -2950,16 +3139,33 @@ mod tests {
         assert_eq!(track.duration_ms, Some(269_000));
         assert_eq!(
             track.mv_ref.as_ref().map(ToString::to_string),
-            Some("kuwo:8132306".to_owned())
+            Some("kuwo:228908".to_owned())
         );
         assert_eq!(track.available_qualities, [Quality::Lossless]);
         assert_eq!(track.playable, None);
+        assert_eq!(track.extensions["mv_pay_info"]["vid"], 8132306);
         assert_eq!(track.extensions.get("listen_fee"), Some(&json!(true)));
 
         let mismatched_musicrid = TRACK_DETAIL_RESPONSE.replace("MUSIC_228908", "MUSIC_3195905");
         assert!(parse_track_detail_response(mismatched_musicrid.as_bytes(), "228908").is_err());
         let mismatched_rid = TRACK_DETAIL_RESPONSE.replace("\"rid\":228908", "\"rid\":3195905");
         assert!(parse_track_detail_response(mismatched_rid.as_bytes(), "228908").is_err());
+    }
+
+    #[test]
+    fn absent_or_invalid_mv_identity_does_not_create_a_video_reference() {
+        for vid in [json!("0"), json!("not-an-id"), json!(null)] {
+            let mut value: serde_json::Value = serde_json::from_str(TRACK_DETAIL_RESPONSE).unwrap();
+            value["data"]["mvpayinfo"]["vid"] = vid;
+            let track = parse_track_detail_response(&serde_json::to_vec(&value).unwrap(), "228908")
+                .unwrap();
+            assert!(track.mv_ref.is_none());
+        }
+        let mut value: serde_json::Value = serde_json::from_str(TRACK_DETAIL_RESPONSE).unwrap();
+        value["data"]["hasmv"] = json!(0);
+        let track =
+            parse_track_detail_response(&serde_json::to_vec(&value).unwrap(), "228908").unwrap();
+        assert!(track.mv_ref.is_none());
     }
 
     #[test]
@@ -3106,6 +3312,7 @@ mod tests {
 
     #[test]
     fn playback_urls_accept_only_the_current_https_mp3_cdn_shape() {
+        assert!(validate_public_audio_url("https://kw-bj.kuwo.cn/anchor/file.mp3").is_ok());
         assert!(
             validate_public_audio_url(
                 "https://er-sycdn.kuwo.cn/token/time/resource/trackmedia/file.mp3"
@@ -3113,6 +3320,11 @@ mod tests {
             .is_ok()
         );
         for invalid in [
+            "https://kw-bj.kuwo.cn.evil.example/anchor/file.mp3",
+            "https://nested.kw-bj.kuwo.cn/anchor/file.mp3",
+            "https://kw-other.kuwo.cn/anchor/file.mp3",
+            "http://kw-bj.kuwo.cn/anchor/file.mp3",
+            "https://kw-bj.kuwo.cn/anchor/file.mp3?sid=secret",
             "http://er-sycdn.kuwo.cn/token/file.mp3",
             "https://user@er-sycdn.kuwo.cn/token/file.mp3",
             "https://er-sycdn.kuwo.cn:444/token/file.mp3",
@@ -3199,6 +3411,7 @@ mod tests {
     fn configuration_and_client_debug_hide_proxy_and_web_session_state() {
         let config = KuwoConfig {
             proxy_url: Some("http://user:secret@example.test:8080".to_owned()),
+            ..KuwoConfig::default()
         };
         let config_debug = format!("{config:?}");
         assert!(config_debug.contains("[configured]"));

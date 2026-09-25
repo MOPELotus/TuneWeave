@@ -1,0 +1,12 @@
+{
+  "source": "Independent Python hashlib and bit-permutation reference; synthetic values, no SMS sent",
+  "send_secret": "8767C392149F778EA9AE1DEE0CEDBAAE",
+  "send": {
+    "plain": "mobile=13800000000&type=4&tm=1789500000123&secret=8767C392149F778EA9AE1DEE0CEDBAAE&src=kwplayer_ar_12.2.2.0_newpcguanwangmobile.apk&version=12.2.2.0&dev_id=1234567890&user=00112233445546778899aabbccddeeff&dev_name=TuneWeave+SDK+client&devType=SDK&sx=17894932&from=android&devResolution=0*0",
+    "cipher_base64": "q9SUEF5l8EbVPIAt+a1Eqj8KlTw5JKt7yGejxr3dUE5JMGQM136LXu5zVE0Rp8x4rrBrsNE5esaqOGbw89/u8tHgio9dRU+AOyc3gi4ilyRWwlsVCqA0QSnt3tyAnfX2RiHGR7j5gmHbmyeiAJLm6K0INqcTwrc7igP2r9fKbUW4HkVAguL7cLMxaAd7eNvfttcR9Nvto0T7u6VmnSYXqna8mBav7psLDj14WIzJiaLBFnFA7o5TH5zjU671BhPZyHXOOWbpmQpaMZIjStFZZ4+QPQx0CYGW2bYHB5XP78e4JW2BBffyRO7qQscvWFaSEfLp97b8u/P3oxBU04aCCdmJaISAWTlZoE50+GPiM5E7IKwkq18ddorgGxC3u8EFw2j/Jv/PBgo="
+  },
+  "login": {
+    "plain": "mobile=13800000000&code=24680&tm=server-token%2B%26%251&src=kwplayer_ar_12.2.2.0_newpcguanwangmobile.apk&version=12.2.2.0&dev_id=1234567890&dev_name=TuneWeave+SDK+client&devType=SDK&sx=17894932&from=android&devResolution=0*0",
+    "cipher_base64": "q9SUEF5l8EbVPIAt+a1Eqp5c8GeUmgJecARUFdOTCiIusorVOSIr/Oo9VH1uImjfkujlumaJwvKALspHvLD7EdnrnaLlON1Tr3xjNMNnfCtWU5IDuYZzXbdkrsxM1y9x8Nv+z7RGGJENa+3T2WwQnV1HHMrQ04hWrcwx4oxH+Rki82LuhJ64/MxbcTZ6uu3Z1QEK7KyJexoWMkaVMt17VjCdcs63WIS3lutAUA29RP6VESJlH5xhdaU2dLHQAjT+D7bO5Tm/P/ulvQNPHiqAU9JXm8JrO9j6orknR8j5Es4k6rfNvKF/MQ=="
+  }
+}

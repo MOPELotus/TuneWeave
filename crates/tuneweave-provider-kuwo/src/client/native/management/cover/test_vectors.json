@@ -1,0 +1,14 @@
+[
+  {
+    "plain": "",
+    "encrypted": "s+Amg2i+YeM="
+  },
+  {
+    "plain": "12345678",
+    "encrypted": "aO+R/ZKTI0az4CaDaL5h4w=="
+  },
+  {
+    "plain": "{\"dev_id\":\"device-user-123\",\"dev_name\":\"TuneWeave\",\"from\":\"android\",\"params\":{\"fileExt\":\"jpg\",\"width\":0},\"sid\":\"selected-session\",\"sx\":\"17894932\",\"uid\":\"42\"}",
+    "encrypted": "evLl8xjgiwiW0zmtE+ffvc3U52MnmXVM66aHDb0wyQtc8RuhuAqaixvbLq5DseAoiSIyCv5v/7fDaU/R9N166v2RVErbj/K5cDdoI2d/X/cx9GjUm1i6GKQsbU0QLBM8p0y/kqNNuFktuazXxGRJuX3jq/I1BByXrwINB59wQYswlahlUJaeJKg/i0iR1bWuTlxyfZxgq5lzHRPIZ2pmLQ=="
+  }
+]
