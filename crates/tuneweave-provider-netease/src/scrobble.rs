@@ -68,8 +68,8 @@ pub(crate) fn level(quality: Quality) -> Result<&'static str> {
         Quality::Dolby => Ok("dolby"),
         Quality::Master => Ok("jymaster"),
         Quality::Vivid => Ok("vivid"),
-        Quality::Auto | Quality::Low => Err(TuneWeaveError::invalid_request(
-            "NetEase scrobble requires an actual supported quality; auto and low are not supported",
+        Quality::Auto | Quality::Low | Quality::Dtsx | Quality::Vinyl => Err(TuneWeaveError::invalid_request(
+            "NetEase scrobble requires an actual supported quality; auto, low, DTS:X and vinyl are not supported",
         )
         .with_platform(Platform::Netease)),
     }

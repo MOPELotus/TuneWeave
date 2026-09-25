@@ -1,3 +1,4 @@
+mod cloud_transfer;
 #[path = "recent_history.rs"]
 mod recent_history;
 
@@ -148,6 +149,8 @@ pub struct NeteaseProvider {
     anonymous_identity: Arc<RwLock<Option<StoredAnonymousIdentity>>>,
     pending_captcha_clients: Arc<RwLock<BTreeMap<String, PendingCaptchaClient>>>,
     credential_store: Option<Arc<dyn AccountCredentialStore>>,
+    cloud_transfers: cloud_transfer::Transfers,
+    cloud_caller: bool,
 }
 
 impl NeteaseProvider {
@@ -161,6 +164,8 @@ impl NeteaseProvider {
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
             pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store,
+            cloud_transfers: Default::default(),
+            cloud_caller: false,
         };
         provider.restore_sessions()?;
         Ok(provider)
@@ -175,6 +180,8 @@ impl NeteaseProvider {
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
             pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store: None,
+            cloud_transfers: Default::default(),
+            cloud_caller: false,
         }
     }
 
@@ -191,6 +198,8 @@ impl NeteaseProvider {
             anonymous_identity: self.anonymous_identity.clone(),
             pending_captcha_clients: Arc::new(RwLock::new(BTreeMap::new())),
             credential_store: None,
+            cloud_transfers: self.cloud_transfers.clone(),
+            cloud_caller: true,
         })
     }
 
@@ -407,6 +416,7 @@ impl NeteaseProvider {
     pub async fn logout_account(&self, account: &str) -> Result<bool> {
         let account = normalize_account_label(Some(account))?.to_owned();
         let client = self.client_for(Some(&account))?;
+        self.cancel_server_uploads(&account)?;
         let remote_logout = client.logout().await;
         let removed = self.remove_session(&account)?;
         remote_logout
@@ -778,6 +788,7 @@ impl MusicProvider for NeteaseProvider {
             Capability::AccountArtistNewTracksPlayAll,
             Capability::AccountAvatarWrite,
             Capability::AccountCloudUpload,
+            Capability::AccountCloudUploadTransfer,
             Capability::AccountCloudDirectUpload,
             Capability::AccountCloudImport,
             Capability::AccountCloudLyrics,
@@ -2356,6 +2367,11 @@ impl MusicProvider for NeteaseProvider {
         let order = match request.order {
             ArtistTrackOrder::Hot => "hot",
             ArtistTrackOrder::Time => "time",
+            ArtistTrackOrder::PlatformDefault => {
+                return Err(TuneWeaveError::invalid_request(
+                    "NetEase artist tracks require hot or time order",
+                ));
+            }
         };
         let response = client
             .request_api(
@@ -3248,7 +3264,7 @@ impl MusicProvider for NeteaseProvider {
     async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
         let id = validate_netease_stream_track(track)?;
         let client = self.client_for(request.account.as_deref())?;
-        let (variant, path, payload, requested_level) = netease_download_request(id, request);
+        let (variant, path, payload, requested_level) = netease_download_request(id, request)?;
         let client =
             client.for_vivid(request.quality == Quality::Vivid && variant == StreamVariant::Modern);
         let response = client.request_eapi(path, payload).await?;
@@ -3317,6 +3333,7 @@ impl MusicProvider for NeteaseProvider {
             None
         };
         Ok(ProviderQrPoll {
+            verification: None,
             state,
             message: check.message,
             profile: authentication.as_ref().map(|result| result.profile.clone()),
@@ -3336,6 +3353,10 @@ impl MusicProvider for NeteaseProvider {
         request: &PasswordLoginRequest,
         mode: CredentialMode,
     ) -> Result<ProviderAuthResult> {
+        request.require_backend(
+            Platform::Netease,
+            tuneweave_core::PasswordLoginBackend::Default,
+        )?;
         validate_netease_login_account(&request.account, mode)?;
         let country_code = request.country_code.as_deref().unwrap_or("86");
         if request.secure_captcha.is_some() && request.principal_type != PrincipalType::Phone {
@@ -3386,6 +3407,8 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
+        request.reject_account_creation_option(Platform::Netease)?;
+        request.reject_platform_policies_option(Platform::Netease)?;
         match request.method {
             ChallengeMethod::Sms => {
                 NeteaseProvider::send_phone_captcha_with_backend(
@@ -3404,6 +3427,8 @@ impl MusicProvider for NeteaseProvider {
         request: &AuthChallengeRequest,
         code: &str,
     ) -> Result<AuthChallengeValidation> {
+        request.reject_account_creation_option(Platform::Netease)?;
+        request.reject_platform_policies_option(Platform::Netease)?;
         let verification = match request.method {
             ChallengeMethod::Sms => {
                 NeteaseProvider::verify_phone_captcha(
@@ -3524,6 +3549,8 @@ impl MusicProvider for NeteaseProvider {
         code: &str,
         mode: CredentialMode,
     ) -> Result<ProviderAuthResult> {
+        request.reject_account_creation_option(Platform::Netease)?;
+        request.reject_platform_policies_option(Platform::Netease)?;
         validate_netease_login_account(&request.account, mode)?;
         let country_code = request.country_code.as_deref().unwrap_or("86");
         let login = match request.method {
@@ -3559,6 +3586,10 @@ impl MusicProvider for NeteaseProvider {
         }
         let account = validate_netease_login_account(account, mode)?.to_owned();
         let client = netease_logout_source(self, &account, source_credential, mode)?;
+        self.cancel_caller_uploads(&client)?;
+        if mode.persists_on_server() {
+            self.cancel_server_uploads(&account)?;
+        }
         client.logout().await?;
         let removed = if mode.persists_on_server() {
             self.remove_session(&account).map_err(|_| {
@@ -3747,6 +3778,39 @@ impl MusicProvider for NeteaseProvider {
                 .insert("upload_response".to_owned(), upload_response);
         }
         Ok(result)
+    }
+
+    async fn begin_cloud_upload_transfer(
+        &self,
+        request: &tuneweave_core::CloudUploadTransferRequest,
+    ) -> Result<tuneweave_core::CloudUploadTransfer> {
+        self.begin_upload_transfer(request).await
+    }
+    async fn cloud_upload_transfer(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::CloudUploadTransfer> {
+        self.read_upload_transfer(id, account)
+    }
+    async fn advance_cloud_upload_transfer(
+        &self,
+        id: &str,
+        response: &tuneweave_core::CloudUploadStepResponse,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::CloudUploadTransfer> {
+        self.advance_upload_transfer(id, response, account)
+    }
+    async fn cancel_cloud_upload_transfer(&self, id: &str, account: Option<&str>) -> Result<bool> {
+        self.cancel_upload_transfer(id, account)
+    }
+    async fn publish_cloud_upload_transfer(
+        &self,
+        id: &str,
+        metadata: &tuneweave_core::CloudUploadPublishMetadata,
+        account: Option<&str>,
+    ) -> Result<CloudUploadResult> {
+        self.publish_upload_transfer(id, metadata, account).await
     }
 
     async fn cloud_upload_ticket(
@@ -6701,6 +6765,11 @@ fn netease_podcast_catalog_request(request: &PodcastListRequest) -> Result<(&'st
                 }),
             ))
         }
+        PodcastCatalog::CategoryNewest => Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            "NetEase does not expose the recently-updated podcast catalog",
+        )
+        .with_platform(Platform::Netease)),
         PodcastCatalog::Personalized => {
             if request.category_id.is_some() {
                 return Err(TuneWeaveError::invalid_request(
@@ -6773,6 +6842,7 @@ const fn podcast_catalog_name(catalog: PodcastCatalog) -> &'static str {
         PodcastCatalog::Hot => "hot",
         PodcastCatalog::CategoryFeatured => "category_featured",
         PodcastCatalog::CategoryHot => "category_hot",
+        PodcastCatalog::CategoryNewest => "category_newest",
         PodcastCatalog::Personalized => "personalized",
         PodcastCatalog::TodayPreferred => "today_preferred",
         PodcastCatalog::Paid => "paid",
@@ -8160,6 +8230,13 @@ fn map_netease_podcast_catalog_response(
                 has_more,
                 consumed <= request.limit,
             )
+        }
+        PodcastCatalog::CategoryNewest => {
+            return Err(TuneWeaveError::new(
+                ErrorCode::CapabilityNotSupported,
+                "NetEase does not expose the recently-updated podcast catalog",
+            )
+            .with_platform(Platform::Netease));
         }
         PodcastCatalog::Personalized => (None, None, false, true),
         PodcastCatalog::TodayPreferred => (None, None, false, false),
@@ -11024,6 +11101,11 @@ fn netease_playlist_create_payload(request: &PlaylistCreateRequest) -> Result<Va
     let privacy = match request.visibility {
         PlaylistVisibility::Public => "0",
         PlaylistVisibility::Private => "10",
+        PlaylistVisibility::PlatformDefault => {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase playlist creation requires public or private visibility",
+            ));
+        }
     };
     let kind = match request.kind {
         PlaylistKind::Normal => "NORMAL",
@@ -11621,13 +11703,15 @@ async fn request_netease_streams(
         .iter()
         .map(validate_netease_stream_track)
         .collect::<Result<Vec<_>>>()?;
-    let (variant, path, payload, level) = netease_stream_request(&ids, request);
+    let (variant, path, payload, level) = netease_stream_request(&ids, request)?;
     let client =
         client.for_vivid(request.quality == Quality::Vivid && variant == StreamVariant::Modern);
     let response = match variant {
         StreamVariant::Legacy => client.request_api(path, payload).await?,
         StreamVariant::Modern => client.request_xeapi(path, payload).await?,
-        StreamVariant::Default => unreachable!("default stream variant is resolved above"),
+        StreamVariant::Default | StreamVariant::SingAlong => {
+            unreachable!("only supported native stream variants are returned above")
+        }
     };
     map_netease_stream_batch(
         tracks,
@@ -11740,8 +11824,15 @@ fn validate_netease_stream_track(track: &Track) -> Result<u64> {
 fn netease_stream_request(
     ids: &[u64],
     request: &StreamRequest,
-) -> (StreamVariant, &'static str, Value, Option<&'static str>) {
-    match request.variant {
+) -> Result<(StreamVariant, &'static str, Value, Option<&'static str>)> {
+    let level = netease_stream_level(request.quality)?;
+    Ok(match request.variant {
+        StreamVariant::SingAlong => {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase does not expose the sing-along stream variant",
+            )
+            .with_platform(Platform::Netease));
+        }
         StreamVariant::Legacy => (
             StreamVariant::Legacy,
             "/api/song/enhance/player/url",
@@ -11753,7 +11844,6 @@ fn netease_stream_request(
             None,
         ),
         StreamVariant::Default | StreamVariant::Modern => {
-            let level = netease_stream_level(request.quality);
             let mut payload = json!({
                 "ids": format!(
                     "[{}]",
@@ -11772,7 +11862,7 @@ fn netease_stream_request(
                 Some(level),
             )
         }
-    }
+    })
 }
 
 fn netease_track_subscription_payload(id: u64, subscribed: bool) -> Result<Value> {
@@ -11812,8 +11902,15 @@ fn netease_immersive_type(value: Option<ImmersiveAudioType>) -> &'static str {
 fn netease_download_request(
     id: u64,
     request: &StreamRequest,
-) -> (StreamVariant, &'static str, Value, Option<&'static str>) {
-    match request.variant {
+) -> Result<(StreamVariant, &'static str, Value, Option<&'static str>)> {
+    let level = netease_stream_level(request.quality)?;
+    Ok(match request.variant {
+        StreamVariant::SingAlong => {
+            return Err(TuneWeaveError::invalid_request(
+                "NetEase does not expose the sing-along stream variant",
+            )
+            .with_platform(Platform::Netease));
+        }
         StreamVariant::Legacy => (
             StreamVariant::Legacy,
             "/api/song/enhance/download/url",
@@ -11825,20 +11922,17 @@ fn netease_download_request(
             }),
             None,
         ),
-        StreamVariant::Default | StreamVariant::Modern => {
-            let level = netease_stream_level(request.quality);
-            (
-                StreamVariant::Modern,
-                "/api/song/enhance/download/url/v1",
-                json!({
-                    "id": id.to_string(),
-                    "immerseType": netease_immersive_type(request.immersive_type),
-                    "level": level
-                }),
-                Some(level),
-            )
-        }
-    }
+        StreamVariant::Default | StreamVariant::Modern => (
+            StreamVariant::Modern,
+            "/api/song/enhance/download/url/v1",
+            json!({
+                "id": id.to_string(),
+                "immerseType": netease_immersive_type(request.immersive_type),
+                "level": level
+            }),
+            Some(level),
+        ),
+    })
 }
 
 fn map_netease_download(
@@ -11948,19 +12042,31 @@ fn map_netease_download(
     })
 }
 
-const fn netease_stream_level(quality: Quality) -> &'static str {
-    match quality {
+fn netease_stream_level(quality: Quality) -> Result<&'static str> {
+    Ok(match quality {
         Quality::Auto | Quality::High => "exhigh",
         Quality::Low | Quality::Standard => "standard",
         Quality::Higher => "higher",
         Quality::Lossless => "lossless",
         Quality::Hires => "hires",
         Quality::Surround => "jyeffect",
+        Quality::Dtsx => {
+            return Err(
+                TuneWeaveError::invalid_request("NetEase does not expose DTS:X audio")
+                    .with_platform(Platform::Netease),
+            );
+        }
         Quality::Spatial => "sky",
         Quality::Dolby => "dolby",
         Quality::Master => "jymaster",
         Quality::Vivid => "vivid",
-    }
+        Quality::Vinyl => {
+            return Err(
+                TuneWeaveError::invalid_request("NetEase does not expose vinyl audio")
+                    .with_platform(Platform::Netease),
+            );
+        }
+    })
 }
 
 fn stream_outcome_error(track: &Track, error: TuneWeaveError, raw: Option<Value>) -> StreamOutcome {
@@ -12181,6 +12287,9 @@ fn stream_unavailable(stream: &StreamData, authenticated: bool) -> TuneWeaveErro
 
 fn requested_bitrate(quality: Quality) -> u64 {
     match quality {
+        Quality::Dtsx | Quality::Vinyl => {
+            unreachable!("unsupported quality rejected before bitrate selection")
+        }
         Quality::Low | Quality::Standard => 128_000,
         Quality::Higher => 192_000,
         Quality::High => 320_000,
@@ -12230,7 +12339,7 @@ fn quality_for_bitrate(bitrate: u64) -> Quality {
 
 const fn quality_rank(quality: Quality) -> u8 {
     match quality {
-        Quality::Auto => 0,
+        Quality::Auto | Quality::Dtsx | Quality::Vinyl => 0,
         Quality::Low => 1,
         Quality::Standard => 2,
         Quality::Higher => 3,
@@ -12670,6 +12779,10 @@ fn netease_artist_area(area: ArtistArea) -> Result<i64> {
         ArtistArea::Western => Ok(96),
         ArtistArea::Japanese => Ok(8),
         ArtistArea::Korean => Ok(16),
+        ArtistArea::JapaneseKorean => Err(TuneWeaveError::invalid_request(
+            "the NetEase artist catalog does not expose a combined Japanese/Korean area",
+        )
+        .with_platform(Platform::Netease)),
         ArtistArea::Other => Ok(0),
         ArtistArea::HongKongTaiwan => Err(TuneWeaveError::invalid_request(
             "the NetEase artist catalog does not expose a separate Hong Kong/Taiwan area",
@@ -13826,6 +13939,7 @@ fn map_video_stream(
         height: actual_resolution,
         size: item.size,
         duration_ms: None,
+        source_range: None,
         requested_resolution: request.resolution,
         actual_resolution,
         platform_code,
@@ -15716,6 +15830,7 @@ fn search_item_keyword(item: &SearchItem) -> Option<String> {
     let value = match item {
         SearchItem::Track(track) => Some(track.name.as_str()),
         SearchItem::Album(album) => Some(album.name.as_str()),
+        SearchItem::DigitalAlbum(album) => Some(album.name.as_str()),
         SearchItem::Artist(artist) => Some(artist.name.as_str()),
         SearchItem::Playlist(playlist) => Some(playlist.name.as_str()),
         SearchItem::User(user) => Some(user.name.as_str()),
@@ -21856,6 +21971,14 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+        let unsupported_recently_updated =
+            PodcastListRequest::new(PodcastCatalog::CategoryNewest, 20, 0);
+        assert_eq!(
+            netease_podcast_catalog_request(&unsupported_recently_updated)
+                .expect_err("NetEase does not expose the recently-updated catalog")
+                .code,
+            ErrorCode::CapabilityNotSupported
+        );
         let mut hot_with_category = PodcastListRequest::new(PodcastCatalog::Hot, 20, 0);
         hot_with_category.category_id = Some("2".to_owned());
         assert_eq!(
@@ -24004,6 +24127,12 @@ mod tests {
         assert_eq!(
             netease_artist_area(ArtistArea::HongKongTaiwan)
                 .expect_err("unsupported split area")
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            netease_artist_area(ArtistArea::JapaneseKorean)
+                .expect_err("unsupported combined area")
                 .code,
             ErrorCode::InvalidRequest
         );
@@ -27907,6 +28036,57 @@ mod tests {
     }
 
     #[test]
+    fn sing_along_requests_do_not_fall_back_to_regular_streams_or_downloads() {
+        for bitrate in [None, Some(320_000)] {
+            let request = StreamRequest {
+                quality: Quality::Auto,
+                variant: StreamVariant::SingAlong,
+                bitrate,
+                ..StreamRequest::default()
+            };
+            assert_eq!(
+                netease_stream_request(&[123], &request).unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                netease_download_request(123, &request).unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn dtsx_and_vinyl_are_rejected_for_both_stream_variants_and_downloads() {
+        for quality in [Quality::Dtsx, Quality::Vinyl] {
+            for variant in [
+                StreamVariant::Default,
+                StreamVariant::Modern,
+                StreamVariant::Legacy,
+            ] {
+                for bitrate in [None, Some(320_000)] {
+                    let request = StreamRequest {
+                        quality,
+                        variant,
+                        bitrate,
+                        immersive_type: None,
+                        account: None,
+                    };
+                    assert_eq!(
+                        netease_stream_request(&[123], &request).unwrap_err().code,
+                        ErrorCode::InvalidRequest
+                    );
+                    assert_eq!(
+                        netease_download_request(123, &request).unwrap_err().code,
+                        ErrorCode::InvalidRequest
+                    );
+                }
+            }
+        }
+        assert!(crate::scrobble::level(Quality::Dtsx).is_err());
+        assert!(crate::scrobble::level(Quality::Vinyl).is_err());
+    }
+
+    #[test]
     fn modern_stream_requests_cover_every_reference_level_and_sky_payload() {
         for (quality, level) in [
             (Quality::Standard, "standard"),
@@ -27928,7 +28108,7 @@ mod tests {
                 account: None,
             };
             let (variant, path, payload, mapped_level) =
-                netease_stream_request(&[1_969_519_579, 33_894_312], &request);
+                netease_stream_request(&[1_969_519_579, 33_894_312], &request).unwrap();
             assert_eq!(variant, StreamVariant::Modern, "{quality:?}");
             assert_eq!(path, "/api/song/enhance/player/url/v1", "{quality:?}");
             assert_eq!(payload["ids"], "[1969519579,33894312]", "{quality:?}");
@@ -27965,7 +28145,7 @@ mod tests {
                 immersive_type: Some(immersive_type),
                 account: None,
             };
-            let (_, _, payload, level) = netease_stream_request(&[123], &request);
+            let (_, _, payload, level) = netease_stream_request(&[123], &request).unwrap();
             assert_eq!(level, Some("sky"));
             assert_eq!(payload["immerseType"], expected);
         }
@@ -27977,7 +28157,7 @@ mod tests {
             immersive_type: Some(ImmersiveAudioType::Aac),
             account: None,
         };
-        let (_, _, payload, level) = netease_stream_request(&[123], &non_spatial);
+        let (_, _, payload, level) = netease_stream_request(&[123], &non_spatial).unwrap();
         assert_eq!(level, Some("hires"));
         assert!(payload.get("immerseType").is_none());
 
@@ -27988,7 +28168,7 @@ mod tests {
             immersive_type: None,
             account: None,
         };
-        let (variant, _, payload, level) = netease_stream_request(&[123], &request);
+        let (variant, _, payload, level) = netease_stream_request(&[123], &request).unwrap();
         assert_eq!(variant, StreamVariant::Modern);
         assert_eq!(payload["level"], "exhigh");
         assert!(payload.get("br").is_none());
@@ -28005,7 +28185,7 @@ mod tests {
             account: Some("legacy-user".to_owned()),
         };
         let (variant, path, payload, level) =
-            netease_stream_request(&[1_969_519_579, 33_894_312], &request);
+            netease_stream_request(&[1_969_519_579, 33_894_312], &request).unwrap();
         assert_eq!(variant, StreamVariant::Legacy);
         assert_eq!(path, "/api/song/enhance/player/url");
         assert_eq!(payload["ids"], r#"["1969519579","33894312"]"#);
@@ -28022,7 +28202,8 @@ mod tests {
                 immersive_type: None,
                 account: None,
             },
-        );
+        )
+        .unwrap();
         assert_eq!(payload["br"], 320_000);
     }
 
@@ -28035,7 +28216,8 @@ mod tests {
             immersive_type: None,
             account: None,
         };
-        let (variant, path, payload, level) = netease_download_request(2_709_812_973, &legacy);
+        let (variant, path, payload, level) =
+            netease_download_request(2_709_812_973, &legacy).unwrap();
         assert_eq!(variant, StreamVariant::Legacy);
         assert_eq!(path, "/api/song/enhance/download/url");
         assert_eq!(payload["id"], "2709812973");
@@ -28062,7 +28244,7 @@ mod tests {
                 account: None,
             };
             let (variant, path, payload, mapped_level) =
-                netease_download_request(2_709_812_973, &request);
+                netease_download_request(2_709_812_973, &request).unwrap();
             assert_eq!(variant, StreamVariant::Modern, "{quality:?}");
             assert_eq!(path, "/api/song/enhance/download/url/v1", "{quality:?}");
             assert_eq!(payload["id"], "2709812973", "{quality:?}");
@@ -29273,6 +29455,7 @@ mod tests {
         let password_error = MusicProvider::password_login(
             &provider,
             &PasswordLoginRequest {
+                backend: Default::default(),
                 account: "default".to_owned(),
                 principal_type: PrincipalType::Username,
                 principal: "username".to_owned(),
@@ -29289,6 +29472,7 @@ mod tests {
         let secure_email_error = MusicProvider::password_login(
             &provider,
             &PasswordLoginRequest {
+                backend: Default::default(),
                 account: "default".to_owned(),
                 principal_type: PrincipalType::Email,
                 principal: "private@example.test".to_owned(),
@@ -31801,12 +31985,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn phone_auth_rejects_unsupported_account_creation_permission_before_network() {
+        let network_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let provider = NeteaseProvider::new(NeteaseConfig {
+            proxy_url: Some(format!("http://{}", network_guard.local_addr().unwrap())),
+            timeout: std::time::Duration::from_millis(100),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        let request = AuthChallengeRequest {
+            account: "default".into(),
+            method: ChallengeMethod::Sms,
+            backend: AuthChallengeBackend::Standard,
+            principal: "13800000000".into(),
+            country_code: Some("86".into()),
+            allow_account_creation: true,
+            accept_platform_policies: false,
+        };
+        for error in [
+            provider.start_auth_challenge(&request).await.unwrap_err(),
+            provider
+                .validate_auth_challenge(&request, "12345")
+                .await
+                .unwrap_err(),
+            provider
+                .verify_auth_challenge_with_mode(&request, "12345", CredentialMode::Client)
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+            assert!(error.message.contains("allow_account_creation"));
+            assert!(!error.message.contains("13800000000"));
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_captcha_validation_preserves_an_invalid_code_as_data() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
         let result = MusicProvider::validate_auth_challenge(
             &provider,
             &AuthChallengeRequest {
+                allow_account_creation: false,
+                accept_platform_policies: false,
                 account: "default".to_owned(),
                 method: ChallengeMethod::Sms,
                 backend: AuthChallengeBackend::Standard,

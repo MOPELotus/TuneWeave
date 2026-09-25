@@ -114,6 +114,9 @@ pub struct NeteaseClient {
     anti_cheat_v3_url: String,
     web_user_agent: String,
     cookie: Option<String>,
+    session_marker: Arc<()>,
+    #[cfg(test)]
+    cloud_servers_test_url: Option<String>,
     identities: Arc<Identities>,
     identity_scope: String,
     vivid_profile: bool,
@@ -360,6 +363,9 @@ impl NeteaseClient {
             anti_cheat_v3_url: config.anti_cheat_url,
             web_user_agent: config.web_user_agent,
             cookie: config.cookie,
+            session_marker: Arc::new(()),
+            #[cfg(test)]
+            cloud_servers_test_url: None,
             identities,
             identity_scope: "anonymous".to_owned(),
             vivid_profile: false,
@@ -1041,7 +1047,13 @@ impl NeteaseClient {
     }
 
     pub async fn cloud_upload_servers(&self, bucket: &str) -> Result<NeteaseResponse> {
-        let mut url = Url::parse(CLOUD_UPLOAD_LBS_URL).map_err(|_| {
+        let discovery_url = CLOUD_UPLOAD_LBS_URL;
+        #[cfg(test)]
+        let discovery_url = self
+            .cloud_servers_test_url
+            .as_deref()
+            .unwrap_or(discovery_url);
+        let mut url = Url::parse(discovery_url).map_err(|_| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
                 "failed to construct the NetEase cloud upload discovery URL",
@@ -1540,6 +1552,16 @@ impl NeteaseClient {
             .header("X-Forwarded-For", ip)
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_cloud_servers_test_url(mut self, url: String) -> Self {
+        self.cloud_servers_test_url = Some(url);
+        self
+    }
+
+    pub(crate) fn same_upload_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.session_marker, &other.session_marker) && self.cookie == other.cookie
+    }
+
     pub(crate) fn configured_cookie(&self) -> Option<&str> {
         self.cookie.as_deref()
     }
@@ -1610,6 +1632,7 @@ impl NeteaseClient {
                 ))
             );
         }
+        client.session_marker = Arc::new(());
         client.cookie = Some(cookie);
         client
     }
