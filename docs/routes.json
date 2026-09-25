@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 266,
+  "route_count": 297,
   "routes": [
     {
       "method": "GET",
@@ -63,6 +63,26 @@
       "path": "/v1/account/cloud/uploads/ticket"
     },
     {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/transfers"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/cloud/uploads/transfers/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/cloud/uploads/transfers/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/transfers/{id}/advance"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/cloud/uploads/transfers/{id}/complete"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/account/dislikes"
     },
@@ -81,6 +101,10 @@
     {
       "method": "GET",
       "path": "/v1/account/favorites/playlist"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/favorites/playlists/order"
     },
     {
       "method": "DELETE",
@@ -175,6 +199,26 @@
       "path": "/v1/account/library/albums/{reference}"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/account/library/digital-albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/library/digital-albums"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/digital-albums"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/library/digital-albums/{reference}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/account/library/digital-albums/{reference}"
+    },
+    {
       "method": "GET",
       "path": "/v1/account/library/podcasts"
     },
@@ -216,6 +260,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/account/playlist-submissions"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/account/playlist-submissions/{reference}"
+    },
+    {
+      "method": "GET",
       "path": "/v1/account/playlists"
     },
     {
@@ -249,6 +301,14 @@
     {
       "method": "GET",
       "path": "/v1/account/profile"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/purchases/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/purchases/tracks"
     },
     {
       "method": "GET",
@@ -293,6 +353,10 @@
     {
       "method": "GET",
       "path": "/v1/artists/{reference}/albums"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/digital-albums"
     },
     {
       "method": "GET",
@@ -348,7 +412,15 @@
     },
     {
       "method": "POST",
+      "path": "/v1/auth/import"
+    },
+    {
+      "method": "POST",
       "path": "/v1/auth/password"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/password/challenges/{transaction_id}/verify"
     },
     {
       "method": "POST",
@@ -361,6 +433,10 @@
     {
       "method": "GET",
       "path": "/v1/auth/qr/{transaction_id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/qr/{transaction_id}/verification"
     },
     {
       "method": "POST",
@@ -377,6 +453,10 @@
     {
       "method": "POST",
       "path": "/v1/auth/session/refresh"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/session/revoke"
     },
     {
       "method": "GET",
@@ -416,6 +496,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/charts/{reference}/periods"
+    },
+    {
+      "method": "GET",
       "path": "/v1/charts/{reference}/tracks"
     },
     {
@@ -425,6 +509,10 @@
     {
       "method": "GET",
       "path": "/v1/digital-albums/{reference}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/digital-albums/{reference}/tracks"
     },
     {
       "method": "GET",
@@ -559,8 +647,16 @@
       "path": "/v1/playlists"
     },
     {
+      "method": "GET",
+      "path": "/v1/playlists"
+    },
+    {
       "method": "POST",
       "path": "/v1/playlists"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/tags"
     },
     {
       "method": "DELETE",
@@ -599,6 +695,18 @@
       "path": "/v1/playlists/{reference}/items/{item_id}/stream/redirect"
     },
     {
+      "method": "POST",
+      "path": "/v1/playlists/{reference}/submission"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/playlists/{reference}/track-occurrences"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/track-occurrences/order"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/playlists/{reference}/tracks"
     },
@@ -621,6 +729,10 @@
     {
       "method": "POST",
       "path": "/v1/playlists/{reference}/videos"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/playlists/{reference}/visibility"
     },
     {
       "method": "GET",
@@ -800,6 +912,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/tracks/{reference}/download/content"
+    },
+    {
+      "method": "GET",
       "path": "/v1/tracks/{reference}/download/redirect"
     },
     {
@@ -944,6 +1060,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/users/{reference}/favorites/digital-albums"
+    },
+    {
+      "method": "GET",
       "path": "/v1/users/{reference}/favorites/playlist"
     },
     {
@@ -1021,6 +1141,10 @@
     {
       "method": "GET",
       "path": "/v1/videos/{reference}/audio-stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/videos/{reference}/native-stream"
     },
     {
       "method": "GET",

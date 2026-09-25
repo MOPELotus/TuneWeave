@@ -1,6 +1,6 @@
 # 当前账号的最近歌曲、专辑与歌单记录
 
-最低版本：`0.1.0-alpha.11`。三项能力目前仅网易云实现，使用运行实例的 `/v1/capabilities?platform=netease` 判断是否可用。它们独立于 `listening_history`（网易云周榜/累计听歌统计）及 `recent_podcast_episode_history`。
+最低版本：`0.1.0-alpha.11`。三项能力目前仅网易云实现，使用运行实例的 `/v1/capabilities?platform=netease` 判断是否可用。它们独立于 `listening_history`（`GET /v1/account/history` 的平台听歌历史；网易云返回周榜/累计结果，酷狗 Standard 返回原生账号播放记录）及 `recent_podcast_episode_history`。
 
 | 请求 | capability | Provider 方法 | 记录模型 |
 | --- | --- | --- | --- |
