@@ -4504,6 +4504,7 @@ impl MusicProvider for QqProvider {
     }
 
     async fn chart_tracks(&self, id: &str, request: &ChartTrackListRequest) -> Result<Page<Track>> {
+        request.period.require_current(Platform::Qq)?;
         self.validate_public_account(request.account.as_deref())?;
         let (request_api, top_id) = qq_top_detail_request(id, request)?;
         let response = self
@@ -6143,24 +6144,28 @@ impl MusicProvider for QqProvider {
             .await?;
         match outcome {
             QqQrPollOutcome::Waiting => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Waiting,
                 message: Some("waiting for QR scan".to_owned()),
                 profile: None,
                 credential: None,
             }),
             QqQrPollOutcome::Scanned => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Scanned,
                 message: Some("QR scanned; waiting for confirmation".to_owned()),
                 profile: None,
                 credential: None,
             }),
             QqQrPollOutcome::Expired => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Expired,
                 message: Some("QR login expired".to_owned()),
                 profile: None,
                 credential: None,
             }),
             QqQrPollOutcome::Failed(message) => Ok(ProviderQrPoll {
+                verification: None,
                 state: AuthState::Failed,
                 message: Some(message),
                 profile: None,
@@ -6169,6 +6174,7 @@ impl MusicProvider for QqProvider {
             QqQrPollOutcome::Confirmed(credential) => {
                 let result = self.finish_qq_authentication(account, &credential, mode)?;
                 Ok(ProviderQrPoll {
+                    verification: None,
                     state: AuthState::Confirmed,
                     message: Some("QQ Music account authenticated".to_owned()),
                     profile: Some(result.profile),
@@ -6179,6 +6185,8 @@ impl MusicProvider for QqProvider {
     }
 
     async fn start_auth_challenge(&self, request: &AuthChallengeRequest) -> Result<()> {
+        request.reject_account_creation_option(Platform::Qq)?;
+        request.reject_platform_policies_option(Platform::Qq)?;
         if request.backend != AuthChallengeBackend::Standard {
             return Err(TuneWeaveError::invalid_request(
                 "QQ phone authentication only supports the standard challenge backend",
@@ -6214,6 +6222,8 @@ impl MusicProvider for QqProvider {
         code: &str,
         mode: CredentialMode,
     ) -> Result<ProviderAuthResult> {
+        request.reject_account_creation_option(Platform::Qq)?;
+        request.reject_platform_policies_option(Platform::Qq)?;
         validate_qq_login_account(&request.account, mode)?;
         if request.backend != AuthChallengeBackend::Standard {
             return Err(TuneWeaveError::invalid_request(
@@ -11005,9 +11015,9 @@ fn qq_singer_filter_selection(
         ArtistArea::Western => 5,
         ArtistArea::Japanese => 4,
         ArtistArea::Korean => 3,
-        ArtistArea::Other => {
+        ArtistArea::JapaneseKorean | ArtistArea::Other => {
             return Err(TuneWeaveError::invalid_request(
-                "the QQ singer catalog does not expose an other area",
+                "the QQ singer catalog does not expose this other or combined area",
             )
             .with_platform(Platform::Qq)
             .with_details(json!({
@@ -15539,6 +15549,7 @@ fn map_qq_mv_url_group(
         duration_ms: (group.duration > 0)
             .then(|| group.duration.checked_mul(1_000))
             .flatten(),
+        source_range: None,
         requested_resolution: request.resolution,
         actual_resolution: selected.and_then(|candidate| candidate.resolution),
         platform_code,
@@ -18609,6 +18620,18 @@ fn qq_playable_candidates_from_metadata(
 }
 
 fn qq_requested_audio_specs(request: &StreamRequest) -> Result<Vec<&'static str>> {
+    if request.variant == tuneweave_core::StreamVariant::SingAlong {
+        return Err(TuneWeaveError::invalid_request(
+            "QQ does not expose the sing-along stream variant",
+        )
+        .with_platform(Platform::Qq));
+    }
+    if matches!(request.quality, Quality::Dtsx | Quality::Vinyl) {
+        return Err(
+            TuneWeaveError::invalid_request("QQ does not expose DTS:X or vinyl audio")
+                .with_platform(Platform::Qq),
+        );
+    }
     if let Some(bitrate) = request.bitrate {
         let specs = match bitrate {
             48_000 => &["aac_48"][..],
@@ -18662,6 +18685,9 @@ fn qq_requested_audio_specs(request: &StreamRequest) -> Result<Vec<&'static str>
                 TuneWeaveError::invalid_request("QQ does not expose vivid audio")
                     .with_platform(Platform::Qq),
             );
+        }
+        Quality::Dtsx | Quality::Vinyl => {
+            unreachable!("unsupported quality rejected before bitrate selection")
         }
     };
     Ok(specs.to_vec())
@@ -20138,6 +20164,30 @@ mod tests {
 
     #[test]
     fn unified_audio_selection_is_exact_for_bitrate_and_spatial_variants() {
+        for bitrate in [None, Some(320_000)] {
+            assert_eq!(
+                qq_requested_audio_specs(&StreamRequest {
+                    variant: tuneweave_core::StreamVariant::SingAlong,
+                    bitrate,
+                    ..StreamRequest::default()
+                })
+                .unwrap_err()
+                .code,
+                ErrorCode::InvalidRequest
+            );
+            for quality in [Quality::Dtsx, Quality::Vinyl] {
+                assert_eq!(
+                    qq_requested_audio_specs(&StreamRequest {
+                        quality,
+                        bitrate,
+                        ..StreamRequest::default()
+                    })
+                    .unwrap_err()
+                    .code,
+                    ErrorCode::InvalidRequest
+                );
+            }
+        }
         let track = map_track(sample_track(97_773, "0039MnYb0qxYhV", "晴天")).expect("map track");
         let exact = qq_requested_audio_specs(&StreamRequest {
             quality: Quality::Auto,
@@ -21340,6 +21390,18 @@ mod tests {
             let (api, _) = qq_singer_catalog_request(&request).expect("QQ singer area");
             assert_eq!(api.param["area"], expected);
         }
+        let mut combined_area = ArtistCatalogRequest::new();
+        combined_area.area = ArtistArea::JapaneseKorean;
+        assert_eq!(
+            qq_singer_filter_selection(
+                combined_area.area,
+                combined_area.category,
+                combined_area.genre
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidRequest
+        );
         for (category, expected) in [
             (ArtistCategory::All, -100),
             (ArtistCategory::Male, 0),
@@ -26954,12 +27016,32 @@ mod tests {
     async fn phone_login_rejects_invalid_principals_and_codes_before_network_access() {
         let provider = QqProvider::new(QqConfig::default()).expect("provider");
         let request = AuthChallengeRequest {
+            allow_account_creation: false,
+            accept_platform_policies: false,
             account: "phone-account".to_owned(),
             method: ChallengeMethod::Sms,
             backend: AuthChallengeBackend::Standard,
             principal: "+8613800138000".to_owned(),
             country_code: Some("86".to_owned()),
         };
+        let mut unsupported = request.clone();
+        unsupported.allow_account_creation = true;
+        assert_eq!(
+            provider
+                .start_auth_challenge(&unsupported)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            provider
+                .verify_auth_challenge(&unsupported, "12345")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
         let error = provider
             .start_auth_challenge(&request)
             .await
