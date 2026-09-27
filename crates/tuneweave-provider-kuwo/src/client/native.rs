@@ -31,6 +31,84 @@ const VALIDATE_PATH: &str = "/u.s";
 const CLIENT_VERSION: &str = "12.2.2.0";
 const CLIENT_SOURCE: &str = "kwplayer_ar_12.2.2.0_newpcguanwangmobile.apk";
 
+#[cfg(debug_assertions)]
+pub(crate) fn diagnostic_response_shape(bytes: &[u8]) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return json!({"kind":"non_json","bytes":bytes.len()});
+    };
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+    fn fields(value: &Value) -> Map<String, Value> {
+        value.as_object().map_or_else(Map::new, |object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(kind(value))))
+                .collect()
+        })
+    }
+    let mut result = Map::new();
+    result.insert("top_level".into(), Value::Object(fields(&value)));
+    if let Some(data) = value.get("data") {
+        result.insert("data_fields".into(), Value::Object(fields(data)));
+        if let Some(items) = data.as_array() {
+            result.insert("data_count".into(), json!(items.len()));
+            if let Some(first) = items.first() {
+                result.insert("data_item_fields".into(), Value::Object(fields(first)));
+            }
+        }
+    }
+    if let Some(info) = value.get("info") {
+        result.insert("info_count".into(), json!(info.as_array().map(Vec::len)));
+        if let Some(first) = info.as_array().and_then(|items| items.first()) {
+            result.insert("info_item_fields".into(), Value::Object(fields(first)));
+        }
+    }
+    if let Some(items) = value.get("plist").and_then(Value::as_array) {
+        result.insert("plist_count".into(), json!(items.len()));
+        let mut types = std::collections::BTreeMap::<String, usize>::new();
+        for item in items {
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|kind| {
+                    !kind.is_empty()
+                        && kind.len() <= 32
+                        && kind.bytes().all(|byte| {
+                            byte.is_ascii_uppercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'_' | b'-')
+                        })
+                })
+                .unwrap_or("other");
+            *types.entry(kind.to_owned()).or_default() += 1;
+        }
+        result.insert("plist_types".into(), json!(types));
+        result.insert(
+            "plist_item_shapes".into(),
+            Value::Array(
+                items
+                    .iter()
+                    .take(8)
+                    .map(|item| Value::Object(fields(item)))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(meta) = value.get("meta") {
+        result.insert("meta_fields".into(), Value::Object(fields(meta)));
+    }
+    Value::Object(result)
+}
+
 pub(super) fn seal_catalog_query(plain: &[u8]) -> Result<String> {
     codec::seal_catalog_query(plain)
 }

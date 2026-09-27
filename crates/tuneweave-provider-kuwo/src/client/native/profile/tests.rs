@@ -111,6 +111,17 @@ fn sparse_profiles_keep_unknown_fields_unknown_and_never_use_login_name_as_nickn
 }
 
 #[test]
+fn profile_accepts_the_official_star_host_for_avatar_metadata() {
+    let mut value = body("42");
+    value["info"][0]["PIC"] = json!("https://star.kuwo.cn/star/userhead/synthetic.jpg");
+    let profile = parsed(&value).unwrap();
+    assert_eq!(
+        profile.user.avatar_url.as_deref(),
+        Some("https://star.kuwo.cn/star/userhead/synthetic.jpg")
+    );
+}
+
+#[test]
 fn profile_rejects_malformed_or_ambiguous_identity_fields_and_secret_reflections() {
     let mut bad = vec![
         json!({}),

@@ -10,6 +10,21 @@ use tokio::{
 const KEY: [u8; 8] = *b"17894932";
 const OLD: &str = "session-42&+%";
 const NEW: &str = "refreshed-session-42";
+
+#[cfg(debug_assertions)]
+#[test]
+fn native_response_diagnostic_reports_playlist_kinds_without_values() {
+    let summary = diagnostic_response_shape(
+        br#"{"errcode":0,"plist":[{"type":"GENERAL","id":"private-id","title":"private title"},{"type":"MYFAVORITE","id":"other-private-id"}],"token":"private-token"}"#,
+    )
+    .to_string();
+
+    assert!(summary.contains("\"GENERAL\":1"));
+    assert!(summary.contains("\"MYFAVORITE\":1"));
+    assert!(summary.contains("\"plist_count\":2"));
+    assert!(!summary.contains("private"));
+}
+
 fn input() -> KuwoNativeSessionInput {
     KuwoNativeSessionInput::new("42", OLD, "123456789", "device-user-123").unwrap()
 }

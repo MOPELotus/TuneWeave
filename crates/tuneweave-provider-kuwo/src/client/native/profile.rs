@@ -99,55 +99,85 @@ struct Profile {
 }
 
 fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<UserProfile> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    parse_inner(bytes, input)
+}
+
+fn stage<T>(name: &'static str, result: Result<T>) -> Result<T> {
+    if result.is_err() {
+        #[cfg(debug_assertions)]
+        eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={name}");
+    }
+    result
+}
+
+fn reject<T>(name: &'static str) -> Result<T> {
+    #[cfg(debug_assertions)]
+    eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={name}");
+    Err(invalid())
+}
+
+fn parse_inner(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<UserProfile> {
+    let body: Envelope = stage(
+        "envelope",
+        serde_json::from_slice(bytes).map_err(|_| invalid()),
+    )?;
     if body.status.as_deref() != Some("200") {
         // Profile business codes are not proof that the native session expired.
-        return Err(invalid());
+        return reject("status");
     }
-    let mut items = body.info.ok_or_else(invalid)?;
+    let mut items = stage("missing_info", body.info.ok_or_else(invalid))?;
     if items.len() != 1 {
-        return Err(invalid());
+        return reject("info_count");
     }
-    let value = items.pop().ok_or_else(invalid)?;
+    let value = stage("missing_profile", items.pop().ok_or_else(invalid))?;
     if value.uid != input.user_id() {
-        return Err(invalid());
+        return reject("identity");
     }
-    let nickname = text(value.nickname, 1024, false, input)?;
-    let signature = text(value.signature, 8192, true, input)?;
-    let level = value
-        .level
-        .map(|level| {
-            level
-                .parse::<u32>()
-                .ok()
-                .filter(|n| n.to_string() == level)
-                .ok_or_else(invalid)
-        })
-        .transpose()?;
-    let background_id = text(value.background_id, 128, false, input)?;
+    let nickname = stage("nickname", text(value.nickname, 1024, false, input))?;
+    let signature = stage("signature", text(value.signature, 8192, true, input))?;
+    let level = stage(
+        "level",
+        value
+            .level
+            .map(|level| {
+                level
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| n.to_string() == level)
+                    .ok_or_else(invalid)
+            })
+            .transpose(),
+    )?;
+    let background_id = stage(
+        "background_id",
+        text(value.background_id, 128, false, input),
+    )?;
     // FIELD7 is a preset ID, not a URL. The official client uses FIELD6 only
     // when FIELD7 is absent. No fabricated URL for a preset is exposed.
     let background = if background_id.is_none() {
-        picture(value.background, input)?
+        stage("background", picture(value.background, input))?
     } else {
         None
     };
+    let avatar = stage("avatar", picture(value.picture, input))?;
+    let birthday = stage("birthday", text(value.birthday, 64, false, input))?;
+    let registered = stage("registered", text(value.registered, 64, false, input))?;
     Ok(UserProfile {
         user: User {
             resource_ref: ResourceRef::new(Platform::Kuwo, &value.uid).map_err(|_| invalid())?,
             platform: Platform::Kuwo,
             id: value.uid,
             name: nickname.unwrap_or_default(),
-            avatar_url: picture(value.picture, input)?,
+            avatar_url: avatar,
             signature,
             followed: None,
             mutual: None,
             extensions: Default::default(),
         },
         level,
-        birthday: text(value.birthday, 64, false, input)?,
+        birthday,
         // Keep upstream date text; do not invent a timezone or epoch unit.
-        created_at: text(value.registered, 64, false, input)?,
+        created_at: registered,
         background_url: background,
         listened_track_count: None,
         playlist_count: None,
@@ -196,7 +226,9 @@ fn picture(value: Option<String>, input: &KuwoNativeSessionInput) -> Result<Opti
         || url.fragment().is_some()
         || !matches!(
             url.host_str(),
-            Some("img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn" | "img4.kuwo.cn")
+            Some(
+                "img1.kuwo.cn" | "img2.kuwo.cn" | "img3.kuwo.cn" | "img4.kuwo.cn" | "star.kuwo.cn"
+            )
         )
         || url.path() == "/"
     {
