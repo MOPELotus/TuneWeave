@@ -1043,19 +1043,56 @@ impl SodaClient {
     ) -> Result<AudioContent> {
         let track_ref = identity.resource_ref()?;
         let bytes = self.download_authorized_variant(&media.selected).await?;
-        let decrypted = if media.selected.spec.encrypted {
-            let spade_a = media.selected.spade_a.as_deref().ok_or_else(|| {
-                soda_upstream_error("Soda encrypted media omitted its authorization")
-            })?;
-            let key_id = media.selected.key_id.as_deref().ok_or_else(|| {
-                soda_upstream_error("Soda encrypted media omitted its key identifier")
-            })?;
-            let decrypted = decrypt_cenc_audio(bytes, spade_a, key_id)?;
-            crate::media::plaintext::validate(decrypted.bytes, decrypted.format)?
+        let received_bytes = bytes.len();
+        let mut validation_phase = if media.selected.spec.encrypted {
+            "cenc_authorization"
         } else {
-            validate_unencrypted_audio(bytes, &media.selected.spec)?
+            "unencrypted_container"
         };
-        validate_decrypted_codec(&decrypted, &media.selected.spec.codec)?;
+        let validation_result = if media.selected.spec.encrypted {
+            (|| {
+                let spade_a = media.selected.spade_a.as_deref().ok_or_else(|| {
+                    soda_upstream_error("Soda encrypted media omitted its authorization")
+                })?;
+                let key_id = media.selected.key_id.as_deref().ok_or_else(|| {
+                    soda_upstream_error("Soda encrypted media omitted its key identifier")
+                })?;
+                validation_phase = "cenc_decrypt";
+                let decrypted = decrypt_cenc_audio(bytes, spade_a, key_id)?;
+                validation_phase = "cenc_plaintext";
+                crate::media::plaintext::validate(decrypted.bytes, decrypted.format)
+            })()
+        } else {
+            validate_unencrypted_audio(bytes, &media.selected.spec)
+        };
+        let decrypted = match validation_result {
+            Ok(decrypted) => decrypted,
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC soda_audio_delivery_failed phase={} encrypted={} codec={} declared_bytes={} received_bytes={} error_code={}",
+                    validation_phase,
+                    media.selected.spec.encrypted,
+                    diagnostic_soda_codec(&media.selected.spec.codec),
+                    media.selected.spec.size,
+                    received_bytes,
+                    error.code.as_str(),
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = validate_decrypted_codec(&decrypted, &media.selected.spec.codec) {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "DIAGNOSTIC soda_audio_delivery_failed phase=codec_identity encrypted={} codec={} declared_bytes={} received_bytes={} error_code={}",
+                media.selected.spec.encrypted,
+                diagnostic_soda_codec(&media.selected.spec.codec),
+                media.selected.spec.size,
+                received_bytes,
+                error.code.as_str(),
+            );
+            return Err(error);
+        }
         let (content_type, extension) = match decrypted.container {
             SodaAudioContainer::IsoBaseMedia => ("audio/mp4", "m4a"),
             SodaAudioContainer::Flac => ("audio/flac", "flac"),
@@ -1255,6 +1292,16 @@ impl SodaClient {
             outcome,
         }
         .emit();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn diagnostic_soda_codec(codec: &str) -> &'static str {
+    match codec.trim().to_ascii_lowercase().as_str() {
+        "aac" => "aac",
+        "alac" => "alac",
+        "flac" => "flac",
+        _ => "other",
     }
 }
 

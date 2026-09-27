@@ -51,6 +51,66 @@ fn word(bytes: &mut [u8], pos: usize, value: u32) {
     bytes[pos..pos + 4].copy_from_slice(&value.to_be_bytes());
 }
 
+fn aac_with_priming_edit(trim_ticks: u32) -> Vec<u8> {
+    let mut bytes = AAC.to_vec();
+    let mdhd = locate(AAC, &[b"moov", b"trak", b"mdia", b"mdhd"]);
+    let mvhd = locate(AAC, &[b"moov", b"mvhd"]);
+    let stts = locate(AAC, &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stts"]);
+    let elst = locate(AAC, &[b"moov", b"trak", b"edts", b"elst"]);
+    let media_scale = u128::from(read_u32(&bytes, mdhd.payload_start() + 12).unwrap());
+    let movie_scale = u128::from(read_u32(&bytes, mvhd.payload_start() + 12).unwrap());
+    let segment_duration = u128::from(read_u32(&bytes, elst.payload_start() + 8).unwrap());
+    let visible_duration =
+        u64::try_from((segment_duration * media_scale + movie_scale / 2) / movie_scale).unwrap();
+    let entries = read_u32(&bytes, stts.payload_start() + 4).unwrap();
+    let last_delta = stts.payload_start() + 8 + entries as usize * 8 - 4;
+    let delta = read_u32(&bytes, last_delta).unwrap();
+    let table = payload(&bytes, stts).unwrap();
+    let stts_duration = table[8..]
+        .chunks_exact(8)
+        .take(entries as usize)
+        .map(|row| u64::from(read_u32(row, 0).unwrap()) * u64::from(read_u32(row, 4).unwrap()))
+        .sum::<u64>();
+    let new_stts_duration = visible_duration + u64::from(trim_ticks);
+    word(
+        &mut bytes,
+        last_delta,
+        delta + u32::try_from(new_stts_duration - stts_duration).unwrap(),
+    );
+    word(
+        &mut bytes,
+        mdhd.payload_start() + 16,
+        u32::try_from(visible_duration).unwrap(),
+    );
+    word(&mut bytes, elst.payload_start() + 12, trim_ticks);
+    bytes
+}
+
+#[test]
+fn plaintext_media_accepts_aac_with_a_bounded_explicit_priming_edit() {
+    let bytes = aac_with_priming_edit(2_048);
+    let result = validate(bytes.clone(), SodaAudioFormat::Aac).unwrap();
+    assert_eq!(result.bytes, bytes);
+    assert_eq!(result.sample_count, 45);
+
+    let mut wrong_trim = aac_with_priming_edit(2_048);
+    let edit = locate(&wrong_trim, &[b"moov", b"trak", b"edts", b"elst"]);
+    word(&mut wrong_trim, edit.payload_start() + 12, 1_024);
+    assert!(validate(wrong_trim, SodaAudioFormat::Aac).is_err());
+
+    let mut invalid_rate = aac_with_priming_edit(2_048);
+    let edit = locate(&invalid_rate, &[b"moov", b"trak", b"edts", b"elst"]);
+    word(&mut invalid_rate, edit.payload_start() + 16, 0);
+    assert!(validate(invalid_rate, SodaAudioFormat::Aac).is_err());
+
+    assert!(validate(aac_with_priming_edit(4_096), SodaAudioFormat::Aac).is_err());
+
+    let mut alac_with_edit = ALAC.to_vec();
+    let edit = locate(&alac_with_edit, &[b"moov", b"trak", b"edts", b"elst"]);
+    word(&mut alac_with_edit, edit.payload_start() + 12, 1_024);
+    assert!(validate(alac_with_edit, SodaAudioFormat::Alac).is_err());
+}
+
 #[test]
 fn plaintext_media_rejects_invalid_iso_tracks_codec_configs_tables_and_encryption() {
     let table = [b"moov", b"trak", b"mdia", b"minf", b"stbl"];

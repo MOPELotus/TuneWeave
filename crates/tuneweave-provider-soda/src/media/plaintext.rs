@@ -7,7 +7,15 @@ mod groups;
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[track_caller]
 fn invalid() -> TuneWeaveError {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("TUNEWEAVE_SODA_MEDIA_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "DIAGNOSTIC soda_plaintext_invalid line={}",
+            std::panic::Location::caller().line()
+        );
+    }
     media_error("Soda plaintext audio contains invalid, encrypted or inconsistent media")
 }
 
@@ -69,6 +77,13 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
         b"trak",
         "Soda plaintext audio requires one audio track",
     )?;
+    let edit_list = parse_audio_edit_list(bytes, track)?;
+    let movie_scale = edit_list
+        .map(|_| {
+            let header = exactly_one(&movie, b"mvhd", "Soda movie requires one mvhd atom")?;
+            movie_timescale(bytes, header)
+        })
+        .transpose()?;
     let mdia = child(bytes, track, b"mdia")?;
     if handler_type(bytes, child(bytes, mdia, b"hdlr")?)? != *b"soun" {
         return Err(invalid());
@@ -112,7 +127,9 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
         return Err(invalid());
     }
     let channels = u16::from_be_bytes(entry_data[16..18].try_into().unwrap());
-    if !(1..=8).contains(&channels) || read_u32(entry_data, 24)? == 0 {
+    let sample_rate_fixed = read_u32(entry_data, 24)?;
+    let sample_rate = sample_rate_fixed >> 16;
+    if !(1..=8).contains(&channels) || sample_rate == 0 {
         return Err(invalid());
     }
     let extra = parse_boxes(bytes, entry.payload_start() + 28, entry.end())?;
@@ -205,6 +222,7 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
     let ranges = map_sample_ranges(&sizes, &mappings, &offsets, 1, &payloads)?;
     validate_timing(
         bytes,
+        track,
         child(bytes, mdia, b"mdhd")?,
         exactly_one(
             &table,
@@ -212,6 +230,11 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
             "Soda plaintext audio requires one stts box",
         )?,
         sizes.len(),
+        table.iter().any(|atom| atom.kind == *b"ctts"),
+        format,
+        sample_rate_fixed,
+        edit_list,
+        movie_scale,
     )?;
     // Every chunk is inside mdat and exactly accounted for; no hidden extra payload.
     if payloads.is_empty()
@@ -224,7 +247,79 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
     Ok(sizes.len())
 }
 
-fn validate_timing(bytes: &[u8], mdhd: BoxHeader, stts: BoxHeader, samples: usize) -> Result<()> {
+#[derive(Clone, Copy)]
+struct AudioEditList {
+    segment_duration: u64,
+    media_time: u64,
+}
+
+fn parse_audio_edit_list(bytes: &[u8], track: BoxHeader) -> Result<Option<AudioEditList>> {
+    let track_atoms = parse_boxes(bytes, track.payload_start(), track.end())?;
+    let Some(edit) = optional_one(
+        &track_atoms,
+        b"edts",
+        "Soda audio has duplicate edit list atoms",
+    )?
+    else {
+        return Ok(None);
+    };
+    let edit_atoms = parse_boxes(bytes, edit.payload_start(), edit.end())?;
+    if edit_atoms.len() != 1 || edit_atoms[0].kind != *b"elst" {
+        return Err(invalid());
+    }
+    let data = payload(bytes, edit_atoms[0])?;
+    if data.len() < 8 || data[1..4] != [0; 3] || read_u32(data, 4)? != 1 {
+        return Err(invalid());
+    }
+    let (segment_duration, media_time, rate_integer, rate_fraction) = match data[0] {
+        0 if data.len() == 20 => (
+            u64::from(read_u32(data, 8)?),
+            i64::from(i32::from_be_bytes(data[12..16].try_into().unwrap())),
+            i16::from_be_bytes(data[16..18].try_into().unwrap()),
+            i16::from_be_bytes(data[18..20].try_into().unwrap()),
+        ),
+        1 if data.len() == 28 => (
+            read_u64(data, 8)?,
+            i64::from_be_bytes(data[16..24].try_into().unwrap()),
+            i16::from_be_bytes(data[24..26].try_into().unwrap()),
+            i16::from_be_bytes(data[26..28].try_into().unwrap()),
+        ),
+        _ => return Err(invalid()),
+    };
+    if segment_duration == 0 || media_time < 0 || rate_integer != 1 || rate_fraction != 0 {
+        return Err(invalid());
+    }
+    Ok(Some(AudioEditList {
+        segment_duration,
+        media_time: u64::try_from(media_time).map_err(|_| invalid())?,
+    }))
+}
+
+fn movie_timescale(bytes: &[u8], header: BoxHeader) -> Result<u32> {
+    let data = payload(bytes, header)?;
+    let scale = match data.first() {
+        Some(0) if data.len() >= 20 => read_u32(data, 12)?,
+        Some(1) if data.len() >= 32 => read_u32(data, 20)?,
+        _ => return Err(invalid()),
+    };
+    if data[1..4] != [0; 3] || scale == 0 {
+        return Err(invalid());
+    }
+    Ok(scale)
+}
+
+fn validate_timing(
+    bytes: &[u8],
+    track: BoxHeader,
+    mdhd: BoxHeader,
+    stts: BoxHeader,
+    samples: usize,
+    composition_offsets_present: bool,
+    format: SodaAudioFormat,
+    sample_rate_fixed: u32,
+    edit_list: Option<AudioEditList>,
+    movie_scale: Option<u32>,
+) -> Result<()> {
     let data = payload(bytes, mdhd)?;
     let (scale, duration) = match data.first() {
         Some(0) if data.len() == 24 => (read_u32(data, 12)?, u64::from(read_u32(data, 16)?)),
@@ -254,8 +349,120 @@ fn validate_timing(bytes: &[u8], mdhd: BoxHeader, stts: BoxHeader, samples: usiz
             .checked_add(n.checked_mul(delta).ok_or_else(invalid)?)
             .ok_or_else(invalid)?;
     }
-    if total != samples as u64 || ticks != duration {
+    let timing_matches = if let Some(edit) = edit_list {
+        let movie_scale = u128::from(movie_scale.unwrap_or_default());
+        let movie_ticks = u128::from(edit.segment_duration) * u128::from(scale);
+        let media_scale = movie_scale;
+        let segment_duration = (media_scale != 0)
+            .then_some((movie_ticks + media_scale / 2) / media_scale)
+            .and_then(|value| u64::try_from(value).ok());
+        let sample_rate = u128::from(sample_rate_fixed >> 16);
+        let trim_numerator = u128::from(edit.media_time) * sample_rate;
+        let media_timescale = u128::from(scale);
+        let trim_samples = (media_timescale != 0 && trim_numerator % media_timescale == 0)
+            .then_some(trim_numerator / media_timescale);
+        let bounded_aac_edit = format == SodaAudioFormat::Aac
+            && !composition_offsets_present
+            && sample_rate_fixed & 0xffff == 0
+            && trim_samples.is_some_and(|samples| (1..=2112).contains(&samples));
+        // AAC encoders can express priming in either duration bookkeeping layout:
+        // some keep stts and mdhd equal and shorten elst by media_time; others keep
+        // elst and mdhd equal while stts includes the leading priming samples.
+        let presentation_matches = segment_duration.is_some_and(|segment| {
+            (ticks == duration
+                && duration
+                    .checked_sub(edit.media_time)
+                    .is_some_and(|visible| segment.abs_diff(visible) <= 1))
+                || (ticks.checked_sub(duration) == Some(edit.media_time)
+                    && segment.abs_diff(duration) <= 1)
+        });
+        if edit.media_time == 0 {
+            ticks == duration
+                && segment_duration.is_some_and(|segment| segment.abs_diff(duration) <= 1)
+        } else {
+            bounded_aac_edit && presentation_matches
+        }
+    } else {
+        movie_scale.is_none() && ticks == duration
+    };
+    if total != samples as u64 || !timing_matches {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("TUNEWEAVE_SODA_MEDIA_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "DIAGNOSTIC soda_plaintext_timing_mismatch scale={} sample_entries={} stts_samples={} mdhd_duration={} stts_duration={} delta={} ctts_present={} edit_list={}",
+                scale,
+                samples,
+                total,
+                duration,
+                ticks,
+                ticks.abs_diff(duration),
+                composition_offsets_present,
+                diagnostic_edit_list(bytes, track),
+            );
+        }
         return Err(invalid());
     }
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn diagnostic_edit_list(bytes: &[u8], track: BoxHeader) -> String {
+    let Ok(track_atoms) = parse_boxes(bytes, track.payload_start(), track.end()) else {
+        return "track_malformed".to_owned();
+    };
+    let edits = track_atoms
+        .iter()
+        .filter(|atom| atom.kind == *b"edts")
+        .collect::<Vec<_>>();
+    if edits.is_empty() {
+        return "absent".to_owned();
+    }
+    if edits.len() != 1 {
+        return "ambiguous".to_owned();
+    }
+    let Ok(edit_atoms) = parse_boxes(bytes, edits[0].payload_start(), edits[0].end()) else {
+        return "malformed_edts".to_owned();
+    };
+    let lists = edit_atoms
+        .iter()
+        .filter(|atom| atom.kind == *b"elst")
+        .collect::<Vec<_>>();
+    if lists.len() != 1 {
+        return "missing_or_ambiguous_elst".to_owned();
+    }
+    let Ok(data) = payload(bytes, *lists[0]) else {
+        return "malformed_elst".to_owned();
+    };
+    if data.len() < 8 || data[1..4] != [0; 3] {
+        return "invalid_elst_header".to_owned();
+    }
+    let Ok(count) = read_u32(data, 4) else {
+        return "invalid_elst_count".to_owned();
+    };
+    let first = match data[0] {
+        0 if data.len() == 8 + count as usize * 12 => (|| {
+            Some((
+                u64::from(read_u32(data, 8).ok()?),
+                i64::from(i32::from_be_bytes(data[12..16].try_into().ok()?)),
+                i32::from(i16::from_be_bytes(data[16..18].try_into().ok()?)),
+                i32::from(i16::from_be_bytes(data[18..20].try_into().ok()?)),
+            ))
+        })(),
+        1 if data.len() == 8 + count as usize * 20 => (|| {
+            Some((
+                read_u64(data, 8).ok()?,
+                i64::from_be_bytes(data[16..24].try_into().ok()?),
+                i32::from(i16::from_be_bytes(data[24..26].try_into().ok()?)),
+                i32::from(i16::from_be_bytes(data[26..28].try_into().ok()?)),
+            ))
+        })(),
+        _ => None,
+    };
+    let Some((segment_duration, media_time, rate_integer, rate_fraction)) = first else {
+        return "invalid_elst_layout".to_owned();
+    };
+    format!(
+        "version={};count={count};first_segment={segment_duration};first_media_time={media_time};first_rate={rate_integer}.{rate_fraction}",
+        data[0]
+    )
 }
