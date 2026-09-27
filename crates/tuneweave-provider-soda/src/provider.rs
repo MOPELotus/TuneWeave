@@ -23,7 +23,8 @@ use crate::{
     account::SodaAccount,
     client::{
         MAX_UPSTREAM_PLAYLIST_PAGES, SodaAccountTrack, SodaCatalogKind, SodaClient, SodaConfig,
-        SodaPlayback, UPSTREAM_PLAYLIST_PAGE_SIZE, UPSTREAM_SEARCH_PAGE_SIZE,
+        SodaPlayback, UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE, UPSTREAM_PLAYLIST_PAGE_SIZE,
+        UPSTREAM_SEARCH_PAGE_SIZE,
     },
     identity::SodaTrackIdentity,
     library::{LibraryPagination, LibrarySection},

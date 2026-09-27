@@ -125,10 +125,19 @@ async fn account_playlists_prove_full_filtered_snapshot_before_slicing_and_prese
             for (index, cookie) in ["verified", "page-one", "page-two"].into_iter().enumerate() {
                 let req = &requests[index + 1];
                 assert!(req.starts_with("GET /luna/pc/playlist/detail?"));
-                assert!(req.contains(&format!("cursor={}", index * 100)));
-                assert!(req.contains("count=100"));
+                if index == 0 {
+                    assert!(req.contains("&cursor=&count=50"));
+                } else {
+                    assert!(req.contains(&format!("cursor={}", index * 100)));
+                    assert!(req.contains("count=50"));
+                }
+                assert!(!req.contains("cnt="));
+                assert!(req.contains("aid=386088"));
+                assert!(req.contains("app_name=luna_pc"));
                 assert!(req.contains("device_platform=windows"));
+                assert!(req.contains("channel=official"));
                 assert!(req.contains("device_id="));
+                assert!(req.contains("iid="));
                 assert!(req.contains(&format!("sessionid_ss={cookie}")));
             }
         }

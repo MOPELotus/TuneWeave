@@ -61,6 +61,7 @@ use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decr
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
 pub(crate) const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
+pub(crate) const UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE: u32 = 50;
 pub(crate) const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 128;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/search/track";
 const TRACK_DETAIL_ENDPOINT: &str = "https://beta-luna.douyin.com/luna/h5/seo_track";
@@ -1444,7 +1445,7 @@ fn parse_playlist_response(
         )));
     }
     if requested_count == 0
-        || requested_count > 100
+        || requested_count > UPSTREAM_PLAYLIST_PAGE_SIZE
         || envelope.media_resources.len() > usize::try_from(requested_count).unwrap_or(usize::MAX)
     {
         return Err(soda_upstream_error(
@@ -3782,6 +3783,24 @@ mod tests {
         assert_eq!(page.tracks[0].resource_ref, page.tracks[1].resource_ref);
         assert_eq!(page.next_cursor, Some(100));
         assert!(page.has_more);
+        assert!(
+            parse_playlist_response(
+                &playlist_fixture(false),
+                "7200303561195061287",
+                0,
+                UPSTREAM_PLAYLIST_PAGE_SIZE,
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_playlist_response(
+                &playlist_fixture(false),
+                "7200303561195061287",
+                0,
+                UPSTREAM_PLAYLIST_PAGE_SIZE + 1,
+            )
+            .is_err()
+        );
     }
 
     #[test]

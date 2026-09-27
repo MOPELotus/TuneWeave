@@ -181,7 +181,12 @@ impl SodaProvider {
             self.ensure_account_snapshot_current(account, source)?;
             let response = self
                 .client
-                .account_playlist_page(playlist_id, cursor, UPSTREAM_PLAYLIST_PAGE_SIZE, source)
+                .account_playlist_page(
+                    playlist_id,
+                    cursor,
+                    UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+                    source,
+                )
                 .await;
             self.ensure_account_snapshot_current(account, source)?;
             let crate::client::SodaAccountPlaylistPage { page, credential } = response?;
