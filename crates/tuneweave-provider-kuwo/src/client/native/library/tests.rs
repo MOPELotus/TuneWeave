@@ -82,6 +82,39 @@ fn native_library_types_sorting_unknowns_and_privacy_preserve_directory_semantic
 }
 
 #[test]
+fn native_library_ignores_unverified_playlist_rows_without_inventing_metadata() {
+    let mut current_shape = created();
+    current_shape["plist"][0]["type"] = json!("PLAYLIST");
+    current_shape["plist"][0]["uid"] = json!(42);
+    current_shape["plist"][0]["title"] = json!("");
+    let items = parse(&current_shape, Section::Created).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|playlist| playlist.id.as_str())
+            .collect::<Vec<_>>(),
+        ["102"]
+    );
+    assert_eq!(
+        dto::all_owned_ids(&serde_json::to_vec(&current_shape).unwrap()).unwrap(),
+        BTreeSet::from(["90".to_owned(), "101".to_owned(), "102".to_owned()])
+    );
+
+    // The row remains unexposed, while its ID remains reserved for collision
+    // checks. An unknown row-level `uid` is not interpreted as its owner ID.
+    current_shape["plist"][0]["uid"] = json!(43);
+    assert_eq!(parse(&current_shape, Section::Created).unwrap().len(), 1);
+
+    // System-like zero IDs are ignored even for this unverified row kind.
+    current_shape["plist"][0]["id"] = json!(0);
+    assert_eq!(parse(&current_shape, Section::Created).unwrap().len(), 1);
+    assert_eq!(
+        dto::all_owned_ids(&serde_json::to_vec(&current_shape).unwrap()).unwrap(),
+        BTreeSet::from(["90".to_owned(), "102".to_owned()])
+    );
+}
+
+#[test]
 fn native_library_rejects_ambiguous_success_identity_fields_and_reflected_secrets() {
     for bad in [
         json!({}),
@@ -99,6 +132,8 @@ fn native_library_rejects_ambiguous_success_identity_fields_and_reflected_secret
         ("id", json!("0101")),
         ("title", json!(SID)),
         ("title", json!("")),
+        ("title", json!("   ")),
+        ("title", json!("x".repeat(1025))),
         ("title", json!("\u{0}")),
         ("info", json!("x".repeat(16 * 1024 + 1))),
         ("musicnum", json!(-1)),
@@ -117,6 +152,12 @@ fn native_library_rejects_ambiguous_success_identity_fields_and_reflected_secret
         bad["plist"][0][field] = value;
         assert!(parse(&bad, Section::Created).is_err(), "{field}");
     }
+    let mut missing_title = created();
+    missing_title["plist"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("title");
+    assert!(parse(&missing_title, Section::Created).is_err());
     let mut duplicate = created();
     duplicate["plist"][6]["id"] = json!(101);
     assert!(parse(&duplicate, Section::Created).is_err());

@@ -54,16 +54,20 @@ struct Saved {
 /// A write readback must detect a target that changed to an excluded system kind,
 /// and must not mistake an existing system ID for a newly created playlist.
 pub(in crate::client::native) fn all_owned_ids(bytes: &[u8]) -> Result<BTreeSet<String>> {
-    let response: OwnedResponse = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: OwnedResponse =
+        serde_json::from_slice(bytes).map_err(|_| failed("owned_ids_schema", None))?;
     let mut ids = BTreeSet::new();
     for item in response.plist {
+        // A `PLAYLIST` row has no verified public playlist contract, but a
+        // canonical nonzero ID still stays reserved for write collision checks.
         if let Some(id) = item.id {
             if id == "0" && !matches!(item.kind.as_str(), "GENERAL" | "MYFAVORITE") {
                 continue;
             }
-            crate::client::native::playlist::validate_id(&id).map_err(|_| invalid())?;
+            crate::client::native::playlist::validate_id(&id)
+                .map_err(|_| failed("owned_ids_id", Some(ids.len())))?;
             if !ids.insert(id) {
-                return Err(invalid());
+                return Err(failed("owned_ids_dedupe", Some(ids.len())));
             }
         }
     }
@@ -75,55 +79,81 @@ pub(in crate::client::native) fn parse(
     input: &KuwoNativeSessionInput,
     section: Section,
 ) -> Result<Vec<Playlist>> {
+    let result = parse_inner(bytes, input, section);
+    if result.is_err() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DIAGNOSTIC kuwo_library_shape={}",
+            crate::client::native::diagnostic_response_shape(bytes)
+        );
+    }
+    result
+}
+
+fn parse_inner(
+    bytes: &[u8],
+    input: &KuwoNativeSessionInput,
+    section: Section,
+) -> Result<Vec<Playlist>> {
     let items = match section {
         Section::Created | Section::Favorite | Section::Owned => {
-            let response: OwnedResponse = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            let response: OwnedResponse =
+                serde_json::from_slice(bytes).map_err(|_| failed("owned_schema_decode", None))?;
             if response.errcode != Some(0)
                 || response.result.as_deref().is_some_and(|v| v != "ok")
                 || response
                     .uid
                     .as_deref()
                     .is_some_and(|v| v != input.user_id())
-                || response.plist.len() > MAX_OWNED
             {
-                return Err(invalid());
+                return Err(failed("owned_response_guard", Some(response.plist.len())));
             }
+            if response.plist.len() > MAX_OWNED {
+                return Err(failed("owned_row_limit", Some(response.plist.len())));
+            }
+            let row_count = response.plist.len();
             let mut owned = Vec::new();
             let mut favorites = 0;
             let mut owned_ids = BTreeSet::new();
-            for item in response.plist {
+            for (row_index, item) in response.plist.into_iter().enumerate() {
                 if section != Section::Created
                     && matches!(item.kind.as_str(), "GENERAL" | "MYFAVORITE")
                 {
-                    let id = item.id.as_deref().ok_or_else(invalid)?;
-                    crate::client::native::playlist::validate_id(id).map_err(|_| invalid())?;
+                    let id = item
+                        .id
+                        .as_deref()
+                        .ok_or_else(|| failed("owned_row_id_missing", Some(row_count)))?;
+                    crate::client::native::playlist::validate_id(id)
+                        .map_err(|_| failed("owned_row_id_invalid", Some(row_count)))?;
                     if !owned_ids.insert(id.to_owned()) {
-                        return Err(invalid());
+                        return Err(failed("owned_owner_dedupe", Some(owned_ids.len())));
                     }
                 }
                 match item.kind.as_str() {
-                    "GENERAL" if section != Section::Favorite => owned.push(item),
+                    "GENERAL" if section != Section::Favorite => owned.push((row_index, item)),
                     "MYFAVORITE" if section != Section::Created => {
                         favorites += 1;
                         if favorites > 1 {
-                            return Err(invalid());
+                            return Err(failed("favorite_row_duplicate", Some(row_count)));
                         }
-                        owned.push(item);
+                        owned.push((row_index, item));
                     }
-                    "GENERAL" | "MYFAVORITE" | "MOBI_DEFAULT" | "PC_DEFAULT" | "RADIO"
-                    | "ORDER" => (),
-                    _ => return Err(invalid()),
+                    "PLAYLIST" | "MOBI_DEFAULT" | "PC_DEFAULT" | "RADIO" | "ORDER" => (),
+                    "GENERAL" | "MYFAVORITE" => (),
+                    _ => return Err(failed("owned_row_kind", Some(row_count))),
                 }
             }
-            let ordered = owned.iter().all(|item| item.turn.is_some());
+            let ordered = owned.iter().all(|(_, item)| item.turn.is_some());
             if ordered {
-                owned.sort_by_key(|item| item.turn);
+                owned.sort_by_key(|(_, item)| item.turn);
             }
-            owned
+            let mapped = owned
                 .into_iter()
-                .map(|item| {
+                .map(|(row_index, item)| {
                     let favorite = item.kind == "MYFAVORITE";
-                    let mut playlist = playlist(
+                    let kind = diagnostic_kind(&item.kind);
+                    let title_state = diagnostic_title_state(item.title.as_deref());
+                    let result = playlist(
                         item.id,
                         if favorite {
                             Some("我喜欢听".into())
@@ -139,7 +169,11 @@ pub(in crate::client::native) fn parse(
                         } else {
                             Section::Created
                         },
-                    )?;
+                    );
+                    if result.is_err() {
+                        super::diagnostic_owned_row(row_index, kind, title_state);
+                    }
+                    let mut playlist = result?;
                     if favorite {
                         playlist.extensions.extend([
                             ("is_favorite".into(), json!(true)),
@@ -162,21 +196,26 @@ pub(in crate::client::native) fn parse(
                     ]);
                     Ok(playlist)
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>>>();
+            mapped.map_err(|_| failed("owned_row_map", Some(row_count)))?
         }
         Section::Saved => {
-            let response: SavedResponse = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            let response: SavedResponse =
+                serde_json::from_slice(bytes).map_err(|_| failed("saved_schema_decode", None))?;
             if response.result != "ok"
                 || response.errcode.is_some_and(|v| v != 0)
                 || response
                     .uid
                     .as_deref()
                     .is_some_and(|v| v != input.user_id())
-                || response.data.len() > PAGE_SIZE
             {
-                return Err(invalid());
+                return Err(failed("saved_response_guard", Some(response.data.len())));
             }
-            response
+            if response.data.len() > PAGE_SIZE {
+                return Err(failed("saved_row_limit", Some(response.data.len())));
+            }
+            let row_count = response.data.len();
+            let mapped = response
                 .data
                 .into_iter()
                 .map(|item| {
@@ -190,14 +229,42 @@ pub(in crate::client::native) fn parse(
                         section,
                     )
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>>>();
+            mapped.map_err(|_| failed("saved_row_map", Some(row_count)))?
         }
     };
     let mut seen = BTreeSet::new();
     if items.iter().any(|item| !seen.insert(&item.id)) {
-        return Err(invalid());
+        return Err(failed("mapped_dedupe", Some(items.len())));
     }
     Ok(items)
+}
+
+fn failed(stage: &'static str, count: Option<usize>) -> TuneWeaveError {
+    super::diagnostic_stage(stage, false, count);
+    invalid()
+}
+
+fn diagnostic_kind(value: &str) -> &'static str {
+    match value {
+        "GENERAL" => "general",
+        "PLAYLIST" => "playlist",
+        "MYFAVORITE" => "myfavorite",
+        "MOBI_DEFAULT" => "mobi_default",
+        "PC_DEFAULT" => "pc_default",
+        "RADIO" => "radio",
+        "ORDER" => "order",
+        _ => "other",
+    }
+}
+
+fn diagnostic_title_state(value: Option<&str>) -> &'static str {
+    match value {
+        None => "missing",
+        Some("") => "empty",
+        Some(value) if value.trim().is_empty() => "blank",
+        Some(_) => "nonempty",
+    }
 }
 
 fn playlist(
@@ -216,17 +283,21 @@ fn playlist(
                 .ok()
                 .is_some_and(|n| n > 0 && n <= i64::MAX as u64 && n.to_string() == *value)
         })
-        .ok_or_else(invalid)?;
-    let name = text(name, 1024, false, input)?
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| failed("playlist_id_map", None))?;
+    let name = playlist_name(name, input)?;
+    let description = text(description, 16 * 1024, true, input)
+        .map_err(|_| failed("playlist_description_map", None))?
+        .unwrap_or_default();
+    let cover_url = picture(cover, input).map_err(|_| failed("playlist_picture_map", None))?;
+    let resource_ref = ResourceRef::new(Platform::Kuwo, &id)
+        .map_err(|_| failed("playlist_reference_map", None))?;
     Ok(Playlist {
-        resource_ref: ResourceRef::new(Platform::Kuwo, &id).map_err(|_| invalid())?,
+        resource_ref,
         platform: Platform::Kuwo,
         id,
         name,
-        description: text(description, 16 * 1024, true, input)?.unwrap_or_default(),
-        cover_url: picture(cover, input)?,
+        description,
+        cover_url,
         creator: None,
         track_count: count,
         tags: Vec::new(),
@@ -239,6 +310,28 @@ fn playlist(
             ("library_section".into(), json!(section.name())),
         ]),
     })
+}
+
+fn playlist_name(value: Option<String>, input: &KuwoNativeSessionInput) -> Result<String> {
+    let Some(value) = value else {
+        return Err(failed("playlist_name_missing", None));
+    };
+    if value.is_empty() {
+        return Err(failed("playlist_name_empty", None));
+    }
+    if value.len() > 1024 {
+        return Err(failed("playlist_name_too_long", None));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(failed("playlist_name_control", None));
+    }
+    if echoes_secret(&value, input.session_id()) {
+        return Err(failed("playlist_name_secret_echo", None));
+    }
+    if value.trim().is_empty() {
+        return Err(failed("playlist_name_blank", None));
+    }
+    Ok(value)
 }
 
 pub(in crate::client::native) fn text(

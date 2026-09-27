@@ -24,6 +24,22 @@ pub(crate) enum Section {
     /// Internal lookup only; public created directories still exclude favorites.
     Owned,
 }
+pub(super) fn diagnostic_stage(stage: &'static str, ok: bool, count: Option<usize>) {
+    #[cfg(debug_assertions)]
+    eprintln!("DIAGNOSTIC kuwo_library_stage={stage} ok={ok} count={count:?}");
+    #[cfg(not(debug_assertions))]
+    let _ = (stage, ok, count);
+}
+pub(super) fn diagnostic_owned_row(
+    row_index: usize,
+    kind: &'static str,
+    title_state: &'static str,
+) {
+    #[cfg(debug_assertions)]
+    eprintln!("DIAGNOSTIC kuwo_owned_row index={row_index} kind={kind} title_state={title_state}");
+    #[cfg(not(debug_assertions))]
+    let _ = (row_index, kind, title_state);
+}
 impl Section {
     fn name(self) -> &'static str {
         match self {
@@ -153,14 +169,22 @@ impl KuwoClient {
                 let response = self.native_library_page(input, selected, start).await;
                 // Check late failures as well as successes before using this page.
                 check()?;
-                let page = response?;
+                let page = match response {
+                    Ok(page) => page,
+                    Err(error) => {
+                        diagnostic_stage("page_fetch", false, Some(pages as usize));
+                        return Err(error);
+                    }
+                };
                 pages += 1;
                 bytes += serde_json::to_vec(&page).map_err(|_| invalid())?.len();
                 if bytes > MAX_LIBRARY_BYTES {
+                    diagnostic_stage("page_budget", false, Some(pages as usize));
                     return Err(invalid());
                 }
                 for item in &page {
                     if !seen.insert(item.id.clone()) {
+                        diagnostic_stage("page_dedupe", false, Some(seen.len()));
                         return Err(invalid());
                     }
                 }
@@ -170,6 +194,7 @@ impl KuwoClient {
                     break;
                 }
                 if index + 1 == MAX_PAGES {
+                    diagnostic_stage("paging_limit", false, Some(pages as usize));
                     return Err(invalid());
                 }
                 start += count as u32;
