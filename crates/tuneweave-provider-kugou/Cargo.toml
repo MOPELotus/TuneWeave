@@ -20,6 +20,7 @@ httpdate.workspace = true
 image.workspace = true
 md-5.workspace = true
 num-bigint.workspace = true
+qrcode.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
