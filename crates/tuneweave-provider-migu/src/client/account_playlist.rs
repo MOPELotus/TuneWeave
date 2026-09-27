@@ -9,6 +9,14 @@ fn invalid() -> TuneWeaveError {
     migu_upstream_error("Migu account playlist response is invalid")
 }
 
+fn favorite_identity_unavailable() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::CapabilityNotSupported,
+        "Migu did not provide a stable identity for this account's favorite playlist",
+    )
+    .with_platform(Platform::Migu)
+}
+
 #[cfg(debug_assertions)]
 #[derive(Debug)]
 struct SafeHomeDiagnostic {
@@ -234,7 +242,14 @@ fn favorite_id_inner(data: &serde_json::Value) -> Result<String> {
     if matches.next().is_some() {
         return Err(invalid());
     }
-    favorite_id_from_action(entry.action_url.as_deref().ok_or_else(invalid)?)
+    let Some(action) = entry
+        .action_url
+        .as_deref()
+        .filter(|action| !action.trim().is_empty())
+    else {
+        return Err(favorite_identity_unavailable());
+    };
+    favorite_id_from_action(action)
 }
 
 pub(crate) fn favorite_id_for_write(data: serde_json::Value) -> Result<Option<String>> {
@@ -268,7 +283,7 @@ fn favorite_id_for_write_inner(data: &serde_json::Value) -> Result<Option<String
     let Some(action) = entry
         .action_url
         .as_deref()
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
     else {
         return Ok(None);
     };

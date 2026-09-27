@@ -70,11 +70,14 @@ fn write_favorite_identity_is_optional_only_when_navigation_omits_its_action() {
         Some("77".into())
     );
 
-    for action in [json!(null), json!("")] {
+    for action in [json!(null), json!(""), json!("  ")] {
         let mut data = home("77");
         data["userPrivateItems"][1]["actionUrl"] = action;
         assert_eq!(favorite_id_for_write(data.clone()).unwrap(), None);
-        assert!(favorite_id(data).is_err());
+        assert_eq!(
+            favorite_id(data).unwrap_err().code,
+            ErrorCode::CapabilityNotSupported
+        );
     }
 
     assert_eq!(

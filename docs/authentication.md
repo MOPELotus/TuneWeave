@@ -354,7 +354,7 @@ Rust 调用方在 `begin_auth_challenge` 后使用 `auth_challenge_status(&recei
 
 ### 咪咕账户歌单内容与喜欢列表
 
-普通 `GET /v1/playlists/migu:{id}` 与 `/tracks` 现支持服务器 `account` 或调用方凭据；未指定账户来源时仍使用公开链。喜欢集合可通过 `/v1/account/favorites/playlist?platform=migu`、`/tracks?platform=migu` 读取，也支持 `/v1/users/migu:{uid}/favorites/playlist` 和 `/tracks`。用户入口只允许选中账户本人。喜欢集合采用平台个人导航给出的实际歌单 ID，并核验所有者，不从自建歌单的同名标题推断。
+普通 `GET /v1/playlists/migu:{id}` 与 `/tracks` 现支持服务器 `account` 或调用方凭据；未指定账户来源时仍使用公开链。喜欢集合可通过 `/v1/account/favorites/playlist?platform=migu`、`/tracks?platform=migu` 读取，也支持 `/v1/users/migu:{uid}/favorites/playlist` 和 `/tracks`。用户入口只允许选中账户本人。喜欢集合采用平台个人导航给出的实际歌单 ID，并核验所有者，不从自建歌单的同名标题推断。若所选账户的“喜欢的音乐”导航项缺少 `actionUrl` 或其值仅含空白字符，喜欢列表读取及依赖该身份的喜欢写入会返回 `capability_not_supported`；不会从自建歌单或标题猜测 ID。该限制针对当前账户返回的数据，不影响普通自建歌单操作。
 
 账户详情和曲目入口均完整读取所选歌单再返回详情或应用 `limit`（1–100）与 `offset`。每个物理页请求 50 条，最多 200 页、10,000 首。明确曲目总数、页间发布时间和所有者必须一致，读取前后再次核对歌单详情；喜欢集合还会再次核对导航 ID。缺少完整性字段、提前空页／短页、整页重复或元数据变化会返回错误，不返回截断结果。普通重复歌曲保留原位置；无法区分异常重放的整页重复会明确拒绝。收藏歌单可属于其他作者，喜欢集合必须属于当前用户。
 

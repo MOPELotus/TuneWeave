@@ -332,6 +332,51 @@ async fn account_playlist_failed_pages_final_metadata_and_favorite_identity_pres
 }
 
 #[tokio::test]
+async fn missing_favorite_navigation_action_is_reported_as_unsupported_with_verified_rotation() {
+    let mut data = home("77");
+    data["userPrivateItems"][1]["actionUrl"] = json!("");
+    let frames = replies(vec![data]);
+    let count = frames.len();
+    let (mut p, requests) = server(frames).await;
+    let (store, account, other) = setup(&mut p);
+    p = p.caller_scope(&account.caller().unwrap()).unwrap();
+
+    let mut error = p
+        .favorite_tracks(&request("default", 1, 0))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+    assert_eq!(error.platform, Some(Platform::Migu));
+    assert_eq!(
+        MiguCredential::parse_caller(&error.take_caller_credential_update().unwrap())
+            .unwrap()
+            .token(),
+        "p2"
+    );
+    assert_eq!(
+        MiguCredential::parse_caller(&p.take_response_credential().unwrap().unwrap())
+            .unwrap()
+            .token(),
+        "p2"
+    );
+    assert_eq!(read(&store, "A"), account);
+    assert_eq!(read(&store, "B"), other);
+
+    let requests = requests.await.unwrap();
+    assert_eq!(requests.len(), count);
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.contains("musicListId"))
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.contains("do-not-export"))
+    );
+}
+
+#[tokio::test]
 async fn account_playlist_each_await_rejects_relogin_and_logout() {
     let ids: Vec<_> = (1..=51).collect();
     let frames = replies(values(true, &ids));

@@ -153,7 +153,7 @@ GET /v1/playlists/{uni-ref}/items/{item_id}/stream/redirect
 V1 文档拒绝未知字段，并限制项目数量、文本长度、引用、时间和项目顺序。调用方不得在文档中放入 Cookie、token、`X-TuneWeave-Credential`、账户别名、密码、验证码、临时媒体 URL、签名或任意请求头。元数据快照用于展示和严格匹配，播放时仍会重新检查平台资源与账户权益。
 
 
-咪咕普通歌单与喜欢集合支持账户来源：普通集合使用 `{"ref":"migu:歌单ID","type":"playlist","account":"别名"}`，喜欢集合使用 `{"ref":"migu:本人UID","type":"favorite_tracks","account":"别名"}`。调用方持有凭据时省略 `account`，通过统一凭据请求头提交。两者均可用于 `/v1/uni/playlists/imports` 和 `/v1/uni/materialize/imports`。
+咪咕普通歌单与喜欢集合支持账户来源：普通集合使用 `{"ref":"migu:歌单ID","type":"playlist","account":"别名"}`，喜欢集合使用 `{"ref":"migu:本人UID","type":"favorite_tracks","account":"别名"}`。调用方持有凭据时省略 `account`，通过统一凭据请求头提交。两者均可用于 `/v1/uni/playlists/imports` 和 `/v1/uni/materialize/imports`。喜欢来源要求所选账户的个人导航提供稳定的歌单 ID；若上游没有提供，接口返回 `capability_not_supported`，不会从同名自建歌单推断。
 
 咪咕单曲购买库支持 `{"ref":"migu:本人UID","type":"purchased_tracks","account":"别名"}`。来源 UID 必须与所选账户一致；服务器复用已购单曲的完整有序读取和 `source_snapshot_id`，每个项目必须有已解析的公开曲目资料，未解析购买记录会使整次 Uni 导入失败而不会被静默丢弃。购买记录本身仍不授予当前播放或下载权限；已购专辑另用 `purchased_albums` 来源展开，见下文。
 
