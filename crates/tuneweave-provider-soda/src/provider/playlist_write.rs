@@ -736,13 +736,18 @@ impl SodaProvider {
             let snapshot = self
                 .read_library_section_snapshot(LibrarySection::Created, &mut source, &mut stored)
                 .await?;
-            let playlist = snapshot
+            let matching_rows = snapshot
                 .items
-                .into_iter()
-                .find(|playlist| playlist.id == id)
+                .iter()
+                .filter(|playlist| playlist.id == id)
+                .collect::<Vec<_>>();
+            let directory_playlist = matching_rows
+                .first()
+                .copied()
+                .filter(|_| matching_rows.len() == 1)
                 .filter(|playlist| {
                     playlist.name == request.name
-                        && playlist.track_count == Some(0)
+                        && playlist.track_count.is_none_or(|count| count == 0)
                         && playlist
                             .extensions
                             .get("source_user_id")
@@ -751,9 +756,35 @@ impl SodaProvider {
                 })
                 .ok_or_else(|| {
                     soda_upstream_error(
-                        "Soda created playlist did not match the acknowledged empty playlist",
+                        "Soda created playlist did not match the acknowledged playlist identity",
                     )
                 })?;
+
+            // The Created directory omits track counts on some valid rows. Confirm
+            // emptiness from the complete, owner-scoped playlist detail instead of
+            // treating an unknown directory count as either zero or nonzero.
+            let detail = self
+                .read_verified_account_playlist(&id, Some(alias), &mut source, &mut stored, None)
+                .await?;
+            let detail_identity_matches = detail.playlist.id == id;
+            let detail_name_matches = detail.playlist.name == directory_playlist.name;
+            let detail_owner_matches = detail
+                .playlist
+                .extensions
+                .get("owner_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(source_user_id.as_str());
+            let detail_is_empty = detail.track_ids().is_empty();
+            if !detail_identity_matches
+                || !detail_name_matches
+                || !detail_owner_matches
+                || !detail_is_empty
+            {
+                return Err(soda_upstream_error(
+                    "Soda created playlist detail did not confirm the acknowledged empty playlist",
+                ));
+            }
+            let playlist = detail.playlist;
 
             Ok(tuneweave_core::PlaylistMutationResult {
                 playlist_ref: tuneweave_core::ResourceRef::new(Platform::Soda, &id)

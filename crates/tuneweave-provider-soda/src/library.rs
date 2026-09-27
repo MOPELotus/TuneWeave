@@ -211,7 +211,17 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let body = read_bounded_response(response, "Soda playlist creation").await?;
-            let id = parse_playlist_create_ack(&body)?;
+            let id = match parse_playlist_create_ack(&body) {
+                Ok(id) => id,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "DIAGNOSTIC soda_playlist_write_ack operation=playlist_create shape={}",
+                        safe_library_shape(&body)
+                    );
+                    return Err(error);
+                }
+            };
             let refreshed = credential.with_response_cookies(&headers)?;
             Ok((id, refreshed))
         }
@@ -320,7 +330,15 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, description).await?;
-            validate_playlist_update_ack(&response_body)?;
+            if let Err(error) = validate_playlist_update_ack(&response_body) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC soda_playlist_write_ack operation={} shape={}",
+                    operation,
+                    safe_library_shape(&response_body)
+                );
+                return Err(error);
+            }
             let refreshed = credential.with_response_cookies(&headers)?;
             Ok(refreshed)
         }
@@ -386,7 +404,14 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, "Soda playlist deletion").await?;
-            validate_playlist_delete_ack(&response_body)?;
+            if let Err(error) = validate_playlist_delete_ack(&response_body, id) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC soda_playlist_write_ack operation=playlist_delete shape={}",
+                    safe_library_shape(&response_body)
+                );
+                return Err(error);
+            }
             let refreshed = credential.with_response_cookies(&headers)?;
             Ok(refreshed)
         }
@@ -711,6 +736,21 @@ fn safe_library_shape(body: &[u8]) -> serde_json::Value {
     if let Some(info) = value.get("status_info") {
         summary.insert("status_info_fields".into(), Value::Object(fields(info)));
     }
+    if let Some(playlist) = value.get("playlist") {
+        summary.insert("playlist_fields".into(), Value::Object(fields(playlist)));
+    }
+    if let Some(deleted) = value.get("deleted_playlists").and_then(Value::as_array) {
+        summary.insert("deleted_playlists_count".into(), json!(deleted.len()));
+        if let Some(first) = deleted.first() {
+            summary.insert("deleted_playlists_first_kind".into(), json!(kind(first)));
+            if first.is_object() {
+                summary.insert(
+                    "deleted_playlists_first_fields".into(),
+                    Value::Object(fields(first)),
+                );
+            }
+        }
+    }
     for name in ["status_code", "total_num"] {
         if let Some(field) = value.get(name).filter(|field| field.is_number()) {
             summary.insert(name.into(), field.clone());
@@ -786,26 +826,78 @@ fn parse_playlist_create_ack(body: &[u8]) -> Result<String> {
         .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
     let envelope: PlaylistCreateEnvelope = serde_json::from_value(response.clone())
         .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
-    let status_code = envelope
-        .status_code
-        .ok_or_else(|| soda_upstream_error("Soda playlist creation omitted its result status"))?;
-    if status_code == 1_000_016 {
-        return Err(authentication_required());
-    }
-    if status_code != 0 {
-        return Err(soda_upstream_error("Soda playlist creation was rejected"));
-    }
-    if let Some(status_code) = envelope.status_info.and_then(|info| info.status_code) {
+    if let Some(status_code) = envelope.status_code {
         if status_code == 1_000_016 {
             return Err(authentication_required());
         }
         if status_code != 0 {
-            return Err(soda_upstream_error(
-                "Soda playlist creation returned conflicting statuses",
-            ));
+            return Err(soda_upstream_error("Soda playlist creation was rejected"));
         }
+        if let Some(status_code) = envelope.status_info.and_then(|info| info.status_code) {
+            if status_code == 1_000_016 {
+                return Err(authentication_required());
+            }
+            if status_code != 0 {
+                return Err(soda_upstream_error(
+                    "Soda playlist creation returned conflicting statuses",
+                ));
+            }
+        }
+        return extract_created_playlist_id(&response);
     }
-    extract_created_playlist_id(&response)
+
+    // The account API also returns a statusless create response with exactly
+    // `playlist` and the standard request `status_info`. Keep this separate
+    // from the documented status-code variants and accept only the observed
+    // direct playlist identity shape.
+    if !has_exact_fields(&response, &["playlist", "status_info"]) {
+        return Err(soda_upstream_error(
+            "Soda playlist creation omitted its result status",
+        ));
+    }
+    validate_statusless_write_info(&response, "Soda playlist creation")?;
+    let id = response
+        .get("playlist")
+        .and_then(|playlist| playlist.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            soda_upstream_error("Soda playlist creation omitted a valid playlist identity")
+        })?;
+    if !valid_id(id) {
+        return Err(soda_upstream_error(
+            "Soda playlist creation returned an invalid playlist identity",
+        ));
+    }
+    Ok(id.to_owned())
+}
+
+fn has_exact_fields(value: &serde_json::Value, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == expected.len() && expected.iter().all(|field| object.contains_key(*field))
+    })
+}
+
+fn validate_statusless_write_info(value: &serde_json::Value, operation: &str) -> Result<()> {
+    let info: EmptySavedLibraryStatusInfo = value
+        .get("status_info")
+        .cloned()
+        .ok_or_else(|| soda_upstream_error(format!("{operation} returned invalid status info")))
+        .and_then(|info| {
+            serde_json::from_value(info).map_err(|_| {
+                soda_upstream_error(format!("{operation} returned invalid status info"))
+            })
+        })?;
+    if info.log_id.trim().is_empty()
+        || info.log_id.len() > 256
+        || info.log_id.chars().any(char::is_control)
+        || info.now == 0
+        || info.now_ts_ms == 0
+    {
+        return Err(soda_upstream_error(format!(
+            "{operation} returned invalid status info"
+        )));
+    }
+    Ok(())
 }
 
 fn extract_created_playlist_id(response: &serde_json::Value) -> Result<String> {
@@ -888,26 +980,46 @@ fn validate_playlist_update_ack(body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_playlist_delete_ack(body: &[u8]) -> Result<()> {
+fn validate_playlist_delete_ack(body: &[u8], requested_id: &str) -> Result<()> {
     let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda playlist deletion returned invalid data"))?;
-    let status_code = envelope
-        .status_code
-        .ok_or_else(|| soda_upstream_error("Soda playlist deletion omitted its result status"))?;
-    for code in [
-        Some(status_code),
-        envelope.status_info.and_then(|info| info.status_code),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if code == 1_000_016 {
-            return Err(authentication_required());
+    if let Some(status_code) = envelope.status_code {
+        for code in [
+            Some(status_code),
+            envelope.status_info.and_then(|info| info.status_code),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if code == 1_000_016 {
+                return Err(authentication_required());
+            }
+            if code != 0 {
+                return Err(soda_upstream_error("Soda playlist deletion was rejected"));
+            }
         }
-        if code != 0 {
-            return Err(soda_upstream_error("Soda playlist deletion was rejected"));
-        }
+        return Ok(());
     }
+
+    let response: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda playlist deletion returned invalid data"))?;
+    if !has_exact_fields(&response, &["deleted_playlists", "status_info"]) {
+        return Err(soda_upstream_error(
+            "Soda playlist deletion omitted its result status",
+        ));
+    }
+    validate_statusless_write_info(&response, "Soda playlist deletion")?;
+    let deleted = response
+        .get("deleted_playlists")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| items.len() == 1)
+        .and_then(|items| items.first())
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| valid_id(id) && *id == requested_id)
+        .ok_or_else(|| {
+            soda_upstream_error("Soda playlist deletion did not confirm the requested identity")
+        })?;
+    let _ = deleted;
     Ok(())
 }
 
@@ -1269,10 +1381,12 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn account_library_diagnostics_report_shape_and_counts_without_values() {
-        let body = br#"{"status_info":{"now":123,"cookie":"private"},"mixed_collections":[{"item_type":"playlist","id":"private-id"}],"total_num":1,"token":"private-token"}"#;
+        let body = br#"{"status_info":{"now":123,"cookie":"private"},"playlist":{"id":"private-id","title":"private title"},"deleted_playlists":[{"id":"private-id"}],"mixed_collections":[{"item_type":"playlist","id":"private-id"}],"total_num":1,"token":"private-token"}"#;
         let summary = safe_library_shape(body).to_string();
         assert!(summary.contains("\"mixed_collections_count\":1"));
         assert!(summary.contains("\"status_info\":\"object\""));
+        assert!(summary.contains("\"playlist_fields\""));
+        assert!(summary.contains("\"deleted_playlists_first_fields\""));
         assert!(!summary.contains("private"));
     }
 
@@ -1364,6 +1478,29 @@ mod tests {
     }
 
     #[test]
+    fn playlist_create_ack_accepts_only_the_observed_statusless_response_shape() {
+        let valid = br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"playlist":{"id":"42","title":"test","type":0}}"#;
+        assert_eq!(parse_playlist_create_ack(valid).unwrap(), "42");
+
+        for body in [
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"playlist":{"id":"042"}}"#.as_slice(),
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"playlist":{"id":42}}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"playlist":{"id":"42"},"unexpected":true}"#,
+            br#"{"status_info":{"log_id":"request-log","now":0,"now_ts_ms":123456},"playlist":{"id":"42"}}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":0},"playlist":{"id":"42"}}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456,"status_code":0},"playlist":{"id":"42"}}"#,
+            br#"{"status_info":{"log_id":"","now":123,"now_ts_ms":123456},"playlist":{"id":"42"}}"#,
+        ] {
+            assert_eq!(
+                parse_playlist_create_ack(body).unwrap_err().code,
+                ErrorCode::UpstreamError,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
     fn playlist_create_ack_supports_only_the_pinned_upstream_id_paths() {
         for body in [
             br#"{"status_code":0,"data":{"playlist_id":"42"}}"#.as_slice(),
@@ -1447,7 +1584,7 @@ mod tests {
             br#"{"status_code":0}"#.as_slice(),
             br#"{"status_code":0,"status_info":{"status_code":0}}"#,
         ] {
-            validate_playlist_delete_ack(body).unwrap();
+            validate_playlist_delete_ack(body, "42").unwrap();
         }
         for body in [
             br#"{}"#.as_slice(),
@@ -1457,18 +1594,42 @@ mod tests {
             br#"{"status_code":"0"}"#,
         ] {
             assert_eq!(
-                validate_playlist_delete_ack(body).unwrap_err().code,
+                validate_playlist_delete_ack(body, "42").unwrap_err().code,
                 ErrorCode::UpstreamError,
                 "{}",
                 String::from_utf8_lossy(body)
             );
         }
         assert_eq!(
-            validate_playlist_delete_ack(br#"{"status_code":1000016}"#)
+            validate_playlist_delete_ack(br#"{"status_code":1000016}"#, "42")
                 .unwrap_err()
                 .code,
             ErrorCode::AuthenticationRequired
         );
+    }
+
+    #[test]
+    fn playlist_delete_ack_accepts_only_the_requested_id_in_the_statusless_variant() {
+        let valid = br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":["42"]}"#;
+        validate_playlist_delete_ack(valid, "42").unwrap();
+
+        for body in [
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":[]}"#.as_slice(),
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":["43"]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":["42","43"]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":[42]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":["042"]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":0},"deleted_playlists":["42"]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456,"status_code":0},"deleted_playlists":["42"]}"#,
+            br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"deleted_playlists":["42"],"unexpected":true}"#,
+        ] {
+            assert_eq!(
+                validate_playlist_delete_ack(body, "42").unwrap_err().code,
+                ErrorCode::UpstreamError,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
