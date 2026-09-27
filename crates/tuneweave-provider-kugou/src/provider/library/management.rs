@@ -551,6 +551,7 @@ impl KugouProvider {
         let mut dispatched = 0;
         let mut confirmed = Vec::new();
         let mut attempted = Vec::new();
+        let mut reconciled = false;
         let outcome = async {
             let concept = read.session()?.client == KugouLoginClient::Concept;
             let mut before = self.read_native_library(&mut read).await?;
@@ -619,7 +620,37 @@ impl KugouProvider {
                     // A late failed write is as stale as a late successful ACK.
                     self.check_account_read(&mut read)?;
                 }
-                let ack = ack?;
+                let ack = match ack {
+                    Ok(ack) => ack,
+                    Err(write_error) => {
+                        let ambiguous_transport_or_ack = !concept
+                            && matches!(
+                                write_error.code,
+                                ErrorCode::UpstreamError | ErrorCode::UpstreamTimeout
+                            )
+                            && write_error.details.get("platform_code").is_none();
+                        if !ambiguous_transport_or_ack {
+                            return Err(write_error);
+                        }
+                        self.check_account_read(&mut read)?;
+                        // The Standard endpoint can apply a delete and still return an
+                        // acknowledgement that this client cannot parse. Reconcile with
+                        // one complete same-account library read; never resend the write.
+                        let after = self.read_native_library(&mut read).await?;
+                        if after.version.total_ver < before.version.total_ver {
+                            return Err(library_changed());
+                        }
+                        if after.items.iter().any(|(_, p)| p.id == r.id()) {
+                            return Err(write_error);
+                        }
+                        unrelated(&before, &after, r.id())?;
+                        self.check_account_read(&mut read)?;
+                        confirmed.push(r.clone());
+                        before = after;
+                        reconciled = true;
+                        continue;
+                    }
+                };
                 self.check_account_read(&mut read)?;
                 let after = self.read_native_library(&mut read).await?;
                 if after.items.iter().any(|(_, p)| p.id == r.id()) {
@@ -631,14 +662,18 @@ impl KugouProvider {
                 confirmed.push(r.clone());
                 before = after;
             }
+            let mut extensions = Extensions::from([
+                ("verified_by".into(), json!("complete_native_library_delta")),
+                ("atomic".into(), json!(false)),
+                ("write_requests_dispatched".into(), json!(dispatched)),
+                ("total_ver".into(), json!(before.version.total_ver)),
+            ]);
+            if reconciled {
+                extensions.insert("write_reconciled".into(), json!(true));
+            }
             Ok(PlaylistDeleteResult {
                 playlist_refs: confirmed.clone(),
-                extensions: Extensions::from([
-                    ("verified_by".into(), json!("complete_native_library_delta")),
-                    ("atomic".into(), json!(false)),
-                    ("write_requests_dispatched".into(), json!(dispatched)),
-                    ("total_ver".into(), json!(before.version.total_ver)),
-                ]),
+                extensions,
             })
         }
         .await;

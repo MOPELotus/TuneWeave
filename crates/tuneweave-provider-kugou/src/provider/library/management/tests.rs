@@ -430,6 +430,151 @@ async fn batch_delete_confirms_each_item_and_reports_partial_failure_without_ret
 }
 
 #[tokio::test]
+async fn single_delete_reconciles_a_failed_ack_only_when_full_readback_proves_absence() {
+    for applied in [false, true] {
+        let mut frames = start();
+        frames.push(library(vec![row(37), row(3)], 9).into());
+        frames.push(raw(json!({"unexpected_ack_shape":true})).into());
+        frames.push(
+            library(
+                if applied {
+                    vec![row(3)]
+                } else {
+                    vec![row(37), row(3)]
+                },
+                10,
+            )
+            .into(),
+        );
+        let mut f = server(frames).await;
+        store_account(&mut f.provider);
+        let result = f.provider.delete_playlists(&delete(&[37], Some("A"))).await;
+
+        if applied {
+            let deleted = result.unwrap();
+            assert_eq!(
+                deleted.playlist_refs,
+                delete(&[37], Some("A")).playlist_refs
+            );
+            assert_eq!(
+                deleted.extensions.get("write_reconciled"),
+                Some(&json!(true))
+            );
+            assert_eq!(
+                deleted.extensions.get("verified_by"),
+                Some(&json!("complete_native_library_delta"))
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.details["write_outcome"], "unconfirmed");
+            assert!(!error.retryable);
+        }
+
+        let requests = f.requests.await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /cloudlist.service/v2/delete_list?"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_delete_reconciliation_rejects_unrelated_or_stale_library_readbacks() {
+    for case in ["unrelated_change", "regressed_version"] {
+        let mut unrelated = row(3);
+        if case == "unrelated_change" {
+            unrelated["name"] = json!("Changed elsewhere");
+        }
+        let version = if case == "regressed_version" { 8 } else { 10 };
+        let mut frames = start();
+        frames.push(library(vec![row(37), row(3)], 9).into());
+        frames.push(raw(json!({"unexpected_ack_shape":true})).into());
+        frames.push(library(vec![unrelated], version).into());
+        let mut f = server(frames).await;
+        store_account(&mut f.provider);
+        let error = f
+            .provider
+            .delete_playlists(&delete(&[37], Some("A")))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Conflict, "{case}");
+        assert_eq!(error.details["write_outcome"], "unconfirmed", "{case}");
+        assert!(!error.retryable, "{case}");
+        let requests = f.requests.await.unwrap();
+        assert_eq!(requests.len(), 5, "{case}");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.starts_with("POST /cloudlist.service/v2/delete_list?")
+                })
+                .count(),
+            1,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_delete_reconciliation_does_not_confirm_after_account_relogin() {
+    for caller in [false, true] {
+        let mut frames = start();
+        frames.push(library(vec![row(37)], 9).into());
+        frames.push(raw(json!({"unexpected_ack_shape":true})).into());
+        let (last, resume) = paused(library(vec![], 10));
+        frames.push(last);
+        let n = frames.len();
+        let mut f = server(frames).await;
+        let store = store_account(&mut f.provider);
+        let saved = read(&store, "A");
+        let provider = if caller {
+            f.provider.caller_scope(&saved.caller().unwrap()).unwrap()
+        } else {
+            f.provider.clone()
+        };
+        let request_provider = provider.clone();
+        let task = tokio::spawn(async move {
+            request_provider
+                .delete_playlists(&delete(&[37], if caller { None } else { Some("A") }))
+                .await
+        });
+        for _ in 0..n {
+            f.seen.recv().await.unwrap();
+        }
+        let replacement = credential("111", "new-login");
+        if caller {
+            *provider.caller_credential.as_ref().unwrap().lock().unwrap() =
+                Some(replacement.clone());
+        } else {
+            store.put(&replacement.stored("A").unwrap()).unwrap();
+        }
+        resume.send(()).unwrap();
+
+        let mut error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.details["write_outcome"], "unconfirmed");
+        assert!(error.take_caller_credential_update().is_none());
+        assert_eq!(read(&store, "A"), if caller { saved } else { replacement });
+        let requests = f.requests.await.unwrap();
+        assert_eq!(requests.len(), n);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.starts_with("POST /cloudlist.service/v2/delete_list?")
+                })
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn delete_and_metadata_readbacks_reject_unrelated_changes_or_unapplied_operations() {
     for rename in [false, true] {
         for unrelated_change in [false, true] {
