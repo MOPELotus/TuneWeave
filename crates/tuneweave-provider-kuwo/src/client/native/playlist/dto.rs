@@ -50,6 +50,23 @@ pub(super) fn parse(
     id: &str,
     known_empty: bool,
 ) -> Result<Contents> {
+    let result = parse_inner(bytes, input, id, known_empty);
+    if result.is_err() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DIAGNOSTIC kuwo_playlist_shape={}",
+            crate::client::native::diagnostic_response_shape(bytes)
+        );
+    }
+    result
+}
+
+fn parse_inner(
+    bytes: &[u8],
+    input: &KuwoNativeSessionInput,
+    id: &str,
+    known_empty: bool,
+) -> Result<Contents> {
     let response: Response = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     if response.errcode != Some(0)
         || response.result.as_deref().is_some_and(|v| v != "ok")

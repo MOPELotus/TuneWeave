@@ -383,7 +383,36 @@ impl KuwoClient {
                 .await
                 .map_err(|error| kuwo_network_error(error).retryable(false))?;
             status = Some(response.status());
-            let bytes = read_response(
+            let max_bytes = if path == library::OWNED_PATH
+                || path == library::SAVED_PATH
+                || path == playlist::COLLECTED_PATH
+                || path == playlist::metadata::METADATA_PATH
+            {
+                library::MAX_RESPONSE
+            } else if path == media::RIGHTS_PATH || path == media::MEDIA_PATH {
+                media::MAX_RESPONSE
+            } else {
+                codec::MAX_RESPONSE
+            };
+            let response_mime = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim);
+            let response_mime_class = match response_mime {
+                Some(value) if value.eq_ignore_ascii_case("application/json") => "json",
+                Some(value) if value.eq_ignore_ascii_case("text/plain") => "text_plain",
+                Some(value) if value.eq_ignore_ascii_case("text/html") => "text_html",
+                Some(_) => "other",
+                None => "missing",
+            };
+            let response_size_class = match response.content_length() {
+                None => "unknown",
+                Some(size) if size <= max_bytes as u64 => "within_limit",
+                Some(_) => "over_limit",
+            };
+            let bytes = match read_response(
                 response,
                 path == VALIDATE_PATH
                     || path == profile::PATH
@@ -392,20 +421,24 @@ impl KuwoClient {
                 path == playlist::COLLECTED_PATH
                     || path == revocation::PATH
                     || path == media::RIGHTS_PATH
-                    || path == media::trial::PATH,
-                if path == library::OWNED_PATH
-                    || path == library::SAVED_PATH
-                    || path == playlist::COLLECTED_PATH
-                    || path == playlist::metadata::METADATA_PATH
-                {
-                    library::MAX_RESPONSE
-                } else if path == media::RIGHTS_PATH || path == media::MEDIA_PATH {
-                    media::MAX_RESPONSE
-                } else {
-                    codec::MAX_RESPONSE
-                },
+                    || path == media::trial::PATH
+                    || operation == "native_cloud_playlist",
+                max_bytes,
             )
-            .await?;
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    if operation == "native_cloud_playlist" {
+                        eprintln!(
+                            "DIAGNOSTIC kuwo_native_response_read status={} mime_class={response_mime_class} content_length={response_size_class}",
+                            status.map_or(0, |value| value.as_u16())
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             parse(&bytes)
         }
         .await;

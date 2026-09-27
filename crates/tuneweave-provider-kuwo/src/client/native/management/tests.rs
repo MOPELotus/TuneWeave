@@ -93,7 +93,7 @@ async fn native_management_sdk_uses_exact_single_post_and_confirms_selected_acco
         let mut replies = flow(is_create);
         replies[2] = response(
             200,
-            "application/json",
+            "text/html",
             "Set-Cookie: alien=never-send; Path=/\r\n",
             &serde_json::to_vec(&if is_create {
                 json!({"errcode":0,"pid":"201","token":"never-export"})
@@ -308,7 +308,8 @@ async fn native_management_http_failure_and_invalid_response_do_not_retry_or_rea
         ),
         response(401, "application/json", "", b"{}"),
         response(429, "application/json", "Retry-After: 5\r\n", b"{}"),
-        response(200, "text/html", "", b"{}"),
+        response(200, "text/html", "", b"<html>not an acknowledgement</html>"),
+        response(200, "text/plain", "", b"not-json"),
         response(200, "application/json", "", &vec![b' '; ACK_LIMIT + 1]),
     ];
     for body in bodies {

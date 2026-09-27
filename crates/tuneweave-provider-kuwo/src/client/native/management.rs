@@ -352,8 +352,28 @@ impl KuwoClient {
                 .send()
                 .await
                 .map_err(|e| kuwo_network_error(e).retryable(false))?;
-            status = Some(response.status());
-            let bytes = read_response(response, false, false, ACK_LIMIT).await?;
+            let response_status = response.status();
+            status = Some(response_status);
+            let response_mime = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim);
+            let response_mime_class = match response_mime {
+                Some(value) if value.eq_ignore_ascii_case("application/json") => "json",
+                Some(value) if value.eq_ignore_ascii_case("text/plain") => "text_plain",
+                Some(value) if value.eq_ignore_ascii_case("text/html") => "text_html",
+                Some(_) => "other",
+                None => "missing",
+            };
+            diagnostic_write_response(operation, response_status.as_u16(), response_mime_class);
+            // The official byte-array callbacks parse response text as JSON even
+            // when these write ACKs are labeled text/html. Accept that MIME only
+            // for create/delete; JSON parsing and strict ACK checks remain required.
+            let html_json_ack = matches!(operation, "pl3_addlist" | "pl3_deletelist");
+            let bytes = read_response(response, html_json_ack, false, ACK_LIMIT).await?;
+            diagnostic_write_ack(&bytes, input, operation == "pl3_addlist");
             parse_ack(&bytes, input, operation == "pl3_addlist")
         }
         .await;
@@ -394,6 +414,81 @@ fn parse_ack(bytes: &[u8], input: &KuwoNativeSessionInput, create: bool) -> Resu
     }
     Ok(ack)
 }
+
+#[cfg(debug_assertions)]
+fn diagnostic_write_response(operation: &str, status: u16, mime_class: &str) {
+    if std::env::var_os("TUNEWEAVE_KUWO_WRITE_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "DIAGNOSTIC kuwo_write_response operation={operation} status={status} mime_class={mime_class}"
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn diagnostic_write_response(_: &str, _: u16, _: &str) {}
+
+#[cfg(debug_assertions)]
+fn diagnostic_write_ack(bytes: &[u8], input: &KuwoNativeSessionInput, create: bool) {
+    if std::env::var_os("TUNEWEAVE_KUWO_WRITE_DIAGNOSTICS").is_none() {
+        return;
+    }
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!(
+                "DIAGNOSTIC kuwo_write_ack create={create} body_bytes={} json_object=false",
+                bytes.len()
+            );
+            return;
+        }
+    };
+    let Some(object) = value.as_object() else {
+        eprintln!(
+            "DIAGNOSTIC kuwo_write_ack create={create} body_bytes={} json_object=false",
+            bytes.len()
+        );
+        return;
+    };
+    let code = match object.get("errcode") {
+        Some(serde_json::Value::String(value)) if value == "0" => "zero",
+        Some(serde_json::Value::Number(value)) if value.as_i64() == Some(0) => "zero",
+        Some(serde_json::Value::String(_) | serde_json::Value::Number(_)) => "other",
+        Some(_) => "invalid",
+        None => "missing",
+    };
+    let result = match object.get("result") {
+        None => "absent",
+        Some(serde_json::Value::String(value)) if value == "ok" => "ok",
+        Some(serde_json::Value::String(_)) => "other",
+        Some(_) => "invalid",
+    };
+    let uid = match object.get("uid") {
+        None => "absent",
+        Some(serde_json::Value::String(value)) if value == input.user_id() => "matches",
+        Some(serde_json::Value::Number(value)) if value.to_string() == input.user_id() => "matches",
+        Some(serde_json::Value::String(_) | serde_json::Value::Number(_)) => "mismatch",
+        Some(_) => "invalid",
+    };
+    let pid = match object.get("pid") {
+        None => "absent",
+        Some(serde_json::Value::String(value)) if playlist::validate_id(value).is_ok() => "valid",
+        Some(serde_json::Value::Number(value))
+            if playlist::validate_id(&value.to_string()).is_ok() =>
+        {
+            "valid"
+        }
+        Some(serde_json::Value::String(_) | serde_json::Value::Number(_)) => "invalid",
+        Some(_) => "invalid",
+    };
+    eprintln!(
+        "DIAGNOSTIC kuwo_write_ack create={create} body_bytes={} json_object=true errcode={code} result={result} uid={uid} pid={pid}",
+        bytes.len()
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn diagnostic_write_ack(_: &[u8], _: &KuwoNativeSessionInput, _: bool) {}
+
 pub(crate) fn write_failure(mut error: TuneWeaveError, dispatched: bool) -> TuneWeaveError {
     if dispatched {
         let details = error.details.as_object_mut();

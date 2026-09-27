@@ -103,6 +103,39 @@ async fn native_favorites_sdk_uses_system_type_real_cloud_id_and_private_complet
 }
 
 #[tokio::test]
+async fn native_playlist_content_accepts_plain_text_mime_only_for_json_content() {
+    let mut replies = flow();
+    replies[2] = response(
+        200,
+        "text/plain; charset=utf-8",
+        "",
+        &serde_json::to_vec(&page(&[11, 22], 2)).unwrap(),
+    );
+    let mut f = fixture::setup(replies).await;
+    assert_eq!(
+        f.client
+            .native_favorite_playlist(&credential())
+            .await
+            .unwrap()
+            .track_count,
+        Some(4)
+    );
+    fixture::requests(&mut f, 7).await;
+
+    let mut replies = flow();
+    replies[2] = response(200, "text/plain", "", b"not-json");
+    replies.truncate(3);
+    let mut f = fixture::setup(replies).await;
+    assert!(
+        f.client
+            .native_favorite_playlist(&credential())
+            .await
+            .is_err()
+    );
+    fixture::requests(&mut f, 3).await;
+}
+
+#[tokio::test]
 async fn native_favorites_directory_rejects_missing_ambiguous_or_invalid_identity() {
     let mut cases = vec![
         json!({"errcode":0,"plist":[]}),
