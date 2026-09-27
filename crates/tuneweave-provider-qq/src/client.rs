@@ -287,7 +287,8 @@ impl QqClient {
             self.ensure_android_session().await?;
             let device = self.lock_device()?.device().clone();
             let comm = android_comm(&device, None);
-            self.post_api_search_with_429_retry(&comm, requests).await
+            self.post_api_search_with_rate_limit_retry(&comm, requests)
+                .await
         })
         .await
     }
@@ -863,7 +864,7 @@ impl QqClient {
         outcome
     }
 
-    async fn post_api_search_with_429_retry(
+    async fn post_api_search_with_rate_limit_retry(
         &self,
         comm: &Value,
         requests: &[QqApiRequest],
@@ -882,7 +883,7 @@ impl QqClient {
         }
         let payload = Value::Object(payload);
         let started = Instant::now();
-        let (status, response, retry_count) = retry_search_http_429(
+        let (status, outcome, retry_count) = retry_search_rate_limits(
             || async {
                 let response = self
                     .http
@@ -891,19 +892,18 @@ impl QqClient {
                     .send()
                     .await
                     .map_err(network_error)?;
-                Ok((response.status(), response))
+                let status = response.status();
+                let outcome = if status.is_success() {
+                    let body = response.bytes().await.map_err(network_error)?;
+                    parse_api_response_body(&body, requests, false)
+                } else {
+                    Err(search_http_error(status))
+                };
+                Ok((status, outcome))
             },
             QQ_SEARCH_RETRY_DELAY,
         )
         .await?;
-        let outcome = async {
-            if !status.is_success() {
-                return Err(http_error(status));
-            }
-            let body = response.bytes().await.map_err(network_error)?;
-            parse_api_response_body(&body, requests, false)
-        }
-        .await;
         let (business_class, outcome_class) = qq_upstream_classification(&outcome);
         UpstreamRequestSummary {
             provider: Platform::Qq,
@@ -1413,23 +1413,40 @@ fn platform_code(value: &Value) -> Option<i64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
-async fn retry_search_http_429<T, F, Fut>(
+async fn retry_search_rate_limits<T, F, Fut>(
     mut attempt: F,
     retry_delay: Duration,
-) -> Result<(StatusCode, T, u8)>
+) -> Result<(StatusCode, Result<T>, u8)>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<(StatusCode, T)>>,
+    Fut: Future<Output = Result<(StatusCode, Result<T>)>>,
 {
     for attempt_index in 0..QQ_SEARCH_MAX_ATTEMPTS {
-        let (status, response) = attempt().await?;
+        let (status, outcome) = attempt().await?;
         let retry_count = attempt_index;
-        if status != StatusCode::TOO_MANY_REQUESTS || attempt_index + 1 == QQ_SEARCH_MAX_ATTEMPTS {
-            return Ok((status, response, retry_count));
+        let business_rate_limit = status.is_success()
+            && outcome
+                .as_ref()
+                .is_err_and(|error| error.code == ErrorCode::RateLimited && error.retryable);
+        if (status != StatusCode::TOO_MANY_REQUESTS && !business_rate_limit)
+            || attempt_index + 1 == QQ_SEARCH_MAX_ATTEMPTS
+        {
+            return Ok((status, outcome, retry_count));
         }
         tokio::time::sleep(retry_delay).await;
     }
     unreachable!("QQ search attempt limit is positive")
+}
+
+fn search_http_error(status: StatusCode) -> TuneWeaveError {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        TuneWeaveError::new(ErrorCode::RateLimited, "QQ search was rate limited")
+            .with_platform(Platform::Qq)
+            .retryable(true)
+            .with_details(json!({"http_status":status.as_u16()}))
+    } else {
+        http_error(status)
+    }
 }
 
 async fn with_qq_search_timeout<T, Fut>(timeout: Duration, future: Fut) -> Result<T>
@@ -1483,11 +1500,16 @@ mod tests {
     async fn typed_search_retries_http_429_then_returns_success() {
         let mut statuses = [StatusCode::TOO_MANY_REQUESTS, StatusCode::OK].into_iter();
         let mut calls = 0;
-        let (status, response, retry_count) = retry_search_http_429(
+        let (status, outcome, retry_count) = retry_search_rate_limits(
             || {
                 calls += 1;
                 let status = statuses.next().expect("a scripted status");
-                async move { Ok((status, "response")) }
+                let outcome = if status == StatusCode::TOO_MANY_REQUESTS {
+                    Err(search_http_error(status))
+                } else {
+                    Ok("response")
+                };
+                async move { Ok((status, outcome)) }
             },
             Duration::ZERO,
         )
@@ -1496,17 +1518,22 @@ mod tests {
 
         assert_eq!(calls, 2);
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(response, "response");
+        assert_eq!(outcome.unwrap(), "response");
         assert_eq!(retry_count, 1);
     }
 
     #[tokio::test]
     async fn typed_search_stops_after_thirty_http_429_responses() {
         let mut calls = 0;
-        let (status, (), retry_count) = retry_search_http_429(
+        let (status, outcome, retry_count) = retry_search_rate_limits::<(), _, _>(
             || {
                 calls += 1;
-                async { Ok((StatusCode::TOO_MANY_REQUESTS, ())) }
+                async {
+                    Ok((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Err(search_http_error(StatusCode::TOO_MANY_REQUESTS)),
+                    ))
+                }
             },
             Duration::ZERO,
         )
@@ -1516,15 +1543,23 @@ mod tests {
         assert_eq!(calls, 30);
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(retry_count, 29);
+        let error = outcome.unwrap_err();
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert!(error.retryable);
     }
 
     #[tokio::test]
     async fn typed_search_does_not_retry_non_429_http_errors() {
         let mut calls = 0;
-        let (status, (), retry_count) = retry_search_http_429(
+        let (status, outcome, retry_count) = retry_search_rate_limits::<(), _, _>(
             || {
                 calls += 1;
-                async { Ok((StatusCode::INTERNAL_SERVER_ERROR, ())) }
+                async {
+                    Ok((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Err(http_error(StatusCode::INTERNAL_SERVER_ERROR)),
+                    ))
+                }
             },
             Duration::ZERO,
         )
@@ -1533,6 +1568,129 @@ mod tests {
 
         assert_eq!(calls, 1);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::UpstreamError);
+        assert_eq!(retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn typed_search_retries_known_business_rate_limits_then_returns_success() {
+        let mut limited = true;
+        let mut calls = 0;
+        let (status, outcome, retry_count) = retry_search_rate_limits(
+            || {
+                calls += 1;
+                let outcome = if std::mem::take(&mut limited) {
+                    Err(TuneWeaveError::new(
+                        ErrorCode::RateLimited,
+                        "scripted QQ business rate limit",
+                    )
+                    .with_platform(Platform::Qq)
+                    .retryable(true)
+                    .with_details(json!({"platform_code":2001})))
+                } else {
+                    Ok("response")
+                };
+                async move { Ok((StatusCode::OK, outcome)) }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("business rate limit is retried");
+
+        assert_eq!(calls, 2);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(outcome.unwrap(), "response");
+        assert_eq!(retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn typed_search_retries_retryable_business_rate_limit_without_platform_code() {
+        let mut limited = true;
+        let mut calls = 0;
+        let (status, outcome, retry_count) = retry_search_rate_limits(
+            || {
+                calls += 1;
+                let outcome = if std::mem::take(&mut limited) {
+                    Err(TuneWeaveError::new(
+                        ErrorCode::RateLimited,
+                        "scripted QQ business rate limit",
+                    )
+                    .with_platform(Platform::Qq)
+                    .retryable(true))
+                } else {
+                    Ok("response")
+                };
+                async move { Ok((StatusCode::OK, outcome)) }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("retryable business rate limit is retried without a platform code");
+
+        assert_eq!(calls, 2);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(outcome.unwrap(), "response");
+        assert_eq!(retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn typed_search_stops_after_thirty_business_rate_limits() {
+        let mut calls = 0;
+        let (status, outcome, retry_count) = retry_search_rate_limits::<(), _, _>(
+            || {
+                calls += 1;
+                async {
+                    Ok((
+                        StatusCode::OK,
+                        Err(TuneWeaveError::new(
+                            ErrorCode::RateLimited,
+                            "scripted QQ business rate limit",
+                        )
+                        .with_platform(Platform::Qq)
+                        .retryable(true)
+                        .with_details(json!({"platform_code":2001}))),
+                    ))
+                }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("final business rate limit is returned");
+
+        assert_eq!(calls, 30);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry_count, 29);
+        let error = outcome.unwrap_err();
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert_eq!(error.details["platform_code"], 2001);
+    }
+
+    #[tokio::test]
+    async fn typed_search_does_not_retry_other_business_errors() {
+        let mut calls = 0;
+        let (status, outcome, retry_count) = retry_search_rate_limits::<(), _, _>(
+            || {
+                calls += 1;
+                async {
+                    Ok((
+                        StatusCode::OK,
+                        Err(TuneWeaveError::new(
+                            ErrorCode::PermissionDenied,
+                            "scripted QQ permission error",
+                        )
+                        .with_platform(Platform::Qq)
+                        .with_details(json!({"platform_code":20450}))),
+                    ))
+                }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("non-rate-limit business error returns immediately");
+
+        assert_eq!(calls, 1);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::PermissionDenied);
         assert_eq!(retry_count, 0);
     }
 
@@ -1554,10 +1712,10 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let task_calls = Arc::clone(&calls);
         let task = tokio::spawn(async move {
-            retry_search_http_429(
+            retry_search_rate_limits(
                 || {
                     task_calls.fetch_add(1, Ordering::SeqCst);
-                    std::future::pending::<Result<(StatusCode, ())>>()
+                    std::future::pending::<Result<(StatusCode, Result<()>)>>()
                 },
                 Duration::ZERO,
             )
