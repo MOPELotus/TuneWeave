@@ -2689,6 +2689,27 @@ impl MusicProvider for NeteaseProvider {
                 json!({
                     "uid": user_id,
                     "limit": limit,
+                    "offset": 0,
+                    "includeVideo": true
+                }),
+            )
+            .await?;
+        ensure_success(&response.body)?;
+        let response: UserPlaylistsEnvelope = parse_body(response.body)?;
+        if !response.more {
+            return map_complete_user_playlists(response, limit, request.offset);
+        }
+
+        if request.offset == 0 {
+            return map_user_playlists(response, limit, 0);
+        }
+
+        let response = client
+            .request_weapi(
+                "/api/user/playlist",
+                json!({
+                    "uid": user_id,
+                    "limit": limit,
                     "offset": request.offset,
                     "includeVideo": true
                 }),
@@ -10860,6 +10881,20 @@ fn map_user_playlists(
     })
 }
 
+fn map_complete_user_playlists(
+    response: UserPlaylistsEnvelope,
+    limit: u32,
+    offset: u32,
+) -> Result<Page<Playlist>> {
+    let items = response
+        .playlist
+        .into_iter()
+        .map(map_playlist)
+        .collect::<Result<Vec<_>>>()?;
+    let (items, pagination) = select_page(items, limit, offset);
+    Ok(Page { items, pagination })
+}
+
 fn map_subscribed_albums_response(
     raw: Value,
     request: &PageRequest,
@@ -12164,6 +12199,9 @@ fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
     let Some(mut parsed) = Url::parse(&url).ok() else {
         return (url, Vec::new());
     };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return (url, Vec::new());
+    }
     let Some(host) = parsed.host_str() else {
         return (url, Vec::new());
     };
@@ -12178,6 +12216,9 @@ fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
     }
     let compatible_host = format!("{prefix}c.music.126.net");
     if parsed.set_host(Some(&compatible_host)).is_err() {
+        return (url, Vec::new());
+    }
+    if parsed.scheme() == "http" && parsed.set_scheme("https").is_err() {
         return (url, Vec::new());
     }
     let compatible = parsed.to_string();
@@ -27975,28 +28016,42 @@ mod tests {
     }
 
     #[test]
-    fn maps_netease_cdn_compatibility_url_with_original_backup() {
-        let (url, backups) = netease_media_url_variants(
-            "https://m801.music.126.net/song/path.flac?auth=opaque".to_owned(),
-        );
+    fn netease_media_url_variants_upgrades_http_cdn_url_and_preserves_backup() {
+        let original = "http://m801.music.126.net/song/path.flac?auth=opaque";
+        let (primary, backups) = netease_media_url_variants(original.to_owned());
         assert_eq!(
-            url,
+            primary,
             "https://m801c.music.126.net/song/path.flac?auth=opaque"
         );
+        assert_eq!(backups, vec![original]);
+    }
+
+    #[test]
+    fn netease_media_url_variants_keeps_https_and_rejects_invalid_hosts() {
+        let original = "https://m801.music.126.net/song/path.flac?auth=opaque";
+        let (primary, backups) = netease_media_url_variants(original.to_owned());
         assert_eq!(
-            backups,
-            vec!["https://m801.music.126.net/song/path.flac?auth=opaque"]
+            primary,
+            "https://m801c.music.126.net/song/path.flac?auth=opaque"
         );
+        assert_eq!(backups, vec![original]);
 
-        let (url, backups) =
-            netease_media_url_variants("https://m801c.music.126.net/song/path.flac".to_owned());
-        assert_eq!(url, "https://m801c.music.126.net/song/path.flac");
+        let compatible = "https://m801c.music.126.net/song/path.flac";
+        let (primary, backups) = netease_media_url_variants(compatible.to_owned());
+        assert_eq!(primary, compatible);
         assert!(backups.is_empty());
 
-        let (url, backups) =
-            netease_media_url_variants("https://audio.example.test/song.flac".to_owned());
-        assert_eq!(url, "https://audio.example.test/song.flac");
-        assert!(backups.is_empty());
+        for input in [
+            "https://audio.example.test/song.flac",
+            "http://m801.music.126.net.evil.test/song.mp3",
+            "https://mabc.music.126.net/song.mp3",
+            "https://m801.music.126.net@evil.test/song.mp3",
+            "ftp://m801.music.126.net/song.mp3",
+        ] {
+            let (primary, backups) = netease_media_url_variants(input.to_owned());
+            assert_eq!(primary, input);
+            assert!(backups.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -30964,6 +31019,31 @@ mod tests {
         assert_eq!(page.items[1].subscribed, Some(true));
         assert_eq!(page.pagination.offset, 4);
         assert_eq!(page.pagination.next_offset, Some(6));
+        assert!(page.pagination.has_more);
+    }
+
+    #[test]
+    fn paginates_complete_account_playlist_directory_locally() {
+        let response: UserPlaylistsEnvelope = serde_json::from_value(json!({
+            "playlist": [
+                { "id": 1, "name": "first" },
+                { "id": 2, "name": "second" },
+                { "id": 3, "name": "third" },
+                { "id": 4, "name": "fourth" }
+            ],
+            "more": false
+        }))
+        .expect("complete user playlists fixture");
+
+        let page = map_complete_user_playlists(response, 2, 1)
+            .expect("paginate complete user playlist directory");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].resource_ref.to_string(), "netease:2");
+        assert_eq!(page.items[1].resource_ref.to_string(), "netease:3");
+        assert_eq!(page.pagination.limit, 2);
+        assert_eq!(page.pagination.offset, 1);
+        assert_eq!(page.pagination.total, Some(4));
+        assert_eq!(page.pagination.next_offset, Some(3));
         assert!(page.pagination.has_more);
     }
 
