@@ -7115,7 +7115,7 @@ impl QqProvider {
                 )
             })
             .collect::<Vec<_>>();
-        let responses = self.client.request_android(&requests).await?;
+        let responses = self.client.request_android_search(&requests).await?;
         Ok(TypedSearchBatch {
             limit,
             skip,

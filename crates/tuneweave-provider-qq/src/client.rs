@@ -1,8 +1,9 @@
 use std::{
     fmt,
+    future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -26,6 +27,9 @@ const SIGNED_API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const QUICK_SEARCH_ENDPOINT: &str = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
 const ANDROID_USER_AGENT: &str = "QQMusic 14090008(android 10)";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const QQ_SEARCH_MAX_ATTEMPTS: u8 = 30;
+const QQ_SEARCH_RETRY_DELAY: Duration = Duration::from_millis(100);
+const QQ_SEARCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Default)]
 pub struct QqConfig {
@@ -266,6 +270,26 @@ impl QqClient {
         requests: &[QqApiRequest],
     ) -> Result<Vec<QqApiResponse>> {
         self.request_android_with_credential(requests, None).await
+    }
+
+    pub(crate) async fn request_android_search(
+        &self,
+        requests: &[QqApiRequest],
+    ) -> Result<Vec<QqApiResponse>> {
+        if requests.is_empty() {
+            return Err(TuneWeaveError::invalid_request(
+                "QQ API batch must contain at least one request",
+            )
+            .with_platform(Platform::Qq));
+        }
+
+        with_qq_search_timeout(QQ_SEARCH_TOTAL_TIMEOUT, async {
+            self.ensure_android_session().await?;
+            let device = self.lock_device()?.device().clone();
+            let comm = android_comm(&device, None);
+            self.post_api_search_with_429_retry(&comm, requests).await
+        })
+        .await
     }
 
     pub(crate) async fn request_android_with_credential(
@@ -839,6 +863,66 @@ impl QqClient {
         outcome
     }
 
+    async fn post_api_search_with_429_retry(
+        &self,
+        comm: &Value,
+        requests: &[QqApiRequest],
+    ) -> Result<Vec<QqApiResponse>> {
+        let mut payload = Map::new();
+        payload.insert("comm".to_owned(), comm.clone());
+        for (index, request) in requests.iter().enumerate() {
+            payload.insert(
+                format!("req_{index}"),
+                json!({
+                    "module": request.module,
+                    "method": request.method,
+                    "param": request_param(request)
+                }),
+            );
+        }
+        let payload = Value::Object(payload);
+        let started = Instant::now();
+        let (status, response, retry_count) = retry_search_http_429(
+            || async {
+                let response = self
+                    .http
+                    .post(API_ENDPOINT)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(network_error)?;
+                Ok((response.status(), response))
+            },
+            QQ_SEARCH_RETRY_DELAY,
+        )
+        .await?;
+        let outcome = async {
+            if !status.is_success() {
+                return Err(http_error(status));
+            }
+            let body = response.bytes().await.map_err(network_error)?;
+            parse_api_response_body(&body, requests, false)
+        }
+        .await;
+        let (business_class, outcome_class) = qq_upstream_classification(&outcome);
+        UpstreamRequestSummary {
+            provider: Platform::Qq,
+            operation: "typed_search",
+            upstream_host: "u.y.qq.com",
+            endpoint: "/cgi-bin/musicu.fcg",
+            http_status: Some(status.as_u16()),
+            business_class,
+            duration: started.elapsed(),
+            batch_size: Some(requests.len()),
+            retry_count,
+            proxy: self.proxy_configured,
+            fallback: false,
+            outcome: outcome_class,
+        }
+        .emit();
+        outcome
+    }
+
     fn log_upstream_request(
         &self,
         operation: &'static str,
@@ -1329,6 +1413,36 @@ fn platform_code(value: &Value) -> Option<i64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
+async fn retry_search_http_429<T, F, Fut>(
+    mut attempt: F,
+    retry_delay: Duration,
+) -> Result<(StatusCode, T, u8)>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(StatusCode, T)>>,
+{
+    for attempt_index in 0..QQ_SEARCH_MAX_ATTEMPTS {
+        let (status, response) = attempt().await?;
+        let retry_count = attempt_index;
+        if status != StatusCode::TOO_MANY_REQUESTS || attempt_index + 1 == QQ_SEARCH_MAX_ATTEMPTS {
+            return Ok((status, response, retry_count));
+        }
+        tokio::time::sleep(retry_delay).await;
+    }
+    unreachable!("QQ search attempt limit is positive")
+}
+
+async fn with_qq_search_timeout<T, Fut>(timeout: Duration, future: Fut) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    tokio::time::timeout(timeout, future).await.map_err(|_| {
+        TuneWeaveError::new(ErrorCode::UpstreamTimeout, "QQ search request timed out")
+            .with_platform(Platform::Qq)
+            .retryable(true)
+    })?
+}
+
 fn network_error(error: reqwest::Error) -> TuneWeaveError {
     let code = if error.is_timeout() {
         ErrorCode::UpstreamTimeout
@@ -1363,6 +1477,100 @@ fn qq_data_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn typed_search_retries_http_429_then_returns_success() {
+        let mut statuses = [StatusCode::TOO_MANY_REQUESTS, StatusCode::OK].into_iter();
+        let mut calls = 0;
+        let (status, response, retry_count) = retry_search_http_429(
+            || {
+                calls += 1;
+                let status = statuses.next().expect("a scripted status");
+                async move { Ok((status, "response")) }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("search sequence succeeds");
+
+        assert_eq!(calls, 2);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, "response");
+        assert_eq!(retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn typed_search_stops_after_thirty_http_429_responses() {
+        let mut calls = 0;
+        let (status, (), retry_count) = retry_search_http_429(
+            || {
+                calls += 1;
+                async { Ok((StatusCode::TOO_MANY_REQUESTS, ())) }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("final rate-limit response is returned");
+
+        assert_eq!(calls, 30);
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_count, 29);
+    }
+
+    #[tokio::test]
+    async fn typed_search_does_not_retry_non_429_http_errors() {
+        let mut calls = 0;
+        let (status, (), retry_count) = retry_search_http_429(
+            || {
+                calls += 1;
+                async { Ok((StatusCode::INTERNAL_SERVER_ERROR, ())) }
+            },
+            Duration::ZERO,
+        )
+        .await
+        .expect("non-429 response is returned immediately");
+
+        assert_eq!(calls, 1);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn typed_search_total_timeout_returns_upstream_timeout() {
+        let error = with_qq_search_timeout(
+            Duration::from_millis(1),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .expect_err("pending search exceeds its total timeout");
+
+        assert_eq!(error.code, ErrorCode::UpstreamTimeout);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn typed_search_retry_future_stops_when_cancelled() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task_calls = Arc::clone(&calls);
+        let task = tokio::spawn(async move {
+            retry_search_http_429(
+                || {
+                    task_calls.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<Result<(StatusCode, ())>>()
+                },
+                Duration::ZERO,
+            )
+            .await
+        });
+
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        assert!(task.await.expect_err("task is aborted").is_cancelled());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn zzc_signature_matches_independent_python_vectors() {
