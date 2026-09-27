@@ -16,8 +16,15 @@ fn safe_tracker_shape(bytes: &[u8]) -> Value {
         "error_code",
         "errcode",
         "hash",
+        "std_hash",
+        "std_hash_time",
+        "is_hash_backup",
+        "quality_demotion",
+        "is_quality_demotion",
         "album_audio_id",
+        "albumAudioId",
         "album_id",
+        "albumId",
         "url",
         "backupUrl",
         "timeLength",
@@ -155,6 +162,15 @@ impl Selection {
             }
         };
         let hash_match = data.hash.eq_ignore_ascii_case(&self.spec.hash);
+        let std_hash_match = data
+            .std_hash
+            .as_deref()
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.spec.hash));
+        let expected_duration = self
+            .spec
+            .duration_ms
+            .filter(|duration| *duration > 0)
+            .or(self.track.duration_ms.filter(|duration| *duration > 0));
         let audio_id_match = data
             .album_audio_id
             .is_none_or(|id| id.0.to_string() == self.track.id);
@@ -167,6 +183,19 @@ impl Selection {
                 Some(&status),
                 &[
                     ("hash_match", hash_match),
+                    ("std_hash_present", data.std_hash.is_some()),
+                    ("std_hash_match", std_hash_match),
+                    ("std_hash_time_present", data.std_hash_time.is_some()),
+                    (
+                        "standard_quality",
+                        self.spec.actual_quality == Quality::Standard,
+                    ),
+                    ("identity_hash_match", hash_match),
+                    ("hash_backup_present", data.is_hash_backup.is_some()),
+                    (
+                        "hash_backup_marked",
+                        data.is_hash_backup.is_some_and(|value| value.0 != 0),
+                    ),
                     ("audio_id_present", data.album_audio_id.is_some()),
                     ("audio_id_match", audio_id_match),
                     ("album_id_present", data.album_id.is_some()),
@@ -185,12 +214,7 @@ impl Selection {
             );
             return Err(denied("KuGou media requires additional authorization"));
         }
-        let Some(expected_duration) = self
-            .spec
-            .duration_ms
-            .filter(|n| *n > 0)
-            .or(self.track.duration_ms.filter(|n| *n > 0))
-        else {
+        let Some(expected_duration) = expected_duration else {
             #[cfg(debug_assertions)]
             diagnostic_tracker_failure(
                 "expected_duration",
@@ -515,6 +539,12 @@ impl From<UrlList> for Urls {
 #[derive(Deserialize)]
 struct Tracker {
     hash: String,
+    #[serde(default)]
+    std_hash: Option<String>,
+    #[serde(default)]
+    std_hash_time: Option<Number>,
+    #[serde(default)]
+    is_hash_backup: Option<Number>,
     album_audio_id: Option<Number>,
     album_id: Option<Number>,
     url: Urls,

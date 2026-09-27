@@ -81,11 +81,31 @@ fn current_v3_envelope_requires_explicit_success_count_version_and_info() {
     let mut without_status = empty.clone();
     without_status.as_object_mut().unwrap().remove("status");
     assert_eq!(decode(&without_status).unwrap().total, 0);
-    for missing in ["count", "list_ver", "info"] {
+    for missing in ["count", "list_ver"] {
         let mut v = empty.clone();
         v["data"].as_object_mut().unwrap().remove(missing);
         assert!(decode(&v).is_err(), "{missing}");
     }
+    let mut missing_empty_info = empty.clone();
+    missing_empty_info["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("info");
+    assert_eq!(decode(&missing_empty_info).unwrap().total, 0);
+    let mut null_empty_info = empty.clone();
+    null_empty_info["data"]["info"] = Value::Null;
+    assert_eq!(decode(&null_empty_info).unwrap().total, 0);
+    let mut missing_nonempty_info = fixture(vec![row(1)]);
+    missing_nonempty_info["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("info");
+    let missing_nonempty_info = decode(&missing_nonempty_info).err().unwrap();
+    assert_eq!(
+        missing_nonempty_info.details["response_stage"],
+        "track_data_schema"
+    );
+    assert_eq!(missing_nonempty_info.details["response_fields"][0], "info");
     for (field, value) in [
         ("status", json!(0)),
         ("status", Value::Null),
@@ -107,6 +127,42 @@ fn current_v3_envelope_requires_explicit_success_count_version_and_info() {
     let legacy =
         json!({"status":1,"error_code":0,"data":{"count":0,"list_info":{"list_ver":3},"songs":[]}});
     assert!(decode(&legacy).is_err());
+}
+
+#[test]
+fn rejected_track_pages_expose_only_a_bounded_response_stage() {
+    let malformed_json = parse(b"not-json", "123456789", 7, 1, 1).err().unwrap();
+    assert_eq!(malformed_json.details["response_stage"], "envelope_json");
+
+    let mut missing_data = fixture(vec![]);
+    missing_data.as_object_mut().unwrap().remove("data");
+    let missing_data = decode(&missing_data).err().unwrap();
+    assert_eq!(missing_data.details["response_stage"], "track_data_missing");
+
+    let rejected = json!({"status":0,"error_code":20010,"data":{"token":"must-not-leak"}});
+    let rejected = decode(&rejected).err().unwrap();
+    assert_eq!(rejected.details["response_stage"], "business_status");
+    assert_eq!(rejected.details["platform_code"], 20010);
+    assert!(!format!("{rejected:?}").contains("must-not-leak"));
+
+    let mut invalid_row = fixture(vec![row(1)]);
+    invalid_row["data"]["info"][0]["fileid"] = json!({"private":"must-not-leak"});
+    let invalid_row = decode(&invalid_row).err().unwrap();
+    assert_eq!(invalid_row.details["response_stage"], "track_data_schema");
+    assert!(!format!("{invalid_row:?}").contains("must-not-leak"));
+}
+
+#[test]
+fn track_row_identity_conflicts_keep_the_conflict_code_with_safe_stage() {
+    let mut conflicting_album = fixture(vec![row(1)]);
+    conflicting_album["data"]["info"][0]["albuminfo"]["id"] = json!(301);
+
+    let error = match decode(&conflicting_album) {
+        Ok(_) => panic!("conflicting album identities must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(error.details["response_stage"], "track_row");
 }
 
 #[test]

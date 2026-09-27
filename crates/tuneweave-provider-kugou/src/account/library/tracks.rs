@@ -27,7 +27,7 @@ struct WireTracks {
     count: Number,
     page: Option<Number>,
     pagesize: Option<Number>,
-    info: Vec<WireTrack>,
+    info: Option<Vec<WireTrack>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,57 +129,75 @@ impl KugouClient {
 
 fn parse(bytes: &[u8], uid: &str, list_id: u64, kind: u8, page: u32) -> Result<TrackPage> {
     // Some current v3 clients receive error_code=0 without status. An explicit failure
-    // always wins, and absence of either a version, count or info array is not empty success.
+    // always wins; a missing info array is empty only when the upstream count is zero.
     let status: TrackEnvelope<IgnoredAny> =
-        serde_json::from_slice(bytes).map_err(|_| malformed())?;
+        serde_json::from_slice(bytes).map_err(|_| malformed_at("envelope_json"))?;
     if status.status.is_some_and(|v| v != 1) || status.error_code != 0 {
         let code = if status.error_code == 20017 {
             ErrorCode::AuthenticationRequired
         } else {
             ErrorCode::UpstreamError
         };
-        return Err(error(code, "KuGou native track list request was rejected")
-            .with_details(json!({"platform_code": status.error_code})));
+        return Err(
+            error(code, "KuGou native track list request was rejected").with_details(json!({
+                "response_stage": "business_status",
+                "platform_code": status.error_code
+            })),
+        );
     }
     let envelope: TrackEnvelope<WireTracks> =
-        serde_json::from_slice(bytes).map_err(|_| malformed())?;
-    let wire = envelope.data.ok_or_else(malformed)?;
+        serde_json::from_slice(bytes).map_err(|_| malformed_at("track_data_schema"))?;
+    let wire = envelope
+        .data
+        .ok_or_else(|| malformed_at("track_data_missing"))?;
     if wire.userid.is_some_and(|v| v.0.to_string() != uid)
         || wire.listid.is_some_and(|v| v.0 != list_id)
         || wire.kind.is_some_and(|v| v.0 != u64::from(kind))
     {
         return Err(identity_conflict());
     }
-    if wire.info.len() > TRACK_PAGE_SIZE
+    let info = match wire.info {
+        Some(info) => info,
+        None if wire.count.0 == 0 => Vec::new(),
+        None => {
+            return Err(malformed_at("track_data_schema").with_details(json!({
+                "response_stage": "track_data_schema",
+                "response_fields": ["info"],
+            })));
+        }
+    };
+    if info.len() > TRACK_PAGE_SIZE
         || wire.page.is_some_and(|v| v.0 != u64::from(page))
         || wire.pagesize.is_some_and(|v| v.0 != TRACK_PAGE_SIZE as u64)
     {
         return Err(malformed());
     }
     let mut seen = BTreeSet::new();
-    let rows = wire
-        .info
+    let rows = info
         .into_iter()
         .map(|entry| {
-            let file_id = positive(entry.fileid)?;
+            let file_id = positive(entry.fileid).map_err(|_| malformed_at("track_row"))?;
             if !seen.insert(file_id) {
-                return Err(malformed());
+                return Err(malformed_at("track_row"));
             }
             let sort = entry.sort.map(|v| v.0);
-            let mut content = serde_json::to_value(&entry).map_err(|_| malformed())?;
+            let mut content =
+                serde_json::to_value(&entry).map_err(|_| malformed_at("track_row"))?;
             content
                 .as_object_mut()
-                .ok_or_else(malformed)?
+                .ok_or_else(|| malformed_at("track_row"))?
                 .remove("sort");
             let metadata_fingerprint = format!(
                 "{:x}",
-                Md5::digest(serde_json::to_vec(&content).map_err(|_| malformed())?)
+                Md5::digest(serde_json::to_vec(&content).map_err(|_| malformed_at("track_row"))?)
             );
+            let track =
+                map_track(entry).map_err(|error| with_response_stage(error, "track_row"))?;
             Ok(TrackRow {
                 file_id,
                 metadata_fingerprint,
                 sort,
-                track: map_track(entry)?,
+                track,
             })
         })
         .collect::<Result<_>>()?;
@@ -188,6 +206,18 @@ fn parse(bytes: &[u8], uid: &str, list_id: u64, kind: u8, page: u32) -> Result<T
         total: wire.count.0,
         rows,
     })
+}
+
+fn malformed_at(response_stage: &'static str) -> TuneWeaveError {
+    with_response_stage(malformed(), response_stage)
+}
+
+fn with_response_stage(mut error: TuneWeaveError, response_stage: &'static str) -> TuneWeaveError {
+    if !error.details.is_object() {
+        error.details = json!({});
+    }
+    error.details["response_stage"] = json!(response_stage);
+    error
 }
 
 fn optional_id(value: Option<Number>) -> Option<u64> {

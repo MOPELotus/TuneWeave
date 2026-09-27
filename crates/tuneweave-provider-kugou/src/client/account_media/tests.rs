@@ -117,6 +117,42 @@ fn authorized_media_rejects_wrong_identity_unsupported_encryption_and_secret_ech
 }
 
 #[test]
+fn standard_media_rejects_catalogue_std_hash_when_response_hash_differs() {
+    let mut body = tracker();
+    body["hash"] = json!("ffffffffffffffffffffffffffffffff");
+    body["std_hash"] = json!("abcdef0123456789abcdef0123456789");
+    // This field is not the media duration; timeLength remains the independent
+    // duration check for the returned file.
+    body["std_hash_time"] = json!(42);
+
+    assert!(mapped(body, Behavior::Play).is_err());
+}
+
+#[test]
+fn std_hash_alias_is_rejected_for_nonstandard_assets() {
+    let mut track = track();
+    track.extensions.get_mut("qualities").unwrap()["high"] = json!({
+        "hash":"fedcba9876543210fedcba9876543210",
+        "format":"mp3",
+        "bitrate":320,
+        "duration_ms":123456
+    });
+    let request = StreamRequest {
+        quality: Quality::High,
+        ..Default::default()
+    };
+    let mut body = tracker();
+    body["hash"] = json!("ffffffffffffffffffffffffffffffff");
+    body["std_hash"] = json!("fedcba9876543210fedcba9876543210");
+
+    let error = Selection::new(track, &request)
+        .unwrap()
+        .map(tracker_response(body), Behavior::Play)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UpstreamError);
+}
+
+#[test]
 fn lossless_selection_never_labels_a_compressed_response_as_lossless() {
     let mut track = track();
     track.extensions.get_mut("qualities").unwrap()["lossless"] =
