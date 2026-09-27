@@ -15,6 +15,23 @@ fn mapped(body: Value, behavior: Behavior) -> Result<MediaStream> {
     Selection::new(track(), &StreamRequest::default())?.map(tracker_response(body), behavior)
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn tracker_shape_failure_fixture_exposes_types_without_values() {
+    let mut body = tracker();
+    body["fileSize"] = json!({"private_field": "fixture-secret-marker"});
+    body["url"] = json!(["https://fixture.invalid/audio?token=fixture-url-marker"]);
+
+    let bytes = body.to_string().into_bytes();
+    let summary = safe_tracker_shape(&bytes).to_string();
+    assert!(summary.contains("\"fileSize\":\"object\""));
+    assert!(summary.contains("\"url\":\"array\""));
+    assert!(!summary.contains("fixture-secret-marker"));
+    assert!(!summary.contains("fixture-url-marker"));
+    assert!(!summary.contains("fixture.invalid"));
+    assert!(mapped(body, Behavior::Play).is_err());
+}
+
 #[test]
 fn authorized_media_reports_actual_file_metadata_and_deduplicates_only_trusted_urls() {
     let stream = mapped(tracker(), Behavior::Play).unwrap();

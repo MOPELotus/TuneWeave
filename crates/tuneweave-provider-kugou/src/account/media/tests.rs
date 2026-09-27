@@ -2,6 +2,19 @@ use super::*;
 use crate::account::tests::{frame, ok, server, session};
 
 const HASH: &str = "ABCDEF0123456789ABCDEF0123456789";
+
+#[cfg(debug_assertions)]
+#[test]
+fn auth_shape_diagnostics_report_structure_without_secret_values() {
+    let body = br#"{"status":"success-shaped","data":{"auth":"private-auth","userid":123},"error_code":0}"#;
+    let summary = safe_auth_diagnostic(body).to_string();
+    assert!(summary.contains("\"status\":\"string\""));
+    assert!(summary.contains("\"auth\":\"string\""));
+    assert!(summary.contains("\"error_code\":0"));
+    assert!(!summary.contains("success-shaped"));
+    assert!(!summary.contains("private-auth"));
+}
+
 pub(crate) fn tracker_response(value: Value) -> TrackerResponse {
     TrackerResponse {
         bytes: value.to_string().into_bytes(),
@@ -112,6 +125,9 @@ async fn native_media_auth_chain_uses_exact_clients_session_device_and_separate_
                 .into_iter()
                 .enumerate()
             {
+                let headers = requests[index].to_ascii_lowercase();
+                assert!(headers.contains("kg-thash: 5d816a0\r\n"));
+                assert!(headers.contains(&format!("kg-rf: {}\r\n", KG_RF.to_ascii_lowercase())));
                 let p = query(&requests[index], path, kind);
                 assert_eq!(p["dfid"], session.device.dfid());
                 assert_eq!(p["mid"], session.device.mid);
@@ -287,6 +303,30 @@ async fn account_auth_transport_never_follows_redirects_and_bounds_response_type
         );
         assert_eq!(requests.await.unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn user_authorization_accepts_json_with_legacy_html_content_type() {
+    let session = session(KugouLoginClient::Standard);
+    let body = json!({
+        "status": 1,
+        "data": {
+            "auth": "synthetic-user-auth",
+            "userid": 123456789,
+            "module_id": 51
+        }
+    });
+    let (client, requests) = server(vec![frame(
+        200,
+        "Content-Type: text/html\r\n",
+        body.to_string().into_bytes(),
+    )])
+    .await;
+
+    let authorization = client.native_user_authorization(&session).await.unwrap();
+
+    assert_eq!(authorization.auth, "synthetic-user-auth");
+    assert_eq!(requests.await.unwrap().len(), 1);
 }
 
 #[test]

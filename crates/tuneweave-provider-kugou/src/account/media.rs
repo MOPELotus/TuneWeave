@@ -4,6 +4,8 @@ use super::*;
 use md5::{Digest, Md5};
 
 const AUTH_HOST: &str = "trackercdngz.kugou.com";
+const KG_THASH: &str = "5d816a0";
+const KG_RF: &str = "B9EDA08A64250DEFFBCADDEE00F8F25F";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Behavior {
@@ -92,6 +94,18 @@ impl Status {
 }
 
 fn auth_data(bytes: &[u8], session: &NativeSession) -> Result<AuthData> {
+    let result = auth_data_inner(bytes, session);
+    if result.is_err() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DIAGNOSTIC kugou_media_auth_shape={}",
+            safe_auth_diagnostic(bytes)
+        );
+    }
+    result
+}
+
+fn auth_data_inner(bytes: &[u8], session: &NativeSession) -> Result<AuthData> {
     let status = Status::parse(bytes)?;
     if status.status != 1 || status.code() != 0 {
         return Err(status.rejection());
@@ -113,6 +127,49 @@ fn auth_data(bytes: &[u8], session: &NativeSession) -> Result<AuthData> {
         return Err(identity_conflict());
     }
     Ok(data)
+}
+
+#[cfg(debug_assertions)]
+fn safe_auth_shape(value: &Value) -> Value {
+    fn fields(value: &Value) -> Value {
+        let Some(object) = value.as_object() else {
+            return json!({"type":match value { Value::Null=>"null", Value::Bool(_)=>"bool", Value::Number(_)=>"number", Value::String(_)=>"string", Value::Array(_)=>"array", Value::Object(_)=>"object" }});
+        };
+        let mut result = serde_json::Map::new();
+        for (key, value) in object {
+            let kind = match value {
+                Value::Null => "null",
+                Value::Bool(_) => "bool",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            };
+            result.insert(key.clone(), json!(kind));
+        }
+        Value::Object(result)
+    }
+    let mut result = serde_json::Map::new();
+    result.insert("top_level".into(), fields(value));
+    if let Some(data) = value.get("data") {
+        result.insert("data_fields".into(), fields(data));
+    }
+    for name in ["status", "error_code", "errcode"] {
+        if let Some(field) = value.get(name)
+            && (field.is_number() || field.is_boolean())
+        {
+            result.insert(name.into(), field.clone());
+        }
+    }
+    Value::Object(result)
+}
+
+#[cfg(debug_assertions)]
+fn safe_auth_diagnostic(bytes: &[u8]) -> Value {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .map(|value| safe_auth_shape(&value))
+        .unwrap_or_else(|| json!({"kind":"non_json","bytes":bytes.len()}))
 }
 
 fn hash(value: &str) -> Result<String> {
@@ -339,16 +396,77 @@ impl KugouClient {
                 .header("mid", &session.device.mid)
                 .header("clienttime", seconds)
                 .header("kg-rc", "1")
+                .header("kg-thash", KG_THASH)
                 .header("kg-rec", "1")
+                .header("kg-rf", KG_RF)
                 .query(&query)
                 .send()
                 .await
                 .map_err(network_error)?;
             status = Some(response.status());
-            let bytes = read_response_with_limit(response, RESPONSE_LIMIT).await?;
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim)
+                .filter(|value| {
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_graphic())
+                })
+                .map(str::to_owned)
+                .unwrap_or_else(|| "unknown".to_owned());
+            let http_status = status.map_or(0, |value| value.as_u16());
+            let json_content_type = content_type.eq_ignore_ascii_case("application/json");
+            let oversized_declared_body = response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|length| length > RESPONSE_LIMIT as u64);
+            let additional_verification_header = response
+                .headers()
+                .get("ssa-code")
+                .is_some_and(|value| value.as_bytes() != b"0" && !value.is_empty());
+            // The live auth endpoint returned HTTP 200 with a non-JSON MIME type.
+            // Allow text/html at the transport boundary, but continue to bound
+            // the body and require the strict JSON auth schema below.
+            let bytes = match read_response_with_types(
+                response,
+                RESPONSE_LIMIT,
+                &["application/json", "text/html"],
+            )
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "DIAGNOSTIC kugou_media_body_intake_error stage={path} http_status={http_status} json_content_type={json_content_type} oversized_declared_body={oversized_declared_body} additional_verification_header={additional_verification_header}"
+                    );
+                    return Err(error);
+                }
+            };
             // Log business rejection as a rejection, even when its HTTP status is 200.
-            let status = Status::parse(&bytes)?;
+            let status = match Status::parse(&bytes) {
+                Ok(status) => status,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "DIAGNOSTIC kugou_media_status_shape stage={path} http_status={} content_type={content_type} bytes={} shape={}",
+                        http_status,
+                        bytes.len(),
+                        safe_auth_diagnostic(&bytes)
+                    );
+                    return Err(error);
+                }
+            };
             if status.status != 1 || status.code() != 0 {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC kugou_media_status_rejection stage={path} http_status={http_status} platform_status={} platform_code={}",
+                    status.status,
+                    status.code()
+                );
                 return Err(status.rejection());
             }
             Ok(bytes)

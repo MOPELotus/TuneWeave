@@ -8,6 +8,71 @@ pub(crate) struct Selection {
     spec: SelectedMediaSpec,
     pub(crate) album_id: u64,
 }
+
+#[cfg(debug_assertions)]
+fn safe_tracker_shape(bytes: &[u8]) -> Value {
+    const FIELDS: &[&str] = &[
+        "status",
+        "error_code",
+        "errcode",
+        "hash",
+        "album_audio_id",
+        "album_id",
+        "url",
+        "backupUrl",
+        "timeLength",
+        "fileSize",
+        "bitRate",
+        "extName",
+        "fail_process",
+        "hash_offset",
+    ];
+
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return json!({"json": false});
+    };
+    let mut fields = serde_json::Map::new();
+    for name in FIELDS {
+        fields.insert(
+            (*name).into(),
+            json!(value.get(*name).map(kind).unwrap_or("missing")),
+        );
+    }
+    json!({"json": true, "field_types": fields})
+}
+
+#[cfg(debug_assertions)]
+fn diagnostic_tracker_failure(
+    stage: &'static str,
+    bytes: &[u8],
+    status: Option<&Status>,
+    checks: &[(&'static str, bool)],
+) {
+    let status_parsed = status.is_some();
+    let platform_status = status.map_or(-1, |value| value.status);
+    let platform_code = status.map_or(-1, Status::code);
+    let checks = checks
+        .iter()
+        .map(|(name, passed)| format!("{name}={passed}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    eprintln!(
+        "DIAGNOSTIC kugou_media_tracker stage={stage} status_parsed={status_parsed} platform_status={platform_status} platform_code={platform_code} shape={} checks={checks}",
+        safe_tracker_shape(bytes)
+    );
+}
+
 impl Selection {
     // The provider supplies metadata freshly read from the fixed catalogue endpoint.
     pub(crate) fn new(track: Track, request: &StreamRequest) -> Result<Self> {
@@ -55,37 +120,109 @@ impl Selection {
     }
 
     pub(crate) fn map(self, response: TrackerResponse, behavior: Behavior) -> Result<MediaStream> {
-        let status = Status::parse(&response.bytes)?;
+        let status = match Status::parse(&response.bytes) {
+            Ok(status) => status,
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure("status_parse", &response.bytes, None, &[]);
+                return Err(error);
+            }
+        };
         if status.status != 1 || status.code() != 0 {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "status_rejected",
+                &response.bytes,
+                Some(&status),
+                &[
+                    ("success_status", status.status == 1),
+                    ("success_code", status.code() == 0),
+                ],
+            );
             return Err(status.rejection());
         }
-        let data: Tracker = serde_json::from_slice(&response.bytes).map_err(|_| invalid())?;
-        if !data.hash.eq_ignore_ascii_case(&self.spec.hash)
-            || data
-                .album_audio_id
-                .is_some_and(|id| id.0.to_string() != self.track.id)
-            || data.album_id.is_some_and(|id| id.0 != self.album_id)
-        {
+        let data: Tracker = match serde_json::from_slice(&response.bytes) {
+            Ok(data) => data,
+            Err(_) => {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "tracker_decode",
+                    &response.bytes,
+                    Some(&status),
+                    &[("tracker_shape_valid", false)],
+                );
+                return Err(invalid());
+            }
+        };
+        let hash_match = data.hash.eq_ignore_ascii_case(&self.spec.hash);
+        let audio_id_match = data
+            .album_audio_id
+            .is_none_or(|id| id.0.to_string() == self.track.id);
+        let album_id_match = data.album_id.is_none_or(|id| id.0 == self.album_id);
+        if !hash_match || !audio_id_match || !album_id_match {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "identity_validation",
+                &response.bytes,
+                Some(&status),
+                &[
+                    ("hash_match", hash_match),
+                    ("audio_id_present", data.album_audio_id.is_some()),
+                    ("audio_id_match", audio_id_match),
+                    ("album_id_present", data.album_id.is_some()),
+                    ("album_id_match", album_id_match),
+                ],
+            );
             return Err(invalid());
         }
         if !data.fail_process.is_empty() {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "additional_authorization",
+                &response.bytes,
+                Some(&status),
+                &[("fail_process_empty", false)],
+            );
             return Err(denied("KuGou media requires additional authorization"));
         }
-        let expected_duration = self
+        let Some(expected_duration) = self
             .spec
             .duration_ms
             .filter(|n| *n > 0)
             .or(self.track.duration_ms.filter(|n| *n > 0))
-            .ok_or_else(invalid)?;
-        let duration = data
-            .time_length
-            .0
-            .checked_mul(1000)
-            .filter(|n| *n > 0)
-            .ok_or_else(invalid)?;
+        else {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "expected_duration",
+                &response.bytes,
+                Some(&status),
+                &[("expected_duration_present", false)],
+            );
+            return Err(invalid());
+        };
+        let Some(duration) = data.time_length.0.checked_mul(1000).filter(|n| *n > 0) else {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "time_length",
+                &response.bytes,
+                Some(&status),
+                &[("duration_positive_and_convertible", false)],
+            );
+            return Err(invalid());
+        };
         let size = data.file_size.0;
         let bitrate = data.bit_rate.0;
         if size == 0 || bitrate == 0 {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "media_dimensions",
+                &response.bytes,
+                Some(&status),
+                &[
+                    ("size_nonzero", size != 0),
+                    ("bitrate_nonzero", bitrate != 0),
+                ],
+            );
             return Err(invalid());
         }
         let trial = match data.hash_offset {
@@ -94,21 +231,57 @@ impl Selection {
                 let start = offset.start_ms.0;
                 let end = offset.end_ms.0;
                 if end <= start || end > expected_duration.saturating_add(999) {
+                    #[cfg(debug_assertions)]
+                    diagnostic_tracker_failure(
+                        "trial_time_range",
+                        &response.bytes,
+                        Some(&status),
+                        &[
+                            ("end_after_start", end > start),
+                            (
+                                "end_within_expected_duration",
+                                end <= expected_duration.saturating_add(999),
+                            ),
+                        ],
+                    );
                     return Err(invalid());
                 }
                 match (offset.start_byte, offset.end_byte) {
                     (Some(start), Some(end)) if end.0 >= start.0 => {
-                        let length = end
-                            .0
-                            .checked_sub(start.0)
-                            .and_then(|n| n.checked_add(1))
-                            .ok_or_else(invalid)?;
+                        let Some(length) =
+                            end.0.checked_sub(start.0).and_then(|n| n.checked_add(1))
+                        else {
+                            #[cfg(debug_assertions)]
+                            diagnostic_tracker_failure(
+                                "trial_byte_range_length",
+                                &response.bytes,
+                                Some(&status),
+                                &[("byte_range_length_representable", false)],
+                            );
+                            return Err(invalid());
+                        };
                         if size < length {
+                            #[cfg(debug_assertions)]
+                            diagnostic_tracker_failure(
+                                "trial_byte_range",
+                                &response.bytes,
+                                Some(&status),
+                                &[("byte_range_within_file", size >= length)],
+                            );
                             return Err(invalid());
                         }
                     }
                     (None, None) => {}
-                    _ => return Err(invalid()),
+                    _ => {
+                        #[cfg(debug_assertions)]
+                        diagnostic_tracker_failure(
+                            "trial_byte_range_shape",
+                            &response.bytes,
+                            Some(&status),
+                            &[("byte_range_pair_consistent", false)],
+                        );
+                        return Err(invalid());
+                    }
                 }
                 if start == 0 && end.saturating_add(999) >= expected_duration {
                     None
@@ -121,15 +294,39 @@ impl Selection {
             }
         };
         if trial.is_none() && duration.abs_diff(expected_duration) > 999 {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "full_duration_match",
+                &response.bytes,
+                Some(&status),
+                &[("duration_matches_catalogue", false)],
+            );
             return Err(invalid());
         }
         if let Some(window) = &trial {
-            if duration.abs_diff(window.end_ms - window.start_ms) > 999
-                && duration.abs_diff(expected_duration) > 999
-            {
+            let trial_duration_match = duration.abs_diff(window.end_ms - window.start_ms) <= 999;
+            let full_duration_match = duration.abs_diff(expected_duration) <= 999;
+            if !trial_duration_match && !full_duration_match {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "trial_duration_match",
+                    &response.bytes,
+                    Some(&status),
+                    &[
+                        ("duration_matches_trial", trial_duration_match),
+                        ("duration_matches_catalogue", full_duration_match),
+                    ],
+                );
                 return Err(invalid());
             }
             if behavior == Behavior::Download {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "trial_download_rejected",
+                    &response.bytes,
+                    Some(&status),
+                    &[("full_media_authorized", false)],
+                );
                 return Err(denied(
                     "KuGou only authorized a trial; full download is unavailable",
                 ));
@@ -154,6 +351,17 @@ impl Selection {
                     Quality::High
                 };
                 if self.spec.actual_quality == Quality::Standard && actual == Quality::High {
+                    #[cfg(debug_assertions)]
+                    diagnostic_tracker_failure(
+                        "quality_consistency",
+                        &response.bytes,
+                        Some(&status),
+                        &[
+                            ("format_supported", true),
+                            ("bitrate_supported", bitrate <= 512_000),
+                            ("quality_consistent", false),
+                        ],
+                    );
                     return Err(invalid());
                 }
                 let codec = match format.as_str() {
@@ -165,6 +373,23 @@ impl Selection {
             }
             // KGM/encrypted downloads need their own supported decoder and rights contract.
             _ => {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "format_support",
+                    &response.bytes,
+                    Some(&status),
+                    &[
+                        ("format_supported", false),
+                        ("compressed_bitrate_supported", bitrate <= 512_000),
+                        (
+                            "lossless_selection",
+                            matches!(
+                                self.spec.actual_quality,
+                                Quality::Lossless | Quality::Hires | Quality::Master
+                            ),
+                        ),
+                    ],
+                );
                 return Err(denied(
                     "KuGou returned an unsupported or encrypted media format",
                 ));
@@ -174,15 +399,50 @@ impl Selection {
         let mut seen = BTreeSet::new();
         for value in data.url.0.into_iter().chain(data.backup_url.0) {
             if value.len() > 8192 || value.chars().any(char::is_control) {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "url_shape",
+                    &response.bytes,
+                    Some(&status),
+                    &[("url_length_and_controls_valid", false)],
+                );
                 return Err(invalid());
             }
-            let url = normalize_media_url(&value)?;
-            response.check_url(&url)?;
+            let url = match normalize_media_url(&value) {
+                Ok(url) => url,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    diagnostic_tracker_failure(
+                        "url_normalization",
+                        &response.bytes,
+                        Some(&status),
+                        &[("url_normalized", false)],
+                    );
+                    return Err(error);
+                }
+            };
+            if let Err(error) = response.check_url(&url) {
+                #[cfg(debug_assertions)]
+                diagnostic_tracker_failure(
+                    "url_authorization_material_check",
+                    &response.bytes,
+                    Some(&status),
+                    &[("url_contains_no_session_grant", false)],
+                );
+                return Err(error);
+            }
             if seen.insert(url.clone()) {
                 urls.push(url);
             }
         }
         if urls.is_empty() || urls.len() > 16 {
+            #[cfg(debug_assertions)]
+            diagnostic_tracker_failure(
+                "url_count",
+                &response.bytes,
+                Some(&status),
+                &[("url_count_valid", !urls.is_empty() && urls.len() <= 16)],
+            );
             return Err(invalid());
         }
         let url = urls.remove(0);
