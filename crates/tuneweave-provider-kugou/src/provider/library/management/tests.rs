@@ -20,6 +20,16 @@ fn row(id: u64) -> Value {
     "intro":"  Preserve intro\n","tags":"甲,乙","sort":42,"count":0,"m_count":0,"list_ver":3,
     "global_collection_id":format!("collection_1_111_{id}_0")})
 }
+fn live_created_row(id: u64) -> Value {
+    let mut p = row(id);
+    p.as_object_mut().unwrap().remove("is_def");
+    p["list_create_userid"] = json!(111);
+    p["list_create_listid"] = json!(id);
+    p["list_create_gid"] = json!(format!("collection_1_111_{id}_0"));
+    p["is_publish"] = json!(1);
+    p["is_drop"] = json!(0);
+    p
+}
 fn collection(id: u64) -> Value {
     let mut p = row(id);
     p["type"] = json!(1);
@@ -105,7 +115,7 @@ async fn creation_uses_acknowledged_new_identity_and_verifies_standard_visibilit
 {
     let client = KugouLoginClient::Standard;
     for caller in [false, true] {
-        let mut created = row(37);
+        let mut created = live_created_row(37);
         created["name"] = json!("Created");
         let mut frames = start();
         frames.push(library(vec![row(3)], 9).into());
@@ -125,7 +135,11 @@ async fn creation_uses_acknowledged_new_identity_and_verifies_standard_visibilit
             .await
             .unwrap();
         assert_eq!(result.playlist_ref.id(), REF);
-        assert_eq!(result.playlist.unwrap().name, "Created");
+        let playlist = result.playlist.unwrap();
+        assert_eq!(playlist.name, "Created");
+        assert!(!playlist.extensions.contains_key("is_def"));
+        assert_eq!(playlist.extensions["source_user_id"], "111");
+        assert_eq!(playlist.extensions["source_list_id"], "37");
         assert_eq!(result.extensions["write_requests_dispatched"], 1);
         assert_eq!(read(&store, "B"), other);
         if caller {
@@ -150,6 +164,7 @@ async fn creation_does_not_guess_ids_or_accept_wrong_visibility_name_counts_or_e
         "wrong_name",
         "wrong_privacy",
         "not_empty",
+        "system_marker",
         "extra_change",
         "wrong_ack_version",
     ] {
@@ -160,6 +175,9 @@ async fn creation_does_not_guess_ids_or_accept_wrong_visibility_name_counts_or_e
         }
         if case == "wrong_privacy" {
             created["is_pri"] = json!(0);
+        }
+        if case == "system_marker" {
+            created["is_def"] = json!(1);
         }
         if case == "not_empty" {
             created["count"] = json!(1);

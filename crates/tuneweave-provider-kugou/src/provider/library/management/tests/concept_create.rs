@@ -20,6 +20,7 @@ fn initial() -> Vec<Frame> {
 fn created() -> Value {
     let mut r = row(37);
     r["name"] = json!("Created");
+    r.as_object_mut().unwrap().remove("is_def");
     r
 }
 
@@ -114,13 +115,21 @@ async fn concept_default_create_provider_rejects_unsupported_visibility_and_long
 
 #[tokio::test]
 async fn concept_default_create_provider_requires_exact_new_list_and_unchanged_other_lists() {
-    for case in ["name", "nonempty", "unrelated", "version", "gid"] {
+    for case in [
+        "name",
+        "nonempty",
+        "unrelated",
+        "version",
+        "gid",
+        "system_marker",
+    ] {
         let mut new = created();
         let mut old = row(3);
         let mut ack = receipt();
         match case {
             "name" => new["name"] = json!("Wrong"),
             "nonempty" => new["count"] = json!(1),
+            "system_marker" => new["is_def"] = json!(2),
             "unrelated" => old["name"] = json!("Changed"),
             "version" => ack["total_ver"] = json!(11),
             _ => ack["info"]["global_collection_id"] = json!("collection_1_111_99_0"),
@@ -135,7 +144,15 @@ async fn concept_default_create_provider_requires_exact_new_list_and_unchanged_o
             .create_playlist(&request(Some("A")))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict, "{case}");
+        assert_eq!(
+            e.code,
+            if case == "system_marker" {
+                ErrorCode::PermissionDenied
+            } else {
+                ErrorCode::Conflict
+            },
+            "{case}"
+        );
         assert_eq!(e.details["write_outcome"], "unconfirmed");
         assert!(!e.retryable);
         assert_eq!(f.requests.await.unwrap().len(), 5);

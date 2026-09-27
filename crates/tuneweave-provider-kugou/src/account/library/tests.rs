@@ -86,6 +86,35 @@ fn library_preserves_local_source_system_versions_counts_and_actual_string_tags(
 }
 
 #[test]
+fn live_standard_created_row_preserves_absent_system_marker_and_source_identity() {
+    let mut created = entry(38, 0);
+    created.as_object_mut().unwrap().remove("is_def");
+    created["is_pri"] = json!(1);
+    created["count"] = json!(0);
+    created["m_count"] = json!(0);
+
+    let page = decode(&fixture(vec![created])).unwrap();
+    let playlist = page.rows[0].playlist.as_ref().unwrap();
+    assert_eq!(playlist.track_count, Some(0));
+    assert_eq!(playlist.extensions["library_owner_id"], "123456789");
+    assert_eq!(playlist.extensions["source_user_id"], "123456789");
+    assert_eq!(playlist.extensions["source_list_id"], "38");
+    assert_eq!(
+        playlist.extensions["global_collection_id"],
+        "collection_3_123456789_38_0"
+    );
+    assert_eq!(
+        playlist.extensions["source_global_collection_id"],
+        "collection_3_123456789_38_0"
+    );
+    assert_eq!(playlist.extensions["is_private"], true);
+    assert_eq!(playlist.extensions["is_published"], true);
+    assert_eq!(playlist.extensions["is_dropped"], false);
+    assert!(!playlist.extensions.contains_key("is_def"));
+    assert!(!playlist.extensions.contains_key("system_playlist"));
+}
+
+#[test]
 fn library_keeps_deleted_physical_rows_and_unknown_fields_without_fake_empty_success() {
     let data = decode(&fixture(vec![
         json!({"listid":9,"type":0,"is_del":1}),

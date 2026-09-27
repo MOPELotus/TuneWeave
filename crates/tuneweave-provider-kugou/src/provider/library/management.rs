@@ -397,7 +397,6 @@ impl KugouProvider {
             }
             let after = self.read_native_library(&mut read).await?;
             let created = find(&after, &id)?;
-            ordinary(created)?;
             if created.name != request.name
                 || private.is_some_and(|private| {
                     created
@@ -417,6 +416,16 @@ impl KugouProvider {
             }
             unrelated(&before, &after, &id)?;
             acknowledge(&ack, &before, &after, Some(created))?;
+            // This exception is limited to the item proven by this create ACK and the
+            // complete, single-item library delta. Every later management operation
+            // continues to require an explicit is_def=0 marker via ordinary().
+            if created
+                .extensions
+                .get("is_def")
+                .is_some_and(|marker| marker.as_u64() != Some(0))
+            {
+                return Err(denied());
+            }
             let mut result = result(
                 created.clone(),
                 PlaylistMutationAction::Create,
