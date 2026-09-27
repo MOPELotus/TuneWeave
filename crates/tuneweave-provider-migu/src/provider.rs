@@ -814,13 +814,8 @@ impl MusicProvider for MiguProvider {
         self.client.track_availability(content_id, request).await
     }
 
-    async fn lyrics(&self, id: &str, account: Option<&str>) -> Result<Lyrics> {
+    async fn lyrics(&self, id: &str, _account: Option<&str>) -> Result<Lyrics> {
         self.require_public_source()?;
-        if account.is_some() {
-            return Err(migu_invalid_request(
-                "Migu public lyrics do not accept an account",
-            ));
-        }
         let content_id = parse_content_id(id)?;
         self.client.lyrics(content_id).await
     }
@@ -1004,11 +999,6 @@ fn validate_availability_request(request: &TrackAvailabilityRequest) -> Result<(
 }
 
 fn validate_lyrics_request(request: &LyricsRequest) -> Result<()> {
-    if request.account.is_some() {
-        return Err(migu_invalid_request(
-            "Migu public lyrics do not accept an account",
-        ));
-    }
     if request.song_type.is_some() || request.singing_annotations {
         return Err(migu_invalid_request(
             "Migu lyrics do not accept song_type or singing annotations",
@@ -1300,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn lyrics_accept_display_preferences_but_reject_foreign_protocol_options() {
+    fn lyrics_accept_display_preferences_and_account_scope_but_reject_foreign_protocol_options() {
         let rich = LyricsRequest {
             word_synced: true,
             translated: true,
@@ -1311,7 +1301,7 @@ mod tests {
 
         let mut account = rich.clone();
         account.account = Some("default".to_owned());
-        assert!(validate_lyrics_request(&account).is_err());
+        assert!(validate_lyrics_request(&account).is_ok());
 
         let mut song_type = rich.clone();
         song_type.song_type = Some(1);

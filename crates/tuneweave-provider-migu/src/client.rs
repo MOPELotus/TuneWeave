@@ -1920,15 +1920,22 @@ fn validate_public_audio_url(value: &str) -> Result<String> {
     }
     let url = Url::parse(value)
         .map_err(|_| migu_upstream_error("Migu public stream returned an invalid media URL"))?;
+    // The H5 endpoint uses product8th/product and product9th/product. The PC
+    // account-listen endpoint also emits other signed resources under /public/.
+    // Keep the exact HTTPS media host and signed query contract below.
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.host_str() != Some(PUBLIC_AUDIO_HOST)
         || !matches!(url.port(), None | Some(443))
-        || !(url.path().starts_with("/public/product8th/product")
-            || url.path().starts_with("/public/product9th/product"))
+        || !url.path().starts_with("/public/")
         || url.fragment().is_some()
     {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DIAGNOSTIC migu_public_audio_url_shape={}",
+            safe_public_audio_url_shape(&url)
+        );
         return Err(migu_upstream_error(
             "Migu public stream returned an untrusted media URL",
         ));
@@ -1959,6 +1966,55 @@ fn validate_public_audio_url(value: &str) -> Result<String> {
         ));
     }
     Ok(url.to_string())
+}
+
+#[cfg(debug_assertions)]
+fn safe_public_audio_url_shape(url: &Url) -> serde_json::Value {
+    let host_class = match url.host_str() {
+        Some(PUBLIC_AUDIO_HOST) => "public_audio_host",
+        Some("dlsdownfree.nf.migu.cn") => "download_audio_host",
+        Some(host) if host.ends_with(".nf.migu.cn") => "other_nf_migu_host",
+        Some(host) if host.ends_with(".migu.cn") => "other_migu_host",
+        Some(_) => "other_host",
+        None => "missing_host",
+    };
+    let path_class = match url.path().split('/').nth(1).unwrap_or_default() {
+        "public" => "public",
+        "product8th" => "product8th",
+        "product9th" => "product9th",
+        "wlansst" => "wlansst",
+        _ => "other_path",
+    };
+    let segments = url
+        .path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let product_generation = segments
+        .get(1)
+        .and_then(|segment| segment.strip_prefix("product"))
+        .map(|suffix| {
+            suffix
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|digits| digits.parse::<u32>().ok());
+    let query_has = |name: &str| url.query_pairs().any(|(key, _)| key == name);
+    json!({
+        "scheme_https": url.scheme() == "https",
+        "host_class": host_class,
+        "path_class": path_class,
+        "public_prefix": url.path().starts_with("/public/"),
+        "product_generation": product_generation,
+        "third_segment_is_product": segments.get(2).is_some_and(|segment| *segment == "product"),
+        "nondefault_port": url.port().is_some_and(|port| port != 443),
+        "has_tim": query_has("Tim"),
+        "has_key": query_has("Key"),
+        "has_play_session_id": query_has("playSessionId"),
+        "has_pars": query_has("pars"),
+        "query_present": url.query().is_some(),
+    })
 }
 
 fn playback_denied(playback: &MiguPlaybackData) -> TuneWeaveError {
@@ -3500,6 +3556,28 @@ fn migu_upstream_error(message: impl Into<String>) -> TuneWeaveError {
 mod tests {
     use super::*;
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn public_audio_url_diagnostics_omit_host_path_and_signed_query_values() {
+        let url = Url::parse(
+            "https://example.invalid/private/track?Tim=tim-secret&Key=key-secret&playSessionId=session-secret",
+        )
+        .unwrap();
+        let diagnostic = safe_public_audio_url_shape(&url).to_string();
+        assert!(diagnostic.contains("other_host"));
+        assert!(diagnostic.contains("other_path"));
+        for secret in [
+            "example.invalid",
+            "private",
+            "track",
+            "tim-secret",
+            "key-secret",
+            "session-secret",
+        ] {
+            assert!(!diagnostic.contains(secret));
+        }
+    }
+
     #[test]
     fn upstream_summary_separates_business_and_transport_failures() {
         assert_eq!(
@@ -4263,6 +4341,12 @@ mod tests {
         assert_eq!(
             validate_public_audio_url(&product8).expect("trusted legacy public audio URL"),
             product8
+        );
+        let account_path =
+            "https://freetyst.nf.migu.cn/public/account/track.mp3?Tim=1&Key=2&playSessionId=3";
+        assert_eq!(
+            validate_public_audio_url(account_path).expect("trusted PC account media URL"),
+            account_path
         );
         assert_eq!(
             media_spec_from_url(&mp3, "PQ").expect("PQ MP3"),

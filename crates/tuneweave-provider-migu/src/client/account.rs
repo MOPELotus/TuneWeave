@@ -170,13 +170,19 @@ pub(crate) struct AccountRead {
     pub user_id: String,
     pub token: String,
     pub profile: Result<AccountProfile>,
-    pub native_session: Result<String>,
+    pub native_session: Option<String>,
 }
 impl std::fmt::Debug for AccountRead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccountRead").finish_non_exhaustive()
     }
 }
+
+pub(crate) fn require_native_exchange_session(session: Option<String>) -> Result<String> {
+    session
+        .ok_or_else(|| migu_upstream_error("Migu profile omitted a valid native exchange session"))
+}
+
 trait SessionResponse {
     fn conversion_error(&self) -> Option<&TuneWeaveError> {
         None
@@ -275,16 +281,20 @@ impl MiguClient {
                 )
                 .header(ACCEPT, "application/json")
                 .header(REFERER, referer);
-            if matches!(operation, Operation::PurchasedTracks) {
-                // This legacy endpoint uses the PACM cookie transport. The native
-                // client's global token is a different, unsupported credential.
+            if matches!(
+                operation,
+                Operation::PurchasedTracks | Operation::PlaylistWrite(_)
+            ) {
+                // These official account endpoints use the PACM cookie transport.
+                // The native client's global token is a different credential.
                 let mut cookie =
                     reqwest::header::HeaderValue::from_str(&format!("pacmtoken={token}"))
-                        .map_err(|_| migu_invalid_request("Invalid Migu purchase cookie"))?;
+                        .map_err(|_| migu_invalid_request("Invalid Migu account cookie"))?;
                 cookie.set_sensitive(true);
-                request = request
-                    .header(reqwest::header::COOKIE, cookie)
-                    .header("channel", "014X031");
+                request = request.header(reqwest::header::COOKIE, cookie);
+                if matches!(operation, Operation::PurchasedTracks) {
+                    request = request.header("channel", "014X031");
+                }
             } else {
                 request = request.header("pacmtoken", auth_header);
             }
@@ -749,6 +759,20 @@ impl MiguClient {
             .await
     }
 
+    pub(crate) async fn account_favorite_id_for_write(
+        &self,
+        token: &str,
+        uid: &str,
+    ) -> Result<AccountData<Option<String>>> {
+        self.account_playlist_read(
+            Operation::Home,
+            token,
+            uid,
+            super::account_playlist::favorite_id_for_write,
+        )
+        .await
+    }
+
     pub(crate) async fn account_favorite_id(
         &self,
         token: &str,
@@ -851,15 +875,12 @@ impl MiguClient {
             let token = rotated_token(headers, Operation::Profile.path())?
                 .unwrap_or_else(|| token.to_owned());
             // The official H5 profile spells this field with a lowercase s.
-            // Keep it private and optional for ordinary profile reads.
+            // Some valid profiles omit it, which only limits native-only reads.
             let native_session = data
                 .get("usessionId")
                 .and_then(serde_json::Value::as_str)
                 .filter(|value| validate_token(value).is_ok())
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    migu_upstream_error("Migu profile omitted a valid native exchange session")
-                });
+                .map(str::to_owned);
             let profile = (|| {
                 let data: Profile = serde_json::from_value(data)
                     .map_err(|_| migu_upstream_error("Migu profile fields are invalid"))?;
@@ -1056,7 +1077,7 @@ pub(super) fn rotated_token_for_host(
             continue;
         }
         let mut max_age = None;
-        let mut expires = None;
+        let mut expires: Option<&str> = None;
         let mut scoped = true;
         let mut attributes = std::collections::BTreeSet::new();
         for part in parts {
@@ -1089,10 +1110,7 @@ pub(super) fn rotated_token_for_host(
                     )
                 }
                 "expires" => {
-                    expires =
-                        Some(httpdate::parse_http_date(value).map_err(|_| {
-                            migu_upstream_error("Invalid Migu session cookie expiry")
-                        })?)
+                    expires = Some(value);
                 }
                 _ => {}
             }
@@ -1100,12 +1118,15 @@ pub(super) fn rotated_token_for_host(
         if !scoped {
             continue;
         }
-        if token.is_empty()
-            || matches!(token, "null" | "undefined")
-            || max_age.is_some_and(|age| age <= 0)
-            || (max_age.is_none()
-                && expires.is_some_and(|date| date <= std::time::SystemTime::now()))
-        {
+        // Cookie dates that a user agent cannot parse are ignored. Max-Age
+        // takes precedence over Expires, so only inspect Expires when the
+        // upstream did not provide a Max-Age value.
+        let expired = max_age.map(|age| age <= 0).unwrap_or_else(|| {
+            expires
+                .and_then(|date| httpdate::parse_http_date(date).ok())
+                .is_some_and(|date| date <= std::time::SystemTime::now())
+        });
+        if token.is_empty() || matches!(token, "null" | "undefined") || expired {
             return Err(authentication_required());
         }
         accept(token)?;

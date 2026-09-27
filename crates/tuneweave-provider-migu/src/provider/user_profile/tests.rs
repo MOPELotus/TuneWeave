@@ -13,6 +13,18 @@ fn encrypted(value: serde_json::Value) -> String {
     )
 }
 
+fn h5_profile_without_native_session(uid: &str, pacm: &str) -> String {
+    let body = json!({"code":"000000","data":{
+        "userId":uid,"nickName":"H5 Listener",
+        "smallIcon":"https://d.musicapp.migu.cn/avatar.jpg"
+    }})
+    .to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\npacmtoken: {pacm}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
 fn native_profile() -> serde_json::Value {
     json!({"code":"000000","userInfoItem":{
         "userId":"111","nickName":"Native Listener","signature":"听歌\n继续听歌",
@@ -104,6 +116,42 @@ async fn modern_profile_reads_native_display_fields_and_rotates_only_the_selecte
         assert!(wire[0].contains("pacmtoken: initial-pacm\r\n"));
         assert!(wire[5].contains("pacmtoken: verified-pacm\r\n"));
     }
+}
+
+#[tokio::test]
+async fn modern_profile_falls_back_to_verified_h5_identity_when_native_session_is_absent() {
+    let (mut provider, requests) = server(vec![h5_profile_without_native_session(
+        "111",
+        "profile-pacm",
+    )])
+    .await;
+    let (store, original, alias) = setup(&mut provider, "named");
+    let result = provider
+        .user_profile("111", UserProfileBackend::Modern, Some(alias))
+        .await
+        .unwrap();
+    assert_eq!(result.user.id, "111");
+    assert_eq!(result.user.name, "H5 Listener");
+    assert_eq!(
+        result.user.avatar_url.as_deref(),
+        Some("https://d.musicapp.migu.cn/avatar.jpg")
+    );
+    assert!(result.user.signature.is_none());
+    assert!(result.birthday.is_none());
+    assert!(result.background_url.is_none());
+    assert_eq!(
+        result.extensions.get("backend").and_then(|v| v.as_str()),
+        Some("official_h5_user_info")
+    );
+    assert_eq!(
+        read(&store, alias),
+        original.rotate("profile-pacm".into()).unwrap()
+    );
+    let output = serde_json::to_string(&result).unwrap();
+    for forbidden in ["pacm", "do-not-retain", "phone", "native-session"] {
+        assert!(!output.contains(forbidden));
+    }
+    assert_eq!(requests.await.unwrap().len(), 1);
 }
 
 #[tokio::test]

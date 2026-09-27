@@ -1,6 +1,6 @@
 use super::session::session_changed;
 use super::*;
-use crate::client::account::AccountData;
+use crate::client::account::{AccountData, require_native_exchange_session};
 use crate::credential::{KIND, MiguCredential, authentication_required, error};
 use tuneweave_core::{ErrorCode, StoredAccountCredential};
 
@@ -137,6 +137,12 @@ impl<'a> Read<'a> {
         self.verify(&token).await
     }
     pub(super) async fn native_session(&mut self) -> Result<String> {
+        let (_, session) = self.profile_and_native_session().await?;
+        require_native_exchange_session(session)
+    }
+    pub(super) async fn profile_and_native_session(
+        &mut self,
+    ) -> Result<(AccountProfile, Option<String>)> {
         self.check()?;
         let read = self
             .provider
@@ -151,10 +157,11 @@ impl<'a> Read<'a> {
         self.provider
             .accept_account_step(&mut self.current, &mut self.stored, read.token)?;
         self.secrets.push(self.current.token().to_owned());
-        read.profile?;
-        let session = read.native_session?;
-        self.secrets.push(session.clone());
-        Ok(session)
+        let profile = read.profile?;
+        if let Some(session) = &read.native_session {
+            self.secrets.push(session.clone());
+        }
+        Ok((profile, read.native_session))
     }
     pub(super) async fn accept<T>(
         &mut self,
