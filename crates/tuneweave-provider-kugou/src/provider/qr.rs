@@ -1,6 +1,8 @@
 use super::session::{Selection, changed, state_error, validate_account};
 use super::*;
 use crate::{KugouLoginClient, KugouQrPoll, KugouQrSession};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use qrcode::{QrCode, render::svg};
 use rand::{TryRng, rngs::SysRng};
 use std::{
     collections::BTreeMap,
@@ -157,7 +159,7 @@ impl KugouProvider {
         let start = ProviderQrStart {
             provider_transaction_id: id.clone(),
             url: qr.url().to_owned(),
-            image_data_url: None,
+            image_data_url: Some(qr_image_data_url(qr.url())?),
             expires_at: Some(expires.to_string()),
         };
         {
@@ -317,6 +319,24 @@ impl KugouProvider {
         }
         Ok(Instant::now() < current.deadline)
     }
+}
+
+fn qr_image_data_url(url: &str) -> Result<String> {
+    let image = QrCode::new(url.as_bytes())
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamError,
+                "KuGou QR login URL could not be encoded",
+            )
+            .with_platform(Platform::Kugou)
+        })?
+        .render::<svg::Color>()
+        .min_dimensions(320, 320)
+        .build();
+    Ok(format!(
+        "data:image/svg+xml;base64,{}",
+        BASE64.encode(image.as_bytes())
+    ))
 }
 
 fn progress(state: AuthState) -> ProviderQrPoll {

@@ -170,6 +170,12 @@ async fn qr_login_completes_both_native_clients_with_exact_credential_ownership(
                 .unwrap();
             assert_eq!(start.provider_transaction_id.len(), 64);
             assert!(!start.provider_transaction_id.contains(KEY));
+            assert!(
+                start
+                    .image_data_url
+                    .as_deref()
+                    .is_some_and(|image| image.starts_with("data:image/svg+xml;base64,"))
+            );
             let account = if mode == CredentialMode::Client {
                 "default"
             } else {
