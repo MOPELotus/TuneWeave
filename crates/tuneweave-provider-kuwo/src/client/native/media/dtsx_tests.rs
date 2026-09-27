@@ -234,7 +234,6 @@ fn native_dtsx_response_requires_exact_identity_valid_key_and_trusted_mmp4_url()
             "/data/surl",
             json!("http://er-sycdn.kuwo.cn/dtsx/file.mmp4"),
         ),
-        ("/data/url", json!("http://other.example/file.mmp4")),
     ] {
         let mut reply = media();
         *reply.pointer_mut(pointer).unwrap() = replacement;
@@ -257,6 +256,47 @@ fn native_dtsx_response_requires_exact_identity_valid_key_and_trusted_mmp4_url()
             "{absent}"
         );
     }
+
+    let mut reply = media();
+    let data = reply["data"].as_object_mut().unwrap();
+    data.remove("startPos");
+    data.remove("endPos");
+    data.remove("filePath");
+    data.remove("fileSize");
+    data.remove("media_basic_info");
+    assert!(
+        response::parse(
+            &serde_json::to_vec(&reply).unwrap(),
+            &input(),
+            "67474",
+            DTSX
+        )
+        .is_err()
+    );
+
+    let mut reply = media();
+    reply["data"]["url"] = json!("http://other.example/file.mmp4");
+    assert!(matches!(
+        response::parse(
+            &serde_json::to_vec(&reply).unwrap(),
+            &input(),
+            "67474",
+            DTSX
+        )
+        .unwrap(),
+        Outcome::Allowed { url, .. } if url == "https://er-sycdn.kuwo.cn/dtsx/file.mmp4"
+    ));
+
+    reply["data"]["surl"] = json!("http://other.example/file.mmp4");
+    assert!(matches!(
+        response::parse(
+            &serde_json::to_vec(&reply).unwrap(),
+            &input(),
+            "67474",
+            DTSX
+        ),
+        Err(error) if error.code == ErrorCode::UpstreamError
+    ));
 }
 
 #[tokio::test]
@@ -265,6 +305,9 @@ async fn native_dtsx_partial_media_is_rejected_by_both_content_operations_before
         for field in ["type", "startPos", "endPos"] {
             let mut value = media();
             value["data"][field] = json!(1);
+            if field == "startPos" {
+                value["data"]["endPos"] = json!(30);
+            }
             let mut replies = flow();
             replies[2] = json_response(&value);
             let mut f = fixture::setup(replies).await;

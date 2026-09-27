@@ -26,6 +26,158 @@ pub(crate) fn rights() -> Value {
 pub(crate) fn media() -> Value {
     json!({"code":200,"duration":240,"data":{"rid":67474,"format":"mp3","bitrate":128,"quality":"H","url":"http://er-sycdn.kuwo.cn/token/time/file.mp3","surl":"https://er-sycdn.kuwo.cn/token/time/file.mp3","type":0,"startPos":0,"endPos":0,"ekey":"","sig":"12345","unknown_secret":"do-not-export"}})
 }
+
+#[cfg(debug_assertions)]
+#[test]
+fn native_media_shape_diagnostic_reports_fields_without_media_values() {
+    let mut body = media();
+    body["data"]["media_basic_info"] =
+        json!({"duration":"240","quality":"private-quality","opaque":"do-not-export"});
+    body["data"]["filePath"] = json!("private/path/file.mp3");
+    body["data"]["surl"] =
+        json!("https://er-sycdn.kuwo.cn/token/time/file.mp3?signature=opaque-signature-value");
+    let diagnostic =
+        super::response::safe_response_shape(&serde_json::to_vec(&body).unwrap()).to_string();
+    assert!(diagnostic.contains("\"code\":200"));
+    assert!(diagnostic.contains("\"url_nonempty\":true"));
+    assert!(diagnostic.contains("\"official_host\":\"er-sycdn.kuwo.cn\""));
+    assert!(diagnostic.contains("signature"));
+    assert!(!diagnostic.contains("opaque-signature-value"));
+    assert!(!diagnostic.contains("token/time/file.mp3"));
+    assert!(!diagnostic.contains("private-quality"));
+    assert!(!diagnostic.contains("private/path/file.mp3"));
+    assert!(!diagnostic.contains("do-not-export"));
+}
+
+#[test]
+fn native_media_accepts_current_full_track_response_shape() {
+    let mut body = media();
+    body.as_object_mut().unwrap().remove("duration");
+    body["data"].as_object_mut().unwrap().remove("quality");
+    body["data"].as_object_mut().unwrap().remove("startPos");
+    body["data"].as_object_mut().unwrap().remove("endPos");
+    body["data"]["duration"] = json!(118);
+    body["data"]["filePath"] = json!("private/path/audio.mp3");
+    body["data"]["fileSize"] = json!(1_900_292);
+    body["data"]["media_basic_info"] = json!({"gain":0.0,"lra":0.0,"peak":0.0});
+
+    let input = fixture::credential_fixture("42", "selected-session")
+        .input()
+        .unwrap();
+    let parsed = response::parse(
+        &serde_json::to_vec(&body).unwrap(),
+        &input,
+        "67474",
+        STANDARD,
+    )
+    .unwrap();
+    match parsed {
+        Outcome::Allowed {
+            duration_ms,
+            bitrate,
+            format,
+            ..
+        } => {
+            assert_eq!(duration_ms, 118_000);
+            assert_eq!(bitrate, Some(128_000));
+            assert_eq!(format, "mp3");
+        }
+        Outcome::Denied { .. } => panic!("current complete MP3 response was denied"),
+    }
+
+    body["data"]["type"] = json!(1);
+    assert!(matches!(
+        response::parse(
+            &serde_json::to_vec(&body).unwrap(),
+            &input,
+            "67474",
+            STANDARD
+        ),
+        Ok(Outcome::Denied { .. })
+    ));
+}
+
+#[test]
+fn native_media_accepts_bounded_signed_kw_lv_delivery_only_over_https() {
+    let input = fixture::credential_fixture("42", "selected-session")
+        .input()
+        .unwrap();
+    let signed = "https://kw-lv.kuwo.cn/resource/audio.mp3?a0bcdefgh1&b0bcdefgh2&c0bcdefgh3&d0bcdefgh4&e0bcdefgh5&f0bcdefgh6";
+    let validated = response::validate_url(signed, &input, STANDARD).unwrap();
+    assert_eq!(validated.host_str(), Some("kw-lv.kuwo.cn"));
+    assert_eq!(validated.scheme(), "https");
+    assert!(validated.query().is_some());
+    let http = signed.replacen("https://", "http://", 1);
+    assert_eq!(
+        response::validate_url(&http, &input, STANDARD)
+            .unwrap()
+            .scheme(),
+        "http"
+    );
+
+    let mut body = media();
+    body["data"]["surl"] = json!(signed);
+    body["data"]["url"] = json!(http);
+    let parsed = response::parse(
+        &serde_json::to_vec(&body).unwrap(),
+        &input,
+        "67474",
+        STANDARD,
+    )
+    .unwrap();
+    match parsed {
+        Outcome::Allowed { url, .. } => assert_eq!(url, signed),
+        Outcome::Denied { .. } => panic!("HTTPS media URL was not selected"),
+    }
+    body["data"]["surl"] = json!("");
+    assert!(
+        response::parse(
+            &serde_json::to_vec(&body).unwrap(),
+            &input,
+            "67474",
+            STANDARD
+        )
+        .is_err()
+    );
+
+    for rejected in [
+        "https://kw-lv.kuwo.cn.evil.example/resource/audio.mp3?sig=example-signature",
+        "https://kw-lv.kuwo.cn/resource/audio.mp3?sid=selected-session",
+        "https://kw-lv.kuwo.cn/resource/audio.mp3?selected-session&b0bcdefgh2&c0bcdefgh3&d0bcdefgh4&e0bcdefgh5&f0bcdefgh6",
+        "https://kw-lv.kuwo.cn/resource/audio.mp3?sig=",
+        "https://kw-lv.kuwo.cn/resource/audio.mp3?sig=one&sig=two",
+    ] {
+        assert!(response::validate_url(rejected, &input, STANDARD).is_err());
+    }
+}
+
+#[test]
+fn native_media_accepts_only_the_exact_kw_er_https_host_for_full_format_media() {
+    let input = fixture::credential_fixture("42", "selected-session")
+        .input()
+        .unwrap();
+    let url = "https://kw-er.kuwo.cn/resource/audio.mp3?track=verified&token=example";
+    let validated = response::validate_url(url, &input, STANDARD).unwrap();
+    assert_eq!(validated.host_str(), Some("kw-er.kuwo.cn"));
+    assert_eq!(validated.scheme(), "https");
+    for rejected in [
+        "http://kw-er.kuwo.cn/resource/audio.mp3?track=verified",
+        "https://kw-er.kuwo.cn.evil.example/resource/audio.mp3?track=verified",
+        "https://other.kuwo.cn/resource/audio.mp3?track=verified",
+        "https://kw-er.kuwo.cn/resource/audio.flac?track=verified",
+    ] {
+        assert!(response::validate_url(rejected, &input, STANDARD).is_err());
+    }
+
+    let mut body = media();
+    body["data"]["surl"] = json!(url);
+    body["data"]["url"] = json!(url.replacen("https://", "http://", 1));
+    assert!(matches!(
+        response::parse(&serde_json::to_vec(&body).unwrap(), &input, "67474", STANDARD),
+        Ok(Outcome::Allowed { url: selected, .. }) if selected == url
+    ));
+}
+
 pub(crate) fn rights_reply(value: &Value) -> Vec<u8> {
     response(
         200,
@@ -349,6 +501,11 @@ async fn native_media_response_never_turns_trials_or_encrypted_files_into_full_a
     ] {
         let mut body = media();
         *body.pointer_mut(pointer).unwrap() = value;
+        if pointer == "/data/startPos" {
+            body["data"]["endPos"] = json!(30);
+        } else if pointer == "/data/endPos" {
+            body["data"]["startPos"] = json!(10);
+        }
         let mut f = fixture::setup(vec![
             flow().remove(0),
             rights_reply(&rights()),

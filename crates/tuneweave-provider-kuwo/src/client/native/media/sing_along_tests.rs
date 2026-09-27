@@ -216,6 +216,9 @@ async fn native_sing_along_rejects_partial_main_or_sidecar_for_both_actions() {
                 let (mut replies, request) = flow();
                 let mut media = metadata(&replies[2]);
                 *media.pointer_mut(&format!("{parent}/{field}")).unwrap() = json!(1);
+                if field == "startPos" {
+                    *media.pointer_mut(&format!("{parent}/endPos")).unwrap() = json!(30);
+                }
                 replies[2] = json_response(&media);
                 replies.truncate(3);
                 let mut f = fixture::setup(replies).await;
