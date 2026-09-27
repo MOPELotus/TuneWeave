@@ -191,7 +191,8 @@ impl MiguProvider {
         self.accept_read(&s.current, s.stored.as_ref(), &s.current)?;
         self.accept_account_step(&mut s.current, &mut s.stored, read.token)?;
         read.profile?;
-        let native_session = read.native_session?;
+        let native_session =
+            crate::client::account::require_native_exchange_session(read.native_session)?;
         let response = self
             .client
             .account_h5_token(s.current.token(), &native_session)
@@ -240,7 +241,7 @@ impl MiguProvider {
         let mut confirmed_tag_additions = Vec::new();
         let result = tokio::time::timeout(Duration::from_secs(90), async {
             let (favorite, created) = self.write_preflight(&mut s).await?;
-            ordinary(id, &favorite, &created)?;
+            ordinary(id, favorite.as_deref(), &created)?;
             let before = self
                 .read_selected_account_playlist(Some(id), &s.alias, &mut s.current, &mut s.stored)
                 .await?;
@@ -390,7 +391,8 @@ impl MiguProvider {
                     "Migu complete created library did not confirm the native playlist update",
                 ));
             }
-            self.write_finish_identity(&favorite, &mut s).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut s)
+                .await?;
             Ok(PlaylistMutationResult {
                 playlist_ref: final_playlist.resource_ref.clone(),
                 action: PlaylistMutationAction::Update,

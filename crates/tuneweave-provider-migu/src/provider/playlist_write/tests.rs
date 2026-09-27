@@ -122,7 +122,9 @@ fn frames(kind: Kind) -> Flow {
 fn frames_with_after(kind: Kind, override_after: Option<&[u32]>) -> Flow {
     let mut f = Flow::new();
     f.profile();
-    f.data("before_home", home("999"));
+    if kind != Kind::Create {
+        f.data("before_home", home("999"));
+    }
     let before: Vec<u32> = if kind == Kind::Create {
         (1..=21).collect()
     } else {
@@ -173,7 +175,9 @@ fn frames_with_after(kind: Kind, override_after: Option<&[u32]>) -> Flow {
         value["title"] = json!(TITLE);
         f.data("after_metadata", value);
     }
-    f.data("after_home", home("999"));
+    if kind != Kind::Create {
+        f.data("after_home", home("999"));
+    }
     f
 }
 fn setup(p: &mut MiguProvider) -> (Arc<Store>, MiguCredential, MiguCredential) {
@@ -292,6 +296,13 @@ async fn owned_playlist_writes_verify_exact_requests_and_full_readback_for_both_
             assert_eq!(read(&store, "B"), b);
             let requests = requests.await.unwrap();
             assert_eq!(requests.len(), f.values.len());
+            if kind == Kind::Create {
+                assert!(
+                    !requests
+                        .iter()
+                        .any(|request| request.contains("/pc/user/home-page/v2.0"))
+                );
+            }
             let writes: Vec<_> = requests.iter().filter(|r| is_write(r)).collect();
             assert_eq!(writes.len(), 1);
             let write = writes[0];
@@ -330,14 +341,47 @@ async fn owned_playlist_writes_verify_exact_requests_and_full_readback_for_both_
                 } else {
                     format!("p{}", i - 1)
                 };
-                assert!(
-                    r.contains(&format!("pacmtoken: {token}\r\n")),
-                    "{kind:?} {i}"
-                );
-                assert!(!r.contains("cookie:"));
+                if is_write(r) {
+                    assert!(
+                        r.contains(&format!("cookie: pacmtoken={token}\r\n")),
+                        "{kind:?} {i}"
+                    );
+                    assert!(!r.contains(&format!("pacmtoken: {token}\r\n")));
+                } else {
+                    assert!(
+                        r.contains(&format!("pacmtoken: {token}\r\n")),
+                        "{kind:?} {i}"
+                    );
+                    assert!(!r.contains("cookie:"));
+                }
                 assert!(!r.contains("other"));
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_writes_allow_missing_favorite_navigation_with_complete_owned_library_proof() {
+    for kind in KINDS {
+        let mut f = frames(kind);
+        for label in ["before_home", "after_home"] {
+            if let Some(index) = f.labels.iter().position(|name| *name == label) {
+                f.values[index]["data"]["userPrivateItems"][1]["actionUrl"] = json!("");
+            }
+        }
+        let (mut p, requests) = server(f.wire()).await;
+        setup(&mut p);
+        run(&p, kind, Some("A")).await.unwrap();
+        assert_eq!(
+            requests
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| is_write(request))
+                .count(),
+            1,
+            "{kind:?}"
+        );
     }
 }
 
@@ -575,7 +619,8 @@ async fn mutation_acknowledgements_never_replace_confirmation_or_retry_failed_wr
 #[tokio::test]
 async fn readback_rejects_ambiguous_creation_incomplete_later_pages_and_false_mutation_success() {
     for kind in KINDS {
-        for variant in 0..3 {
+        let variants = if kind == Kind::Create { 2 } else { 3 };
+        for variant in 0..variants {
             let mut f = frames(kind);
             let end;
             if variant == 2 {

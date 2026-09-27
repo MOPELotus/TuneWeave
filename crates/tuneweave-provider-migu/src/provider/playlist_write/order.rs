@@ -305,7 +305,7 @@ impl MiguProvider {
         let mut confirmed = Vec::new();
         let result = tokio::time::timeout(Duration::from_secs(120), async {
             let (favorite, created) = self.write_preflight(&mut session).await?;
-            ordinary(id, &favorite, &created)?;
+            ordinary(id, favorite.as_deref(), &created)?;
             let mut previous = self.read_selected_account_playlist(Some(id), &session.alias, &mut session.current, &mut session.stored).await?;
             owner(&previous.playlist, session.current.user_id())?;
             let original_cover = previous.playlist.cover_url.clone();
@@ -337,7 +337,7 @@ impl MiguProvider {
             if library_identity(&created) != library_identity(&after_created) {
                 return Err(migu_upstream_error("Migu created playlist library changed during track ordering"));
             }
-            self.write_finish_identity(&favorite, &mut session).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut session).await?;
             Ok(PlaylistTrackOrderResult {
                 playlist_ref: previous.playlist.resource_ref.clone(),
                 track_refs: request.track_refs.clone(),

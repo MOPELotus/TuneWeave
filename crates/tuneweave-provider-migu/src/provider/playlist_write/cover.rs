@@ -56,7 +56,7 @@ impl MiguProvider {
         };
         let result = tokio::time::timeout(Duration::from_secs(120), async {
             let (favorite, created) = self.write_preflight(&mut s).await?;
-            ordinary(id, &favorite, &created)?;
+            ordinary(id, favorite.as_deref(), &created)?;
             let before = self
                 .read_selected_account_playlist(
                     Some(id),
@@ -126,7 +126,7 @@ impl MiguProvider {
                     "Migu created library changed during the cover upload",
                 ));
             }
-            self.write_finish_identity(&favorite, &mut s).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut s).await?;
             Ok(PlaylistCoverUpdateResult {
                 playlist_ref: after.playlist.resource_ref.clone(),
                 image: ImageUploadResult {

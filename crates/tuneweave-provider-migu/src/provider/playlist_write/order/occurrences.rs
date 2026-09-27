@@ -133,7 +133,7 @@ impl MiguProvider {
         };
         let result = tokio::time::timeout(Duration::from_secs(120), async {
             let (favorite, created) = self.write_preflight(&mut session).await?;
-            ordinary(id, &favorite, &created)?;
+            ordinary(id, favorite.as_deref(), &created)?;
             let snapshot = self
                 .read_selected_account_playlist(
                     Some(id),
@@ -148,7 +148,8 @@ impl MiguProvider {
             if library_identity(&created) != library_identity(&after_created) {
                 return Err(changed());
             }
-            self.write_finish_identity(&favorite, &mut session).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut session)
+                .await?;
             let total = view.ids.len() as u64;
             let items = view
                 .ids
@@ -229,7 +230,7 @@ impl MiguProvider {
         let mut confirmed = Vec::new();
         let result = tokio::time::timeout(Duration::from_secs(120),async {
             let (favorite,created) = self.write_preflight(&mut session).await?;
-            ordinary(id,&favorite,&created)?;
+            ordinary(id,favorite.as_deref(),&created)?;
             let mut previous = self.read_selected_account_playlist(Some(id),&session.alias,&mut session.current,&mut session.stored).await?;
             owner(&previous.playlist,session.current.user_id())?;
             let before = view(&previous,&session,self.caller_credential.is_some())?;
@@ -269,7 +270,7 @@ impl MiguProvider {
             }
             let after_created = self.write_created(&mut session).await?;
             if library_identity(&created)!=library_identity(&after_created) { return Err(changed()); }
-            self.write_finish_identity(&favorite,&mut session).await?;
+            self.write_finish_identity(favorite.as_deref(),&mut session).await?;
             let after = view(&previous,&session,self.caller_credential.is_some())?;
             Ok(PlaylistOccurrenceOrderResult {
                 playlist_ref:previous.playlist.resource_ref.clone(),

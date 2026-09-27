@@ -67,8 +67,8 @@ fn owner(playlist: &Playlist, uid: &str) -> Result<()> {
     }
     Ok(())
 }
-fn ordinary(id: &str, favorite: &str, created: &[Playlist]) -> Result<()> {
-    if id == favorite || !created.iter().any(|playlist| playlist.id == id) {
+fn ordinary(id: &str, favorite: Option<&str>, created: &[Playlist]) -> Result<()> {
+    if favorite == Some(id) || !created.iter().any(|playlist| playlist.id == id) {
         return Err(error(
             ErrorCode::PermissionDenied,
             "Migu playlist mutation requires an ordinary playlist in the selected account's created library",
@@ -113,10 +113,10 @@ impl MiguProvider {
                 .with_details(serde_json::Value::Object(details))
         })
     }
-    async fn write_favorite_id(&self, s: &mut WriteSession) -> Result<String> {
+    async fn write_favorite_id(&self, s: &mut WriteSession) -> Result<Option<String>> {
         let response = self
             .client
-            .account_favorite_id(s.current.token(), s.current.user_id())
+            .account_favorite_id_for_write(s.current.token(), s.current.user_id())
             .await?;
         self.accept_playlist_read(&s.alias, &mut s.current, &mut s.stored, response)
             .await
@@ -125,12 +125,20 @@ impl MiguProvider {
         self.read_library_section(Section::Created, &s.alias, &mut s.current, &mut s.stored)
             .await
     }
-    async fn write_preflight(&self, s: &mut WriteSession) -> Result<(String, Vec<Playlist>)> {
+    async fn write_preflight(
+        &self,
+        s: &mut WriteSession,
+    ) -> Result<(Option<String>, Vec<Playlist>)> {
         self.verify_account_step(&s.alias, &mut s.current, &mut s.stored, s.original.token())
             .await?;
         let favorite = self.write_favorite_id(s).await?;
         let created = self.write_created(s).await?;
         Ok((favorite, created))
+    }
+    async fn write_created_preflight(&self, s: &mut WriteSession) -> Result<Vec<Playlist>> {
+        self.verify_account_step(&s.alias, &mut s.current, &mut s.stored, s.original.token())
+            .await?;
+        self.write_created(s).await
     }
     async fn write_owned_metadata(&self, id: &str, s: &mut WriteSession) -> Result<Playlist> {
         let response = self
@@ -157,8 +165,12 @@ impl MiguProvider {
         self.accept_playlist_read(&s.alias, &mut s.current, &mut s.stored, response)
             .await
     }
-    async fn write_finish_identity(&self, favorite: &str, s: &mut WriteSession) -> Result<()> {
-        if self.write_favorite_id(s).await? != favorite {
+    async fn write_finish_identity(
+        &self,
+        favorite: Option<&str>,
+        s: &mut WriteSession,
+    ) -> Result<()> {
+        if self.write_favorite_id(s).await?.as_deref() != favorite {
             return Err(migu_upstream_error(
                 "Migu favorite identity changed during the playlist mutation",
             ));
@@ -181,7 +193,11 @@ impl MiguProvider {
         }
         let mut s = self.playlist_write_session(request.account.as_deref())?;
         let result = async {
-            let (favorite, before) = self.write_preflight(&mut s).await?;
+            // Creating a new owned playlist does not target the account's
+            // favorite list, so it only needs the verified account and created
+            // library snapshot. The homepage may omit the favorite action URL
+            // for accounts that have not used that list yet.
+            let before = self.write_created_preflight(&mut s).await?;
             let acknowledged = self.write_dispatch(Write::Create(title), &mut s).await?;
             let after = self.write_created(&mut s).await?;
             let before_ids = ids(&before);
@@ -191,7 +207,6 @@ impl MiguProvider {
             }
             let added = after.iter().find(|playlist| !before_ids.contains(playlist.id.as_str()))
                 .ok_or_else(|| migu_upstream_error("Migu created playlist could not be identified"))?;
-            ordinary(&added.id, &favorite, &after)?;
             if added.name != title || acknowledged.as_deref().is_some_and(|id| id != added.id) {
                 return Err(migu_upstream_error("Migu created playlist disagrees with its requested name or acknowledgement"));
             }
@@ -199,7 +214,6 @@ impl MiguProvider {
             if playlist.name != title || playlist.track_count != Some(0) {
                 return Err(migu_upstream_error("Migu created playlist metadata did not confirm an empty playlist with the requested name"));
             }
-            self.write_finish_identity(&favorite, &mut s).await?;
             playlist.extensions.insert("requested_visibility".into(), json!("platform_default"));
             Ok(PlaylistMutationResult {
                 playlist_ref: playlist.resource_ref.clone(), action: PlaylistMutationAction::Create,
@@ -243,7 +257,7 @@ impl MiguProvider {
         let mut s = self.playlist_write_session(request.account.as_deref())?;
         let result = async {
             let (favorite, before) = self.write_preflight(&mut s).await?;
-            ordinary(id, &favorite, &before)?;
+            ordinary(id, favorite.as_deref(), &before)?;
             let old = self.write_owned_metadata(id, &mut s).await?;
             let acknowledged = self
                 .write_dispatch(Write::Rename(id, title), &mut s)
@@ -272,7 +286,8 @@ impl MiguProvider {
                     "Migu playlist rename changed or failed to confirm other metadata",
                 ));
             }
-            self.write_finish_identity(&favorite, &mut s).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut s)
+                .await?;
             Ok(PlaylistMutationResult {
                 playlist_ref: playlist.resource_ref.clone(),
                 action: PlaylistMutationAction::Update,
@@ -297,7 +312,7 @@ impl MiguProvider {
         let result = async {
             let (favorite, mut created) = self.write_preflight(&mut s).await?;
             // Validate the whole batch before its first destructive request.
-            for id in &requested { ordinary(id, &favorite, &created)?; }
+            for id in &requested { ordinary(id, favorite.as_deref(), &created)?; }
             for id in &requested { self.write_owned_metadata(id, &mut s).await?; }
             for (index, id) in requested.iter().enumerate() {
                 let acknowledged = self.write_dispatch(Write::Delete(id), &mut s).await?;
@@ -310,7 +325,7 @@ impl MiguProvider {
                 if ids(&after) != expected {
                     return Err(migu_upstream_error("Migu complete created library did not confirm exactly the requested deletion"));
                 }
-                self.write_finish_identity(&favorite, &mut s).await?;
+                self.write_finish_identity(favorite.as_deref(), &mut s).await?;
                 completed.push(request.playlist_refs[index].clone());
                 created = after;
             }
@@ -361,7 +376,7 @@ impl MiguProvider {
         let mut s = self.playlist_write_session(request.account.as_deref())?;
         let result = async {
             let (favorite, created) = self.write_preflight(&mut s).await?;
-            ordinary(id, &favorite, &created)?;
+            ordinary(id, favorite.as_deref(), &created)?;
             let before = self.read_selected_account_playlist(Some(id), &s.alias, &mut s.current, &mut s.stored).await?;
             owner(&before.playlist, s.current.user_id())?;
             if action == PlaylistItemMutationAction::Add
@@ -393,7 +408,7 @@ impl MiguProvider {
             if ids(&created) != ids(&current_created) {
                 return Err(migu_upstream_error("Migu created library changed during the track mutation"));
             }
-            self.write_finish_identity(&favorite, &mut s).await?;
+            self.write_finish_identity(favorite.as_deref(), &mut s).await?;
             Ok(PlaylistItemMutationResult { playlist_ref: after.playlist.resource_ref, item_refs: request.item_refs.clone(), kind: PlaylistItemKind::Track, action,
                 snapshot_id: after.playlist.extensions.get("source_snapshot_id").and_then(serde_json::Value::as_str).map(str::to_owned), cloud_track_count: None,
                 extensions: Extensions::from([

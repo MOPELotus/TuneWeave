@@ -62,6 +62,56 @@ fn favorite_identity_is_taken_only_from_unique_official_private_navigation() {
         assert!(favorite_id(data).is_err(), "{url}");
     }
 }
+
+#[test]
+fn write_favorite_identity_is_optional_only_when_navigation_omits_its_action() {
+    assert_eq!(
+        favorite_id_for_write(home("77")).unwrap(),
+        Some("77".into())
+    );
+
+    for action in [json!(null), json!("")] {
+        let mut data = home("77");
+        data["userPrivateItems"][1]["actionUrl"] = action;
+        assert_eq!(favorite_id_for_write(data.clone()).unwrap(), None);
+        assert!(favorite_id(data).is_err());
+    }
+
+    assert_eq!(
+        favorite_id_for_write(json!({"userPrivateItems":[]})).unwrap(),
+        None
+    );
+    for action in [
+        "relative?musicListId=77",
+        "https://music.migu.cn/?musicListId=77&musicListId=88",
+        "https://music.migu.cn/?id=77",
+    ] {
+        let mut data = home("77");
+        data["userPrivateItems"][1]["actionUrl"] = json!(action);
+        assert!(favorite_id_for_write(data).is_err(), "{action}");
+    }
+}
+
+#[test]
+fn favorite_identity_diagnostic_reports_shape_without_account_values() {
+    let data = json!({
+        "userId":"private-user-id",
+        "userPrivateItems":[{
+            "title":"喜欢的音乐",
+            "actionUrl":"https://music.migu.cn/?musicListId=77&pacmtoken=private-token"
+        }],
+        "myCreatedMusicLists":{"createdMusicLists":[]}
+    });
+    let diagnostic = format!("{:?}", safe_home_diagnostic(&data));
+    assert!(diagnostic.contains("userPrivateItems"));
+    assert!(diagnostic.contains("favorite_navigation_count: Some(1)"));
+    assert!(diagnostic.contains("actionUrl:string"));
+    assert!(diagnostic.contains("favorite_action_url_string_count: Some(1)"));
+    assert!(!diagnostic.contains("private-user-id"));
+    assert!(!diagnostic.contains("private-token"));
+    assert!(!diagnostic.contains("musicListId=77"));
+    assert!(!diagnostic.contains("喜欢的音乐"));
+}
 #[test]
 fn account_playlist_metadata_is_typed_and_does_not_export_account_navigation() {
     let p = detail(metadata("77", "111", 3), "77").unwrap();
