@@ -1473,6 +1473,7 @@ fn map_bilibili_video_search_filters(
 
 fn validate_bilibili_user_id(value: &str) -> Result<u64> {
     let value = value.trim();
+    let value = value.strip_prefix("user:").unwrap_or(value);
     if value.is_empty() || value.len() > 20 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(bilibili_invalid_request(
             "Bilibili user ID must be a positive integer",
@@ -4455,7 +4456,7 @@ mod tests {
     #[tokio::test]
     async fn created_favorite_folders_validate_identity_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
-        for invalid in ["", "0", "-1", "user:7792521", "abc"] {
+        for invalid in ["", "0", "-1", "user:", "artist:7792521", "abc"] {
             let error = provider
                 .user_created_playlists(invalid, &tuneweave_core::PageRequest::new(30, 0))
                 .await
@@ -4464,7 +4465,7 @@ mod tests {
         }
         let error = provider
             .user_created_playlists(
-                "7792521",
+                "user:7792521",
                 &tuneweave_core::PageRequest {
                     limit: 30,
                     offset: 0,
@@ -4481,13 +4482,13 @@ mod tests {
     async fn collected_playlists_validate_identity_and_account_before_network_access() {
         let provider = BilibiliProvider::new(BilibiliConfig::default()).expect("provider");
         let invalid = provider
-            .user_favorite_playlists("user:293793435", &tuneweave_core::PageRequest::new(30, 0))
+            .user_favorite_playlists("artist:293793435", &tuneweave_core::PageRequest::new(30, 0))
             .await
-            .expect_err("typed user prefix is invalid in a typed user route");
+            .expect_err("wrong typed user prefix");
         assert_eq!(invalid.code, ErrorCode::InvalidRequest);
         let missing = provider
             .user_favorite_playlists(
-                "293793435",
+                "user:293793435",
                 &tuneweave_core::PageRequest {
                     limit: 30,
                     offset: 0,

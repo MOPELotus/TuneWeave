@@ -2350,6 +2350,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "tuneweave-core",
  "url",
 ]

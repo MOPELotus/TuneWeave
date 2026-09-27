@@ -83,6 +83,7 @@ pub(crate) const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_VIDEO_DETAIL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SUBTITLE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES: usize = 64 * 1024;
 const WBI_CACHE_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 const WEB_TICKET_HMAC_KEY: &[u8] = b"XgwSnGZ1p";
 const WEB_TICKET_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
@@ -2819,6 +2820,7 @@ impl BilibiliClient {
             let status = response.status();
             http_status = Some(status);
             if !status.is_success() {
+                log_http_failure_response(&mut response, "/x/player/wbi/playurl").await;
                 return Err(bilibili_http_error("Bilibili playback manifest", status));
             }
             if response
@@ -7297,6 +7299,66 @@ fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
         )
 }
 
+async fn log_http_failure_response(response: &mut reqwest::Response, endpoint: &'static str) {
+    let status = response.status().as_u16();
+    let declared_content_length = response.content_length();
+    let content_type = safe_diagnostic_content_type(response.headers());
+    let (response_bytes, response_bytes_capped) = discard_http_error_body(response).await;
+    tracing::warn!(
+        target: "tuneweave::bilibili::upstream_failure_detail",
+        provider = "bilibili",
+        endpoint,
+        http_status = status,
+        response_bytes,
+        response_bytes_capped,
+        declared_content_length = declared_content_length.unwrap_or_default(),
+        has_declared_content_length = declared_content_length.is_some(),
+        content_type = %content_type,
+        "Upstream HTTP error response received; body omitted"
+    );
+}
+
+async fn discard_http_error_body(response: &mut reqwest::Response) -> (usize, bool) {
+    let mut response_bytes = 0;
+    while response_bytes < MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES - response_bytes;
+                if chunk.len() > remaining {
+                    return (MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES, true);
+                }
+                response_bytes += chunk.len();
+            }
+            Ok(None) => return (response_bytes, false),
+            Err(_) => return (response_bytes, true),
+        }
+    }
+    (response_bytes, true)
+}
+
+fn safe_diagnostic_content_type(headers: &reqwest::header::HeaderMap) -> String {
+    let media_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or_default();
+    let Some((top_level, subtype)) = media_type.split_once('/') else {
+        return "unknown".to_owned();
+    };
+    let is_token = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    };
+    if media_type.len() > 128 || !is_token(top_level) || !is_token(subtype) || subtype.contains('/')
+    {
+        return "unknown".to_owned();
+    }
+    media_type.to_ascii_lowercase()
+}
+
 fn bilibili_upstream_classification(
     error: &TuneWeaveError,
 ) -> (UpstreamBusinessClass, UpstreamOutcome) {
@@ -8468,6 +8530,67 @@ mod tests {
             .await
             .expect("video detail body above passport budget");
         assert_eq!(bytes.len(), body_length);
+        server.join().expect("test server");
+    }
+
+    #[test]
+    fn diagnostic_content_type_keeps_only_a_bounded_media_type() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("Text/HTML; charset=utf-8"),
+        );
+        assert_eq!(safe_diagnostic_content_type(&headers), "text/html");
+
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json; token=ignored"),
+        );
+        assert_eq!(safe_diagnostic_content_type(&headers), "application/json");
+
+        headers.remove(reqwest::header::CONTENT_TYPE);
+        assert_eq!(safe_diagnostic_content_type(&headers), "unknown");
+
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("private-identifier"),
+        );
+        assert_eq!(safe_diagnostic_content_type(&headers), "unknown");
+    }
+
+    #[tokio::test]
+    async fn http_error_diagnostic_discards_a_bounded_body_and_counts_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener");
+        let address = listener.local_addr().expect("test listener address");
+        let body = vec![b'x'; MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES + 128];
+        let body_length = body.len();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test connection");
+            let mut request = [0_u8; 4096];
+            let request_size = stream.read(&mut request).expect("test request");
+            assert!(request_size > 0, "test request should not be empty");
+            write!(
+                stream,
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {body_length}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
+            )
+            .expect("test response headers");
+            stream.write_all(&body).expect("test response body");
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{address}/test"))
+            .send()
+            .await
+            .expect("test response");
+        let declared_content_length = response.content_length();
+        let (response_bytes, capped) = discard_http_error_body(&mut response).await;
+        assert_eq!(response_bytes, MAX_HTTP_ERROR_DIAGNOSTIC_BODY_BYTES);
+        assert!(capped);
+        assert_eq!(declared_content_length, Some(body_length as u64));
+        assert_eq!(
+            safe_diagnostic_content_type(response.headers()),
+            "text/html"
+        );
         server.join().expect("test server");
     }
 
