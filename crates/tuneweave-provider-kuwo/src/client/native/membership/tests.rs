@@ -180,6 +180,34 @@ fn unknown_and_expired_memberships_do_not_become_false_or_active_from_unrelated_
             .unwrap();
     assert_eq!(minimal.active, None);
     assert!(minimal.extensions["memberships"][1]["auto_renew"].is_null());
+
+    let mut blank = body();
+    for field in [
+        "vipExpire",
+        "vipmExpire",
+        "vipLuxuryExpire",
+        "svipExpire",
+        "chezaiExpire",
+        "experienceExpire",
+        "vipAdExpire",
+        "vip3Expire",
+        "vipmAutoPayUser",
+        "luxAutoPayUser",
+        "svipAutoPayUser",
+        "cheZaiAutoPayUser",
+    ] {
+        blank["data"][field] = json!("");
+    }
+    let unknown = parsed(&blank).unwrap();
+    assert_eq!(unknown.active, None);
+    assert!(
+        unknown.extensions["memberships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["state"] == "unknown")
+    );
+    assert!(parsed(&json!({"meta":{"code":200},"ctime":NOW,"data":{}})).is_err());
 }
 
 #[test]
@@ -197,14 +225,6 @@ fn membership_rejects_identity_drift_bad_schema_duplicate_fields_and_secret_refl
         ("vipmExpire", json!(MAX_TIME + 1)),
         ("vipmAutoPayUser", json!(2)),
         ("isYearUser", json!(4294967296_u64)),
-        ("vipTag", json!(SID)),
-        ("userVipType", json!("x=private%2Dmembership%2Dsession")),
-        ("vipTag", json!("x".repeat(1025))),
-        ("vipIcon", json!("https://kuwo.cn.example.test/icon")),
-        (
-            "vipIcon",
-            json!("https://img1.kuwo.cn/icon?sid=private-membership-session"),
-        ),
     ] {
         let mut value = body();
         value["data"][field] = val;
@@ -228,6 +248,34 @@ fn membership_rejects_identity_drift_bad_schema_duplicate_fields_and_secret_refl
         r#"{"meta":{"code":200},"ctime":1700000000000,"data":{"vipmExpire":0,"vipmExpire":1700000000001}}"#,
     ] {
         assert!(parse(raw.as_bytes(), &input()).is_err());
+    }
+}
+
+#[test]
+fn invalid_optional_display_metadata_is_omitted_without_losing_membership_state() {
+    for (field, value) in [
+        ("vipTag", json!(SID)),
+        ("userVipType", json!("x=private%2Dmembership%2Dsession")),
+        ("vipTag", json!("x".repeat(1025))),
+        ("vipIcon", json!("https://kuwo.cn.example.test/icon")),
+        (
+            "vipIcon",
+            json!("https://img1.kuwo.cn/icon?sid=private-membership-session"),
+        ),
+    ] {
+        let mut body = body();
+        body["data"][field] = value;
+        let summary = parsed(&body).unwrap();
+        assert_eq!(summary.active, Some(true), "{field}");
+        if field == "vipIcon" {
+            assert!(summary.icon_url.is_none());
+        } else if field == "vipTag" {
+            assert!(summary.extensions["vip_tag"].is_null());
+        } else {
+            assert!(summary.extensions["user_vip_type"].is_null());
+        }
+        let serialized = serde_json::to_string(&summary).unwrap();
+        assert!(!serialized.contains(SID));
     }
 }
 

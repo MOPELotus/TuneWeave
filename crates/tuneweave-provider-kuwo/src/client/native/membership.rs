@@ -111,6 +111,7 @@ struct Membership {
 
 fn number<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
     deserialize_code(d)?
+        .filter(|value| !value.trim().is_empty())
         .map(|v| {
             v.parse::<u64>()
                 .ok()
@@ -164,21 +165,142 @@ fn timestamp(value: u64) -> Result<String> {
 }
 
 fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<MembershipSummary> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let result = parse_inner(bytes, input);
+    if result.is_err() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "DIAGNOSTIC kuwo_membership_shape={} fields={}",
+            super::diagnostic_response_shape(bytes),
+            diagnostic_field_states(bytes)
+        );
+    }
+    result
+}
+
+/// Classify only fields consumed by this parser. Diagnostics never include
+/// membership values, account identity, or response text.
+#[cfg(debug_assertions)]
+fn diagnostic_field_states(bytes: &[u8]) -> serde_json::Value {
+    let Some(root) = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .filter(serde_json::Value::is_object)
+    else {
+        return json!({"root": "invalid"});
+    };
+    let data = root.get("data").and_then(serde_json::Value::as_object);
+    let numeric = [
+        "vipExpire",
+        "vipmExpire",
+        "vipLuxuryExpire",
+        "svipExpire",
+        "chezaiExpire",
+        "experienceExpire",
+        "vipAdExpire",
+        "vip3Expire",
+        "isYearUser",
+    ];
+    let flags = [
+        "vipmAutoPayUser",
+        "luxAutoPayUser",
+        "svipAutoPayUser",
+        "cheZaiAutoPayUser",
+    ];
+    let classify = |value: Option<&serde_json::Value>, flag: bool| match value {
+        None => "missing",
+        Some(serde_json::Value::Null) => "null",
+        Some(serde_json::Value::Bool(_)) => "boolean",
+        Some(serde_json::Value::Number(n)) => {
+            if n.as_u64().is_some_and(|v| !flag || v <= 1) {
+                "valid_number"
+            } else {
+                "invalid_number"
+            }
+        }
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => "empty",
+        Some(serde_json::Value::String(s)) => {
+            if s.parse::<u64>()
+                .ok()
+                .is_some_and(|v| v.to_string() == *s && (!flag || v <= 1))
+            {
+                "valid_number"
+            } else {
+                "invalid_number"
+            }
+        }
+        Some(_) => "other",
+    };
+    let number_states = numeric
+        .into_iter()
+        .map(|key| {
+            (
+                key,
+                classify(data.and_then(|object| object.get(key)), false),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let flag_states = flags
+        .into_iter()
+        .map(|key| (key, classify(data.and_then(|object| object.get(key)), true)))
+        .collect::<BTreeMap<_, _>>();
+    let code = root
+        .get("meta")
+        .and_then(|meta| meta.get("code"))
+        .map(|value| match value {
+            serde_json::Value::String(s) if s == "200" => "expected",
+            serde_json::Value::Number(n) if n.as_u64() == Some(200) => "expected",
+            serde_json::Value::String(_) | serde_json::Value::Number(_) => "unexpected",
+            _ => "invalid",
+        })
+        .unwrap_or("missing");
+    json!({"code": code, "numeric": number_states, "flags": flag_states})
+}
+
+fn parse_inner(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<MembershipSummary> {
+    let has_music_expiry_field = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("data")
+                .and_then(|data| data.get("vipmExpire"))
+                .cloned()
+        })
+        .is_some();
+    if !has_music_expiry_field {
+        return Err(membership_failure("music_expiry_missing"));
+    }
+    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| membership_failure("schema"))?;
     if body.meta.code.as_deref() != Some("200") {
-        return Err(invalid());
+        return Err(membership_failure("response_guard"));
     }
     let now = body
         .ctime
         .filter(|value| *value > 0 && *value <= MAX_TIME)
-        .ok_or_else(invalid)?;
-    let data = body.data.ok_or_else(invalid)?;
+        .ok_or_else(|| membership_failure("server_time"))?;
+    let data = body
+        .data
+        .ok_or_else(|| membership_failure("membership_data_missing"))?;
     if data
         .uid
         .as_deref()
         .is_some_and(|uid| uid != input.user_id())
     {
-        return Err(invalid());
+        return Err(membership_failure("identity_mismatch"));
+    }
+    if [
+        data.vip_expire,
+        data.vipm_expire,
+        data.vip_luxury_expire,
+        data.svip_expire,
+        data.chezai_expire,
+        data.experience_expire,
+        data.vip_ad_expire,
+        data.vip3_expire,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value > MAX_TIME)
+    {
+        return Err(membership_failure("expiry_range"));
     }
     let entries = [
         entry("legacy_vip", data.vip_expire, None, now)?,
@@ -195,9 +317,6 @@ fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<MembershipSumma
         entry("ad", data.vip_ad_expire, None, now)?,
         entry("given", data.vip3_expire, None, now)?,
     ];
-    if entries.iter().all(|value| value.active.is_none()) {
-        return Err(invalid());
-    }
     // SpecialInfoMgr.F uses music/luxury/super/given membership for the music
     // account classification. Other product states remain separate entries.
     let music = [&entries[1], &entries[2], &entries[3], &entries[7]];
@@ -220,31 +339,29 @@ fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<MembershipSumma
         None
     };
     if data.is_year_user.is_some_and(|v| v > i32::MAX as u64) {
-        return Err(invalid());
+        return Err(membership_failure("year_code_range"));
     }
-    let tag = text(data.vip_tag, 1024, input)?;
-    let user_type = text(data.user_vip_type, 128, input)?;
-    let icon = text(data.vip_icon, 2048, input)?;
-    let icon_url = icon
-        .map(|value| {
-            let url = Url::parse(&value).map_err(|_| invalid())?;
-            if !matches!(url.scheme(), "http" | "https")
-                || value.trim() != value
-                || value.contains('\\')
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.port().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || !url
-                    .host_str()
-                    .is_some_and(|host| host.ends_with(".kuwo.cn"))
-            {
-                return Err(invalid());
-            }
-            Ok(value)
-        })
-        .transpose()?;
+    // Display-only metadata must never make valid membership expiry data fail.
+    // Apply the same secret, length, and control checks, then omit rejected text.
+    let tag = text(data.vip_tag, 1024, input).ok().flatten();
+    let user_type = text(data.user_vip_type, 128, input).ok().flatten();
+    let icon = text(data.vip_icon, 2048, input).ok().flatten();
+    let icon_url = icon.filter(|value| {
+        let Ok(url) = Url::parse(value) else {
+            return false;
+        };
+        matches!(url.scheme(), "http" | "https")
+            && value.trim() == value
+            && !value.contains('\\')
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".kuwo.cn"))
+    });
     Ok(MembershipSummary {
         user_ref: Some(ResourceRef::new(Platform::Kuwo, input.user_id()).map_err(|_| invalid())?),
         level: None,
@@ -269,6 +386,11 @@ fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<MembershipSumma
             ("user_vip_type".into(), json!(user_type)),
         ]),
     })
+}
+fn membership_failure(stage: &'static str) -> TuneWeaveError {
+    #[cfg(debug_assertions)]
+    eprintln!("DIAGNOSTIC kuwo_membership_failure={stage}");
+    invalid()
 }
 fn text(
     value: Option<String>,
