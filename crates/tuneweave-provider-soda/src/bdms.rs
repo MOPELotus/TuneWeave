@@ -9,16 +9,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::{
+    Client,
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    redirect::Policy,
+};
 use serde::Deserialize;
 use tuneweave_core::{ErrorCode, Platform, Result, TuneWeaveError};
-use url::Url;
+use url::{Host, Url};
 
 const SIGNER_NODE_ENV: &str = "TUNEWEAVE_SODA_BDMS_NODE";
 const SIGNER_ADDON_ENV: &str = "TUNEWEAVE_SODA_BDMS_ADDON";
 const SIGNER_WINE_ENV: &str = "TUNEWEAVE_SODA_BDMS_WINE";
 const SIGNER_PASSPORT_SDK_ENV: &str = "TUNEWEAVE_SODA_BDMS_PASSPORT_SDK";
 const SIGNER_JSDOM_ENV: &str = "TUNEWEAVE_SODA_BDMS_JSDOM";
+const SIGNER_SERVICE_URL_ENV: &str = "TUNEWEAVE_SODA_BDMS_SERVICE_URL";
+const SIGNER_SERVICE_TOKEN_ENV: &str = "TUNEWEAVE_SODA_BDMS_SERVICE_TOKEN";
 const SIGNER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SIGNER_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SIGNER_MESSAGE_BYTES: usize = 262_144;
@@ -26,8 +32,21 @@ const WORKER: &str = include_str!("bdms_sign_worker.cjs");
 
 #[derive(Clone)]
 pub(crate) struct SodaBdmsSigner {
-    channel: Arc<Mutex<SignerChannel>>,
+    backend: SignerBackend,
     passport_available: bool,
+}
+
+#[derive(Clone)]
+enum SignerBackend {
+    Local(Arc<Mutex<SignerChannel>>),
+    Remote(RemoteSigner),
+}
+
+#[derive(Clone)]
+struct RemoteSigner {
+    endpoint: Url,
+    token: String,
+    http: Client,
 }
 
 struct SignerChannel {
@@ -61,6 +80,12 @@ impl std::fmt::Debug for SodaBdmsSigner {
     }
 }
 
+impl std::fmt::Debug for RemoteSigner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RemoteSigner(configured)")
+    }
+}
+
 impl SodaBdmsSigner {
     pub(crate) fn from_env() -> Result<Option<Self>> {
         let node = nonempty_env(SIGNER_NODE_ENV);
@@ -68,6 +93,19 @@ impl SodaBdmsSigner {
         let wine = nonempty_env(SIGNER_WINE_ENV);
         let passport_sdk = nonempty_env(SIGNER_PASSPORT_SDK_ENV);
         let jsdom = nonempty_env(SIGNER_JSDOM_ENV);
+        let service_url = nonempty_text_env(SIGNER_SERVICE_URL_ENV);
+        let service_token = nonempty_text_env(SIGNER_SERVICE_TOKEN_ENV);
+        let local_configured = node.is_some()
+            || addon.is_some()
+            || wine.is_some()
+            || passport_sdk.is_some()
+            || jsdom.is_some();
+        if service_url.is_some() || service_token.is_some() {
+            if local_configured || service_url.is_none() || service_token.is_none() {
+                return Err(signer_configuration_error());
+            }
+            return Self::remote(service_url.as_deref().unwrap(), service_token.unwrap()).map(Some);
+        }
         if node.is_none()
             && addon.is_none()
             && wine.is_none()
@@ -83,6 +121,30 @@ impl SodaBdmsSigner {
             return Err(signer_configuration_error());
         };
         Self::spawn(node, addon, wine, passport_sdk, jsdom).map(Some)
+    }
+
+    fn remote(endpoint: &str, token: String) -> Result<Self> {
+        let endpoint = validate_remote_endpoint(endpoint)?;
+        if !(32..=512).contains(&token.len())
+            || !token.is_ascii()
+            || token.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(signer_configuration_error());
+        }
+        let http = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .redirect(Policy::none())
+            .build()
+            .map_err(|_| signer_configuration_error())?;
+        Ok(Self {
+            backend: SignerBackend::Remote(RemoteSigner {
+                endpoint,
+                token,
+                http,
+            }),
+            passport_available: true,
+        })
     }
 
     fn spawn(
@@ -172,11 +234,11 @@ impl SodaBdmsSigner {
             return Err(signer_start_error());
         }
         Ok(Self {
-            channel: Arc::new(Mutex::new(SignerChannel {
+            backend: SignerBackend::Local(Arc::new(Mutex::new(SignerChannel {
                 child,
                 writer: stream,
                 reader,
-            })),
+            }))),
             passport_available,
         })
     }
@@ -187,13 +249,19 @@ impl SodaBdmsSigner {
         url: String,
         headers: Vec<(String, String)>,
     ) -> Result<HeaderMap> {
-        let channel = self.channel.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut channel = channel.lock().map_err(|_| signer_runtime_error())?;
-            channel.sign(&device_id, &url, &headers)
-        })
-        .await
-        .map_err(|_| signer_runtime_error())?
+        let header_pairs: Vec<_> = headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let response = self
+            .exchange(serde_json::json!({
+                "mode": "native",
+                "device_id": device_id,
+                "url": url,
+                "headers": header_pairs,
+            }))
+            .await?;
+        map_native_response(response)
     }
 
     pub(crate) async fn sign_passport(
@@ -207,90 +275,42 @@ impl SodaBdmsSigner {
         if !self.passport_available {
             return Err(signer_start_error());
         }
-        let channel = self.channel.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut channel = channel.lock().map_err(|_| signer_runtime_error())?;
-            channel.sign_passport(&method, &url, &headers, body.as_deref(), &cookies)
-        })
-        .await
-        .map_err(|_| signer_runtime_error())?
-    }
-}
-
-impl SignerChannel {
-    fn sign(
-        &mut self,
-        device_id: &str,
-        url: &str,
-        headers: &[(String, String)],
-    ) -> Result<HeaderMap> {
-        let headers: Vec<_> = headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let request = serde_json::json!({
-            "mode": "native",
-            "device_id": device_id,
-            "url": url,
-            "headers": headers,
-        });
-        let response = self.exchange(request)?;
-        if !response.ok || response.headers.len() != 2 {
-            return Err(signer_runtime_error());
-        }
-        let mut output = HeaderMap::new();
-        for (name, value) in response.headers {
-            let name =
-                HeaderName::from_bytes(name.as_bytes()).map_err(|_| signer_runtime_error())?;
-            if !matches!(name.as_str(), "x-helios" | "x-medusa") {
-                return Err(signer_runtime_error());
-            }
-            let value = HeaderValue::from_str(&value).map_err(|_| signer_runtime_error())?;
-            output.insert(name, value);
-        }
-        if !output.contains_key("x-helios") || !output.contains_key("x-medusa") {
-            return Err(signer_runtime_error());
-        }
-        Ok(output)
-    }
-
-    fn sign_passport(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: Option<&str>,
-        cookies: &std::collections::BTreeMap<String, String>,
-    ) -> Result<Url> {
         let header_pairs: Vec<_> = headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let response = self.exchange(serde_json::json!({
-            "mode": "passport",
-            "method": method,
-            "url": url,
-            "headers": header_pairs,
-            "body": body,
-            "cookies": cookies,
-        }))?;
-        if !response.ok {
-            return Err(signer_runtime_error());
-        }
-        let signed = response
-            .url
-            .ok_or_else(signer_runtime_error)
-            .and_then(|url| Url::parse(&url).map_err(|_| signer_runtime_error()))?;
-        let original = Url::parse(url).map_err(|_| signer_runtime_error())?;
-        if signed.origin() != original.origin()
-            || signed.path() != original.path()
-            || !signed.query_pairs().any(|(name, _)| name == "a_bogus")
-        {
-            return Err(signer_runtime_error());
-        }
-        Ok(signed)
+        let response = self
+            .exchange(serde_json::json!({
+                "mode": "passport",
+                "method": method,
+                "url": url,
+                "headers": header_pairs,
+                "body": body,
+                "cookies": cookies,
+            }))
+            .await?;
+        map_passport_response(response, &url)
     }
 
+    async fn exchange(&self, request: serde_json::Value) -> Result<SignerResponse> {
+        match &self.backend {
+            SignerBackend::Local(channel) => {
+                let channel = channel.clone();
+                tokio::task::spawn_blocking(move || {
+                    channel
+                        .lock()
+                        .map_err(|_| signer_runtime_error())?
+                        .exchange(request)
+                })
+                .await
+                .map_err(|_| signer_runtime_error())?
+            }
+            SignerBackend::Remote(remote) => remote.exchange(request).await,
+        }
+    }
+}
+
+impl SignerChannel {
     fn exchange(&mut self, request: serde_json::Value) -> Result<SignerResponse> {
         let request = serde_json::to_vec(&request).map_err(|_| signer_runtime_error())?;
         if request.len() > MAX_SIGNER_MESSAGE_BYTES {
@@ -307,6 +327,80 @@ impl SignerChannel {
                 serde_json::from_slice::<SignerResponse>(&line).map_err(|_| signer_runtime_error())
             })
     }
+}
+
+impl RemoteSigner {
+    async fn exchange(&self, request: serde_json::Value) -> Result<SignerResponse> {
+        let request = serde_json::to_vec(&request).map_err(|_| signer_runtime_error())?;
+        if request.len() > MAX_SIGNER_MESSAGE_BYTES {
+            return Err(signer_runtime_error());
+        }
+        let mut response = self
+            .http
+            .post(self.endpoint.clone())
+            .bearer_auth(&self.token)
+            .header(CONTENT_TYPE, "application/json")
+            .body(request)
+            .send()
+            .await
+            .map_err(|_| signer_service_unavailable_error())?;
+        if !response.status().is_success()
+            || response
+                .content_length()
+                .is_some_and(|length| length > MAX_SIGNER_MESSAGE_BYTES as u64)
+        {
+            return Err(signer_service_unavailable_error());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| signer_service_unavailable_error())?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_SIGNER_MESSAGE_BYTES {
+                return Err(signer_runtime_error());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| signer_runtime_error())
+    }
+}
+
+fn map_native_response(response: SignerResponse) -> Result<HeaderMap> {
+    if !response.ok || response.headers.len() != 2 || response.url.is_some() {
+        return Err(signer_runtime_error());
+    }
+    let mut output = HeaderMap::new();
+    for (name, value) in response.headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| signer_runtime_error())?;
+        if !matches!(name.as_str(), "x-helios" | "x-medusa") {
+            return Err(signer_runtime_error());
+        }
+        let value = HeaderValue::from_str(&value).map_err(|_| signer_runtime_error())?;
+        output.insert(name, value);
+    }
+    if !output.contains_key("x-helios") || !output.contains_key("x-medusa") {
+        return Err(signer_runtime_error());
+    }
+    Ok(output)
+}
+
+fn map_passport_response(response: SignerResponse, original: &str) -> Result<Url> {
+    if !response.ok || !response.headers.is_empty() {
+        return Err(signer_runtime_error());
+    }
+    let signed = response
+        .url
+        .ok_or_else(signer_runtime_error)
+        .and_then(|url| Url::parse(&url).map_err(|_| signer_runtime_error()))?;
+    let original = Url::parse(original).map_err(|_| signer_runtime_error())?;
+    if signed.origin() != original.origin()
+        || signed.path() != original.path()
+        || !signed.query_pairs().any(|(name, _)| name == "a_bogus")
+    {
+        return Err(signer_runtime_error());
+    }
+    Ok(signed)
 }
 
 impl Drop for SignerChannel {
@@ -344,6 +438,33 @@ fn nonempty_env(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn nonempty_text_env(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn validate_remote_endpoint(value: &str) -> Result<Url> {
+    let mut url = Url::parse(value).map_err(|_| signer_configuration_error())?;
+    if url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(signer_configuration_error());
+    }
+    let loopback = match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err(signer_configuration_error());
+    }
+    url.set_path("/v1/sign");
+    Ok(url)
+}
+
 fn read_bounded_line(reader: &mut impl Read) -> Option<Vec<u8>> {
     let mut output = Vec::with_capacity(256);
     let mut byte = [0; 1];
@@ -360,7 +481,7 @@ fn read_bounded_line(reader: &mut impl Read) -> Option<Vec<u8>> {
 fn signer_configuration_error() -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::InvalidRequest,
-        "Soda BDMS signer requires both a Node executable and the official native addon",
+        "Soda BDMS signer needs a valid local runtime or HTTPS signing service URL and token",
     )
     .with_platform(Platform::Soda)
 }
@@ -376,9 +497,18 @@ fn signer_start_error() -> TuneWeaveError {
 pub(crate) fn signer_required_error() -> TuneWeaveError {
     TuneWeaveError::new(
         ErrorCode::CapabilityNotSupported,
-        "Soda Qishui requests require the official local security runtime",
+        "Soda Qishui requests require a running official signing service or local security runtime",
     )
     .with_platform(Platform::Soda)
+}
+
+fn signer_service_unavailable_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::CapabilityNotSupported,
+        "Soda signing service is not running or is unreachable",
+    )
+    .with_platform(Platform::Soda)
+    .retryable(true)
 }
 
 fn signer_runtime_error() -> TuneWeaveError {
@@ -390,6 +520,7 @@ fn signer_runtime_error() -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
 
     #[test]
     fn general_signer_matches_the_official_domain_gate() {
@@ -421,6 +552,114 @@ mod tests {
         assert!(!is_passport_url(
             &Url::parse("https://api.qishui.com.evil.example/passport/web/").unwrap()
         ));
+    }
+
+    #[test]
+    fn remote_signer_requires_tls_except_for_loopback() {
+        assert!(validate_remote_endpoint("https://signer.example").is_ok());
+        assert!(validate_remote_endpoint("http://127.0.0.1:7833").is_ok());
+        assert!(validate_remote_endpoint("http://[::1]:7833").is_ok());
+        for endpoint in [
+            "http://signer.example",
+            "http://192.168.1.20:7833",
+            "https://user@signer.example",
+            "https://signer.example/path",
+            "https://signer.example/?token=secret",
+        ] {
+            assert!(validate_remote_endpoint(endpoint).is_err(), "{endpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_signer_sends_authenticated_native_and_passport_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("local mock signer listener");
+        let address = listener.local_addr().expect("local mock address");
+        let token = "a".repeat(64);
+        let expected_token = token.clone();
+        let mock = thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().expect("mock request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("mock read timeout");
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).expect("request line");
+                let mut content_length = 0usize;
+                let mut authenticated = false;
+                let mut correct_route = false;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("request headers");
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        content_length = value.trim().parse().expect("content length");
+                    }
+                    if let Some(value) = lower.strip_prefix("authorization:") {
+                        authenticated = value.trim() == format!("bearer {expected_token}");
+                    }
+                    correct_route = correct_route || request_line.starts_with("POST /v1/sign ");
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).expect("request body");
+                let request: serde_json::Value =
+                    serde_json::from_slice(&body).expect("sign request JSON");
+                assert!(authenticated && correct_route);
+                let response = match request["mode"].as_str() {
+                    Some("native") => {
+                        assert_eq!(request["device_id"], "7100000000000000001");
+                        serde_json::json!({"ok":true,"headers":{"x-helios":"signed-h","x-medusa":"signed-m"}})
+                    }
+                    Some("passport") => {
+                        assert_eq!(request["method"], "POST");
+                        assert_eq!(request["cookies"]["sessionid_ss"], "synthetic");
+                        serde_json::json!({"ok":true,"url":"https://api.qishui.com/passport/web/check_qrconnect/?aid=386088&a_bogus=signed"})
+                    }
+                    _ => panic!("unexpected signer mode"),
+                };
+                let body = serde_json::to_vec(&response).expect("response JSON");
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("response headers");
+                stream.write_all(&body).expect("response body");
+                stream.flush().expect("flush response");
+            }
+        });
+
+        let signer = SodaBdmsSigner::remote(&format!("http://{address}"), token)
+            .expect("loopback remote signer");
+        let native = signer
+            .sign(
+                "7100000000000000001".to_owned(),
+                "https://api.qishui.com/luna/pc/me?aid=386088".to_owned(),
+                vec![("cookie".to_owned(), "sessionid_ss=synthetic".to_owned())],
+            )
+            .await
+            .expect("native signatures");
+        assert_eq!(native["x-helios"], "signed-h");
+        assert_eq!(native["x-medusa"], "signed-m");
+        let passport = signer
+            .sign_passport(
+                "POST".to_owned(),
+                "https://api.qishui.com/passport/web/check_qrconnect/?aid=386088".to_owned(),
+                Vec::new(),
+                Some("token=synthetic".to_owned()),
+                std::collections::BTreeMap::from([(
+                    "sessionid_ss".to_owned(),
+                    "synthetic".to_owned(),
+                )]),
+            )
+            .await
+            .expect("passport signature");
+        assert!(passport.query_pairs().any(|(name, _)| name == "a_bogus"));
+        mock.join().expect("mock service thread");
     }
 
     #[tokio::test]

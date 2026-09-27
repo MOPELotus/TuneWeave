@@ -111,6 +111,21 @@ X-TuneWeave-Credential: twc1_<opaque-base64url>
 
 咪咕 `expires_at` 仅在唯一明确生效的订阅有日期且不存在其他未知当前身份或订阅生效状态时返回；多个并存会员的日期分别保留在 `cards[].subscriptions[].expires_at`。日期保持平台本地日历精度，例如 `2026-10-01`、`2026-10-01T12:30`，不补造时区或日末时刻；`extensions.expiry_format=platform_local_calendar` 明确这一格式。连续包月和平台 2099 哨兵值保持未知到期日。详细模式的 `extensions.media_member_identities` 单独保留跨业务身份、付费类型和日期，不将它们合并成音乐会员的 `active` 或到期日；详细来源请求失败会返回错误，不伪装成空列表。会员资料不是某一歌曲的实时播放／下载授权。响应与失败路径的凭据更新均遵循上述 `no-store` 规则，真实普通及付费账户仍待最终验收。
 
+## 汽水官方签名服务
+
+汽水 PC 接口的设备签名可使用 TuneWeave 进程内配置的本地运行时，也可以连接单独运行的签名服务。Windows 用户可下载 [`TuneWeave-SodaSigner.exe`](https://raw.githubusercontent.com/MOPELotus/TuneWeave/dev/tools/auxiliary/TuneWeave-SodaSigner.exe)；它默认只监听 `127.0.0.1:7833`，通过 `/healthz` 提供状态检查，并处理 `/v1/sign` 的 native 与 Passport 签名请求。首次启动时，服务会把随程序提供的运行文件解压到当前用户的 `%LOCALAPPDATA%\TuneWeave\SodaSigner`，不会写入 TuneWeave 发布包。
+
+服务启动后会生成并显示一个随机 bearer token。把显示的同一 token 配置给 TuneWeave 服务进程：
+
+```text
+TUNEWEAVE_SODA_BDMS_SERVICE_URL=http://127.0.0.1:7833
+TUNEWEAVE_SODA_BDMS_SERVICE_TOKEN=<签名服务显示的 token>
+```
+
+若服务由管理员显式配置了 token，TuneWeave 仍使用此变量传入同一值。服务端可用 `TUNEWEAVE_SODA_BDMS_BIND` 修改监听地址，默认地址保持 loopback；设置 `TUNEWEAVE_SODA_BDMS_TOKEN` 可指定服务 token。绑定到 loopback 以外的地址时，必须同时设置 `TUNEWEAVE_SODA_BDMS_TLS_CERT` 和 `TUNEWEAVE_SODA_BDMS_TLS_KEY`，并在 TuneWeave 端使用受信任证书对应的 HTTPS 地址。TuneWeave 只接受 HTTPS，只有 localhost/loopback 才允许 HTTP；URL 配置为服务 origin，不附加路径。
+
+签名服务需要持续运行。关闭或无法连接时，汽水请求会返回“签名服务未运行或无法访问”；此时可启动服务或恢复本地运行时配置。服务不会保存账户凭证，但会在内存中短暂接收 Passport 签名所需的请求 Cookie；不要把 token、Cookie 或请求正文写入日志，也不要将 bearer token 公开给其他用户。远程连接必须使用 TLS。
+
 ## 二维码登录
 
 创建事务：
