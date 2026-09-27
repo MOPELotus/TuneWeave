@@ -392,7 +392,7 @@ async fn account_playlist_source_is_required_and_account_album_cannot_fall_back_
     assert!(
         requests
             .iter()
-            .all(|r| r.starts_with("GET /luna/pc/me?aid=386088 "))
+            .all(|r| r.starts_with("GET /luna/pc/me?aid=386088&app_name=luna_pc"))
     );
 }
 

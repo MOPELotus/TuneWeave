@@ -203,13 +203,13 @@ async fn playlist_visibility_update_uses_the_selected_pc_account_and_exact_wire_
             assert_eq!(query["aid"], "386088");
             assert_eq!(query["app_name"], "luna_pc");
             assert_eq!(query["device_platform"], "windows");
-            assert_eq!(query["version_name"], "2.1.0");
-            assert_eq!(query["version_code"], "20010000");
+            assert_eq!(query["version_name"], "3.7.0");
+            assert_eq!(query["version_code"], "30070000");
             assert_eq!(query["channel"], "official");
             assert_eq!(query["fp"], query["device_id"]);
             assert!(!query["device_id"].is_empty());
-            assert!(!query["iid"].is_empty());
-            assert_ne!(query["device_id"], query["iid"]);
+            assert_eq!(query["iid"], "");
+            assert!(!query.contains_key("install_id"));
             assert!(!query.contains_key("user_id"));
             assert!(requests[3].starts_with("GET /luna/pc/playlist/detail?"));
             assert!(requests[3].contains("sessionid_ss=updated"));

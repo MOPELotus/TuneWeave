@@ -20,6 +20,7 @@ const VERIFY_KEYS: [&str; 7] = [
     "std_verify_type",
     "std_verify_way",
 ];
+const NEW_AUTHN_SDK_VERSION: &str = "1.0.0.428-web";
 const CONTAINERS: [&str; 10] = [
     "data",
     "biz_params",
@@ -187,7 +188,7 @@ impl SodaMfa {
             ("new_verify_flow".to_owned(), String::new()),
             (
                 "new_authn_sdk_version".to_owned(),
-                "1.0.0.404-web".to_owned(),
+                NEW_AUTHN_SDK_VERSION.to_owned(),
             ),
         ]);
         let endpoint = match action {
@@ -279,14 +280,6 @@ impl SodaMfa {
                     return Err(invalid_mfa());
                 }
                 self.validated = true;
-                self.params.insert(
-                    "std_verify_way".to_owned(),
-                    method_name(match action {
-                        QrVerificationAction::VerifyUpSms => QrVerificationMethod::UpSms,
-                        _ => QrVerificationMethod::Sms,
-                    })
-                    .to_owned(),
-                );
             }
         }
         Ok(())
@@ -331,7 +324,7 @@ fn collect(
                     if text.len() > 4096 || text.chars().any(char::is_control) {
                         return Err(invalid_mfa());
                     }
-                    if !text.is_empty() {
+                    if !text.is_empty() || key == "std_verify_way" {
                         if fields.get(key).is_some_and(|existing| existing != &text) {
                             return Err(invalid_mfa());
                         }
@@ -423,8 +416,10 @@ pub(crate) mod tests {
         serde_json::to_vec(&serde_json::json!({"data": {
             "account_flow":"verify", "error_code":2046, "encrypt_uid":"encrypted-user-secret",
             "mobile":"13800138000", "biz_params": {"std_verify_flow_id":"flow-secret",
-            "std_verify_token":"verify-token-secret", "std_verify_type":1, "verify_way":"mobile_sms_verify"}
-        }})).unwrap()
+            "std_verify_token":"verify-token-secret", "std_verify_type":1, "std_verify_way":"",
+            "verify_way":"mobile_sms_verify"}
+        }}))
+        .unwrap()
     }
 
     #[test]
@@ -450,6 +445,7 @@ pub(crate) mod tests {
         assert_eq!(params["aid"], "386088");
         assert_eq!(params["encrypt_uid"], "encrypted-user-secret");
         assert_eq!(params["std_verify_way"], "mobile_sms_verify");
+        assert_eq!(params["new_authn_sdk_version"], NEW_AUTHN_SDK_VERSION);
         assert_eq!(
             state
                 .prepare(&QrVerificationAction::SendSms)
@@ -486,6 +482,7 @@ pub(crate) mod tests {
             .into_owned()
             .collect();
         assert_eq!(params["code"], "383634323039");
+        assert_eq!(params["new_authn_sdk_version"], NEW_AUTHN_SDK_VERSION);
         assert!(
             state
                 .accept(
@@ -512,6 +509,33 @@ pub(crate) mod tests {
         let mut replacement = SodaMfa::parse(&sms_fixture()).unwrap();
         replacement.preserve_limits(&state);
         assert_eq!(replacement.attempts, 8);
+    }
+
+    #[test]
+    fn successful_sms_keeps_the_original_empty_poll_way_for_qr_continuation() {
+        let mut state = SodaMfa::parse(&sms_fixture()).unwrap();
+        state.prepare(&QrVerificationAction::SendSms).unwrap();
+        state
+            .accept(
+                &QrVerificationAction::SendSms,
+                br#"{"message":"success","data":{"retry_time":60}}"#,
+            )
+            .unwrap();
+        let action = QrVerificationAction::SubmitSms {
+            code: "864209".to_owned(),
+        };
+        state.prepare(&action).unwrap();
+        state
+            .accept(
+                &action,
+                br#"{"message":"success","data":{"ticket":"safe-test-ticket"}}"#,
+            )
+            .unwrap();
+        assert!(state.validated);
+        assert_eq!(
+            state.params.get("std_verify_way").map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use reqwest::{
-    Method,
-    header::{ACCEPT, COOKIE},
+    Method, RequestBuilder,
+    header::{ACCEPT, COOKIE, USER_AGENT},
 };
 use serde::Deserialize;
 use tuneweave_core::{
@@ -14,12 +14,52 @@ use url::Url;
 use crate::{
     client::{
         SodaClient, SodaImage, normalize_image, read_bounded_response, soda_http_error,
-        soda_network_error, soda_upstream_error,
+        soda_upstream_error,
     },
+    device::SodaDeviceState,
     login::SodaCredential,
 };
 
-const ACCOUNT_ENDPOINT: &str = "https://api.qishui.com/luna/pc/me?aid=386088";
+const LUNA_PC_ORIGIN: &str = "https://api.qishui.com";
+const LUNA_PC_USER_AGENT: &str = "LunaPC/3.7.0(452316191)";
+const LUNA_PC_VERSION_NAME: &str = "3.7.0";
+const LUNA_PC_VERSION_CODE: &str = "30070000";
+
+pub(crate) fn luna_pc_endpoint(path: &str, device: &SodaDeviceState) -> Result<Url> {
+    let mut endpoint = Url::parse(LUNA_PC_ORIGIN)
+        .map_err(|_| soda_upstream_error("Soda PC endpoint is invalid"))?;
+    endpoint.set_path(path);
+    endpoint
+        .query_pairs_mut()
+        .append_pair("aid", "386088")
+        .append_pair("app_name", "luna_pc")
+        .append_pair("region", "cn")
+        .append_pair("geo_region", "cn")
+        .append_pair("os_region", "cn")
+        .append_pair("sim_region", "")
+        .append_pair("device_id", &device.device_id)
+        .append_pair("cdid", "")
+        .append_pair("iid", "")
+        .append_pair("version_name", LUNA_PC_VERSION_NAME)
+        .append_pair("version_code", LUNA_PC_VERSION_CODE)
+        .append_pair("channel", "official")
+        .append_pair("build_mode", "master")
+        .append_pair("network_carrier", "")
+        .append_pair("ac", "wifi")
+        .append_pair("tz_name", "Asia/Shanghai")
+        .append_pair("resolution", "")
+        .append_pair("device_platform", "windows")
+        .append_pair("device_type", "Windows")
+        .append_pair("os_version", "Windows 11 Pro for Workstations")
+        .append_pair("fp", &device.device_id);
+    Ok(endpoint)
+}
+
+pub(crate) fn add_luna_pc_headers(request: RequestBuilder) -> RequestBuilder {
+    request
+        .header(USER_AGENT, LUNA_PC_USER_AGENT)
+        .header(ACCEPT, "application/json")
+}
 
 pub(crate) struct SodaAccount {
     pub profile: AccountProfile,
@@ -53,15 +93,15 @@ impl SodaClient {
         let started = Instant::now();
         let mut http_status = None;
         let result = async {
-            let endpoint = Url::parse(ACCOUNT_ENDPOINT)
-                .map_err(|_| soda_upstream_error("Soda account endpoint is invalid"))?;
+            let current_credential = crate::login::token_beat(self, credential).await?;
+            let device = self.login_device()?;
+            let endpoint = luna_pc_endpoint("/luna/pc/me", &device)?;
             let response = self
-                .login_request(Method::GET, endpoint)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(self.login_request(Method::GET, endpoint))
+                        .header(COOKIE, current_credential.cookie_header()?),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -71,7 +111,7 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let body = read_bounded_response(response, "Soda account profile").await?;
-            let account = parse_account(alias, credential, &body)?;
+            let account = parse_account(alias, &current_credential, &body)?;
             Ok(SodaAccount {
                 profile: account.profile,
                 membership: account.membership,
@@ -311,5 +351,81 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
+    }
+
+    #[tokio::test]
+    async fn fresh_qr_account_check_beats_token_then_uses_windows_pc_profile_context() {
+        let (origin, requests) = crate::test_http::serve(vec![
+            crate::test_http::json(
+                r#"{"message":"success"}"#,
+                Some("sessionid_ss=rotated-session; Path=/; HttpOnly"),
+            ),
+            crate::test_http::json(
+                r#"{"status_code":0,"my_info":{"id":"123456","nickname":"Win account"}}"#,
+                None,
+            ),
+        ])
+        .await;
+        let client = SodaClient::test_client().with_auth_test_origin(origin);
+        let credential = SodaCredential::test_credential("test-session")
+            .with_passport_context(
+                "7b7e",
+                "a1b2c3d4",
+                "00000000-0000-4000-8000-000000000000.login",
+            )
+            .unwrap();
+        let account = client.account("default", &credential).await.unwrap();
+        assert_eq!(account.profile.user_id.as_deref(), Some("123456"));
+        assert!(
+            account
+                .credential
+                .cookie_header()
+                .unwrap()
+                .contains("sessionid_ss=rotated-session")
+        );
+        assert!(!account.credential.serialize().unwrap().contains("7b7e"));
+
+        let requests = requests.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /passport/token/beat/web/?"));
+        assert!(requests[0].contains("scene=boot"));
+        assert!(requests[0].contains("version=1.2.14"));
+        assert!(requests[0].contains("p_bd=1.0.0.41"));
+        assert!(requests[0].to_ascii_lowercase().contains("sodamusic/3.7.0"));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("cookie: sessionid_ss=test-session")
+        );
+
+        assert!(requests[1].starts_with("GET /luna/pc/me?"));
+        assert!(requests[1].contains("app_name=luna_pc"));
+        assert!(requests[1].contains("version_name=3.7.0"));
+        assert!(requests[1].contains("version_code=30070000"));
+        assert!(requests[1].contains("device_platform=windows"));
+        assert!(requests[1].contains("device_type=Windows"));
+        assert!(requests[1].contains("os_version=Windows+11+Pro+for+Workstations"));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("user-agent: lunapc/3.7.0(452316191)")
+        );
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("cookie: sessionid_ss=rotated-session")
+        );
+        let target = requests[1]
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let url = Url::parse(&format!("http://test.invalid{target}")).unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(query.get("fp"), query.get("device_id"));
     }
 }

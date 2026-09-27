@@ -190,13 +190,13 @@ async fn playlist_track_mutations_use_the_selected_source_and_confirm_ordered_re
             assert_eq!(query["aid"], "386088");
             assert_eq!(query["app_name"], "luna_pc");
             assert_eq!(query["device_platform"], "windows");
-            assert_eq!(query["version_name"], "2.1.0");
-            assert_eq!(query["version_code"], "20010000");
+            assert_eq!(query["version_name"], "3.7.0");
+            assert_eq!(query["version_code"], "30070000");
             assert_eq!(query["channel"], "official");
             assert_eq!(query["fp"], query["device_id"]);
             assert!(!query["device_id"].is_empty());
-            assert!(!query["iid"].is_empty());
-            assert_ne!(query["device_id"], query["iid"]);
+            assert_eq!(query["iid"], "");
+            assert!(!query.contains_key("install_id"));
 
             if caller {
                 assert_eq!(

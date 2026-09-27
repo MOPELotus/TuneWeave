@@ -44,12 +44,12 @@ impl SodaClient {
                 .append_pair("iid", &device.install_id)
                 .append_pair("fp", &device.device_id);
             let mut response = self
-                .login_request(reqwest::Method::GET, url)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::COOKIE, credential.cookie_header()?)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::GET, url)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .header(reqwest::header::COOKIE, credential.cookie_header()?),
+                )
+                .await?;
             status = Some(response.status());
             if response.headers().contains_key("bdturing-verify") {
                 return Err(TuneWeaveError::new(
@@ -128,7 +128,7 @@ impl SodaClient {
         let started = Instant::now();
         let mut status = None;
         let result = async {
-            let response = request.send().await.map_err(soda_network_error)?;
+            let response = self.send_login_request(request).await?;
             status = Some(response.status());
             // Neither a 200 response nor its body/Cookie proves invalidation. Drop
             // the body without buffering it; the Provider always independently probes.

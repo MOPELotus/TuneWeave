@@ -143,7 +143,7 @@ async fn album_collections_read_full_mixed_pages_before_unified_paging_and_keep_
                 assert_eq!(requests.len(), 4);
                 for (index, cookie) in ["verified", "one", "two"].into_iter().enumerate() {
                     assert!(requests[index + 1].starts_with("GET /luna/pc/me/collection/mixed?"));
-                    assert!(requests[index + 1].contains("count=100"));
+                    assert!(requests[index + 1].contains("count=500"));
                     assert!(requests[index + 1].contains(&format!("sessionid_ss={cookie}")));
                 }
             }

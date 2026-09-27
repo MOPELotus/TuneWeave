@@ -77,11 +77,11 @@ impl SodaClient {
         let result = async {
             // The returned signed URL authorizes this GET; account cookies never leave PC APIs.
             let response = self
-                .login_request(reqwest::Method::GET, url)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::GET, url)
+                        .header(reqwest::header::ACCEPT, "application/json"),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() != StatusCode::OK {
                 let mut error = soda_media_http_error(response.status());

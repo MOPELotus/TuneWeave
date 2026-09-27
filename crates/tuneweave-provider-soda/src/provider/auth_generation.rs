@@ -46,6 +46,7 @@ impl SodaProvider {
         login_type: Option<&str>,
         account: Option<&str>,
         mode: CredentialMode,
+        client_context: Option<serde_json::Value>,
     ) -> Result<ProviderQrStart> {
         if let Some(login_type) = login_type.map(str::trim).filter(|value| !value.is_empty())
             && !matches!(
@@ -61,7 +62,8 @@ impl SodaProvider {
             self.authentication_lease(account, mode, Instant::now() + Duration::from_secs(300))?;
         let result = tokio::time::timeout_at(
             lease.deadline.into(),
-            self.qr_transactions.start(&self.client, mode),
+            self.qr_transactions
+                .start(&self.client, mode, client_context),
         )
         .await;
         let start = match result {

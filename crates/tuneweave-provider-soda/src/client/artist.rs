@@ -76,11 +76,11 @@ impl SodaClient {
             let url = Url::parse(ARTIST_SHARE_ENDPOINT)
                 .map_err(|_| soda_upstream_error("Soda artist endpoint is invalid"))?;
             let response = self
-                .login_request(reqwest::Method::GET, url)
-                .query(&[("artist_id", id)])
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::GET, url)
+                        .query(&[("artist_id", id)]),
+                )
+                .await?;
             http_status = Some(response.status());
             if !response.status().is_success() {
                 return Err(soda_http_error(response.status()));

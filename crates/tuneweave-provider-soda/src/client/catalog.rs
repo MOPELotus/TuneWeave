@@ -103,20 +103,19 @@ impl SodaClient {
             // This builder only selects the fixed transport. No login state or
             // Cookie is attached to public catalogue search requests.
             let response = self
-                .login_request(reqwest::Method::GET, url)
-                .query(&SodaSearchQuery {
-                    q: query,
-                    aid: SODA_APP_ID,
-                    cursor,
-                    count: UPSTREAM_SEARCH_PAGE_SIZE,
-                    app_name: "luna",
-                    device_platform: "android",
-                    version_name: "19.8.0",
-                    version_code: "100198030",
-                })
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(self.login_request(reqwest::Method::GET, url).query(
+                    &SodaSearchQuery {
+                        q: query,
+                        aid: SODA_APP_ID,
+                        cursor,
+                        count: UPSTREAM_SEARCH_PAGE_SIZE,
+                        app_name: "luna",
+                        device_platform: "android",
+                        version_name: "19.8.0",
+                        version_code: "100198030",
+                    },
+                ))
+                .await?;
             status = Some(response.status());
             let bytes = read_bounded_response(response, "Soda catalogue search").await?;
             parse_catalog(&bytes, kind, cursor)

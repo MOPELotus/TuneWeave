@@ -2017,6 +2017,19 @@ pub trait MusicProvider: Send + Sync {
         self.start_qr_login_with_mode(login_type, mode).await
     }
 
+    /// Start a QR flow with optional browser context supplied by the calling
+    /// client. Providers that do not need it keep their existing behavior.
+    async fn start_qr_login_for_account_with_context(
+        &self,
+        login_type: Option<&str>,
+        account: &str,
+        mode: CredentialMode,
+        _client_context: Option<serde_json::Value>,
+    ) -> Result<ProviderQrStart> {
+        self.start_qr_login_for_account(login_type, account, mode)
+            .await
+    }
+
     async fn poll_qr_login(
         &self,
         _provider_transaction_id: &str,

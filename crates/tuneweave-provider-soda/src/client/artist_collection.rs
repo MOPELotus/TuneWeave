@@ -78,14 +78,14 @@ impl SodaClient {
                 query.append_pair("count", &ARTIST_PAGE_SIZE.to_string());
             }
             let response = self
-                .login_request(reqwest::Method::GET, url)
-                .header(ACCEPT, "application/json")
-                .header("x-luna-api-version", LUNA_API_VERSION)
-                .header("x-luna-is-login", "1")
-                .header(COOKIE, credential.cookie_header()?)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::GET, url)
+                        .header(ACCEPT, "application/json")
+                        .header("x-luna-api-version", LUNA_API_VERSION)
+                        .header("x-luna-is-login", "1")
+                        .header(COOKIE, credential.cookie_header()?),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(artist_collection_authentication_required());
@@ -151,15 +151,15 @@ impl SodaClient {
                 artist_ids: [artist_id],
             };
             let response = self
-                .login_request(reqwest::Method::POST, url)
-                .header(ACCEPT, "application/json")
-                .header("x-luna-api-version", LUNA_API_VERSION)
-                .header("x-luna-is-login", "1")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::POST, url)
+                        .header(ACCEPT, "application/json")
+                        .header("x-luna-api-version", LUNA_API_VERSION)
+                        .header("x-luna-is-login", "1")
+                        .header(COOKIE, credential.cookie_header()?)
+                        .json(&body),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(artist_collection_authentication_required());

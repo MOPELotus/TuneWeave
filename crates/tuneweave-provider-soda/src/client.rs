@@ -8,7 +8,7 @@ use std::{
 
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, LOCATION},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,8 @@ use tuneweave_core::{
     UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary,
 };
 use url::Url;
+
+use crate::bdms::{SodaBdmsSigner, is_passport_url, should_sign_url, signer_required_error};
 
 mod account_album;
 mod account_digital_albums;
@@ -101,13 +103,17 @@ pub struct SodaClient {
     http: Client,
     proxy_configured: bool,
     device: Arc<SodaDeviceStore>,
+    bdms_signer: Option<SodaBdmsSigner>,
     #[cfg(test)]
     auth_origin: Option<Url>,
 }
 
 impl fmt::Debug for SodaClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("SodaClient").finish_non_exhaustive()
+        formatter
+            .debug_struct("SodaClient")
+            .field("bdms_signer_configured", &self.bdms_signer.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -696,6 +702,7 @@ impl FlexibleText {
 
 impl SodaClient {
     pub fn new(config: &SodaConfig) -> Result<Self> {
+        let bdms_signer = SodaBdmsSigner::from_env()?;
         let mut builder = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
@@ -716,6 +723,7 @@ impl SodaClient {
             http,
             proxy_configured: config.proxy_url.is_some(),
             device: Arc::new(SodaDeviceStore::new(config.device_path.clone())),
+            bdms_signer,
             #[cfg(test)]
             auth_origin: None,
         })
@@ -742,6 +750,50 @@ impl SodaClient {
             url
         };
         self.http.request(method, url)
+    }
+
+    pub(crate) async fn send_login_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let mut request = builder.build().map_err(soda_network_error)?;
+        if request_requires_soda_signer(&request) {
+            let signer = self
+                .bdms_signer
+                .as_ref()
+                .ok_or_else(signer_required_error)?;
+            if is_passport_url(request.url()) {
+                let headers = soda_signing_headers(request.headers())?;
+                let body = request
+                    .body()
+                    .map(|body| {
+                        let bytes = body.as_bytes().ok_or_else(soda_signing_context_error)?;
+                        std::str::from_utf8(bytes)
+                            .map(str::to_owned)
+                            .map_err(|_| soda_signing_context_error())
+                    })
+                    .transpose()?;
+                let cookies = soda_cookie_context(request.headers().get(COOKIE))?;
+                let signed_url = signer
+                    .sign_passport(
+                        request.method().as_str().to_owned(),
+                        request.url().as_str().to_owned(),
+                        headers,
+                        body,
+                        cookies,
+                    )
+                    .await?;
+                *request.url_mut() = signed_url;
+            } else {
+                let device = self.login_device()?;
+                let headers = soda_signing_headers(request.headers())?;
+                let signed = signer
+                    .sign(device.device_id, request.url().as_str().to_owned(), headers)
+                    .await?;
+                request.headers_mut().extend(signed);
+            }
+        }
+        self.http.execute(request).await.map_err(soda_network_error)
     }
 
     #[cfg(test)]
@@ -1050,10 +1102,8 @@ impl SodaClient {
                 let url = Url::parse(url)
                     .map_err(|_| soda_upstream_error("Soda media URL is invalid"))?;
                 let response = self
-                    .login_request(reqwest::Method::GET, url)
-                    .send()
-                    .await
-                    .map_err(soda_network_error)?;
+                    .send_login_request(self.login_request(reqwest::Method::GET, url))
+                    .await?;
                 http_status = Some(response.status());
                 read_bounded_media_response(response, media.spec.size).await
             }
@@ -1205,6 +1255,62 @@ impl SodaClient {
         }
         .emit();
     }
+}
+
+fn request_requires_soda_signer(request: &reqwest::Request) -> bool {
+    is_passport_url(request.url())
+        || (should_sign_url(request.url()) && request.headers().contains_key(COOKIE))
+}
+
+fn soda_signing_headers(headers: &reqwest::header::HeaderMap) -> Result<Vec<(String, String)>> {
+    let mut output = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        let value = value.to_str().map_err(|_| soda_signing_context_error())?;
+        if !matches!(name.as_str(), "x-helios" | "x-medusa") {
+            output.push((name.as_str().to_owned(), value.to_owned()));
+        }
+    }
+    Ok(output)
+}
+
+fn soda_cookie_context(
+    header: Option<&reqwest::header::HeaderValue>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let Some(header) = header else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let header = header.to_str().map_err(|_| soda_signing_context_error())?;
+    let mut cookies = std::collections::BTreeMap::new();
+    if header.is_empty() {
+        return Ok(cookies);
+    }
+    for pair in header.split(';') {
+        let (name, value) = pair
+            .trim()
+            .split_once('=')
+            .ok_or_else(soda_signing_context_error)?;
+        if name.is_empty()
+            || value.is_empty()
+            || name
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b';' || byte == b'=')
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b';')
+            || cookies.insert(name.to_owned(), value.to_owned()).is_some()
+        {
+            return Err(soda_signing_context_error());
+        }
+    }
+    Ok(cookies)
+}
+
+fn soda_signing_context_error() -> TuneWeaveError {
+    TuneWeaveError::new(
+        ErrorCode::UpstreamError,
+        "Soda request context could not be passed to the local security runtime",
+    )
+    .with_platform(Platform::Soda)
 }
 
 fn soda_track_v2_operation(operation: &'static str) -> &'static str {
@@ -3866,10 +3972,41 @@ mod tests {
         assert!(debug.contains("[configured]"));
         assert!(!debug.contains("secret"));
         assert!(!debug.contains("example.test"));
-        assert_eq!(
-            format!("{:?}", SodaClient::test_client()),
-            "SodaClient { .. }"
-        );
+        let client_debug = format!("{:?}", SodaClient::test_client());
+        assert!(client_debug.contains("bdms_signer_configured: false"));
+        assert!(!client_debug.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn qishui_login_requests_fail_closed_when_the_official_signer_is_unavailable() {
+        let client = SodaClient::test_client();
+        let anonymous = client
+            .login_request(
+                reqwest::Method::GET,
+                Url::parse("https://api.qishui.com/luna/pc/me?aid=386088")
+                    .expect("fixed public Qishui URL"),
+            )
+            .build()
+            .expect("anonymous Qishui request");
+        assert!(!request_requires_soda_signer(&anonymous));
+
+        for url in [
+            "https://api.qishui.com/passport/web/get_qrcode/?aid=386088",
+            "https://api.qishui.com/luna/pc/me?aid=386088",
+        ] {
+            let mut request = client.login_request(
+                reqwest::Method::GET,
+                Url::parse(url).expect("fixed Qishui URL"),
+            );
+            if url.contains("/luna/") {
+                request = request.header(COOKIE, "sessionid_ss=synthetic");
+            }
+            let error = client
+                .send_login_request(request)
+                .await
+                .expect_err("unsigned Qishui request must not reach the network");
+            assert_eq!(error.code, ErrorCode::CapabilityNotSupported);
+        }
     }
 
     #[test]

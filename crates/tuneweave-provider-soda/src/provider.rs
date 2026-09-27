@@ -1121,7 +1121,7 @@ impl MusicProvider for SodaProvider {
         login_type: Option<&str>,
         mode: CredentialMode,
     ) -> Result<ProviderQrStart> {
-        self.start_bound_qr(login_type, None, mode).await
+        self.start_bound_qr(login_type, None, mode, None).await
     }
 
     async fn start_qr_login_for_account(
@@ -1130,7 +1130,19 @@ impl MusicProvider for SodaProvider {
         account: &str,
         mode: CredentialMode,
     ) -> Result<ProviderQrStart> {
-        self.start_bound_qr(login_type, Some(account), mode).await
+        self.start_bound_qr(login_type, Some(account), mode, None)
+            .await
+    }
+
+    async fn start_qr_login_for_account_with_context(
+        &self,
+        login_type: Option<&str>,
+        account: &str,
+        mode: CredentialMode,
+        client_context: Option<serde_json::Value>,
+    ) -> Result<ProviderQrStart> {
+        self.start_bound_qr(login_type, Some(account), mode, client_context)
+            .await
     }
 
     async fn poll_qr_login(
@@ -2323,7 +2335,7 @@ mod tests {
                 .all(|(i, request)| request.starts_with(if i % 3 == 1 {
                     "POST /luna/pc/commerce/v2/commerce_info?"
                 } else {
-                    "GET /luna/pc/me?aid=386088 "
+                    "GET /luna/pc/me?aid=386088&app_name=luna_pc"
                 }))
         );
         assert!(
@@ -2432,9 +2444,9 @@ mod tests {
                 assert!(!request.contains("other-secret"));
             }
             assert!(requests[1].starts_with("GET /luna/pc/me/playlist?"));
-            assert!(requests[2].contains("cursor=c1&count=100"));
+            assert!(requests[2].contains("cursor=c1&count=50"));
             assert!(requests[3].starts_with("GET /luna/pc/me/collection/mixed?"));
-            assert!(requests[4].contains("cursor=s1&count=100"));
+            assert!(requests[4].contains("cursor=s1&count=500"));
             assert!(
                 !requests
                     .iter()
@@ -2442,7 +2454,8 @@ mod tests {
             );
             let device = provider.client.login_device().unwrap();
             for request in &requests[1..] {
-                assert!(request.contains(&format!("iid={}", device.install_id)));
+                assert!(request.contains("iid=&"));
+                assert!(!request.contains("install_id="));
                 assert!(request.contains(&format!("device_id={}", device.device_id)));
             }
         }
@@ -2771,7 +2784,7 @@ mod tests {
                     serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
                 assert_eq!(body, json!({"playlist_ids":["21"]}));
                 assert!(requests[2].starts_with("GET /luna/pc/me/collection/mixed?"));
-                assert!(requests[3].contains("cursor=next&count=100"));
+                assert!(requests[3].contains("cursor=next&count=500"));
                 for (request, cookie) in
                     requests
                         .iter()
@@ -2782,7 +2795,8 @@ mod tests {
                 }
                 let device = provider.client.login_device().unwrap();
                 for request in &requests[1..] {
-                    assert!(request.contains(&format!("iid={}", device.install_id)));
+                    assert!(request.contains("iid=&"));
+                    assert!(!request.contains("install_id="));
                     assert!(request.contains(&format!("device_id={}", device.device_id)));
                 }
             }
@@ -3128,12 +3142,10 @@ mod tests {
         );
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 3);
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.starts_with("GET /luna/pc/me?aid=386088 ")
-                    && request.contains("sessionid_ss=import-secret"))
-        );
+        assert!(requests.iter().all(|request| {
+            request.starts_with("GET /luna/pc/me?aid=386088&app_name=luna_pc")
+                && request.contains("sessionid_ss=import-secret")
+        }));
     }
 
     #[tokio::test]
@@ -3522,7 +3534,7 @@ mod tests {
             caller.secret()
         );
         let requests = server.await.unwrap();
-        assert!(requests[0].starts_with("GET /luna/pc/me?aid=386088 "));
+        assert!(requests[0].starts_with("GET /luna/pc/me?aid=386088&app_name=luna_pc"));
         assert!(requests[0].contains("sessionid_ss=session-secret"));
         std::fs::remove_dir_all(root).expect("remove credential directory");
     }

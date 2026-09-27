@@ -103,7 +103,7 @@ async fn pc_and_mobile_account_suggestions_accept_only_selected_source_and_final
                 }
                 let requests = server.await.unwrap();
                 assert_eq!(requests.len(), 2);
-                assert!(requests[0].starts_with("GET /luna/pc/me?aid=386088 "));
+                assert!(requests[0].starts_with("GET /luna/pc/me?aid=386088&app_name=luna_pc"));
                 assert!(requests[0].contains("sessionid_ss=session-secret"));
                 assert!(
                     requests[1].starts_with(if client == SearchSuggestionClient::Pc {

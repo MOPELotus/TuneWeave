@@ -13883,6 +13883,7 @@ struct AuthQrStartBody {
     platform: String,
     account: Option<String>,
     login_type: Option<String>,
+    client_context: Option<Value>,
     #[serde(default)]
     credential_mode: CredentialMode,
 }
@@ -13902,10 +13903,21 @@ async fn auth_qr_start(
     caller_scope::mark_sensitive();
     let body = json_body(payload)?;
     let platform = parse_platform_parameter(&body.platform)?;
+    if body.client_context.is_some() && platform != Platform::Soda {
+        return Err(TuneWeaveError::invalid_request(
+            "client_context is supported only for Soda QR login",
+        )
+        .into());
+    }
     let account = login_account_alias(body.account.as_deref(), body.credential_mode)?;
     let provider = state.registry.require(platform)?;
     let start = provider
-        .start_qr_login_for_account(body.login_type.as_deref(), &account, body.credential_mode)
+        .start_qr_login_for_account_with_context(
+            body.login_type.as_deref(),
+            &account,
+            body.credential_mode,
+            body.client_context,
+        )
         .await?;
     let transaction_id = state.auth_transactions.insert(StoredAuthKind::Qr {
         platform,

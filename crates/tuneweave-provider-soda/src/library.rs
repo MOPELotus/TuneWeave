@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, time::Instant};
 
 use reqwest::{
     Method,
-    header::{ACCEPT, CONTENT_TYPE, COOKIE},
+    header::{CONTENT_TYPE, COOKIE},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -13,14 +13,15 @@ use tuneweave_core::{
 use url::Url;
 
 use crate::{
+    account::{add_luna_pc_headers, luna_pc_endpoint},
     client::{
         SodaClient, SodaImage, normalize_image, read_bounded_response, soda_http_error,
-        soda_network_error, soda_upstream_error,
+        soda_upstream_error,
     },
     login::SodaCredential,
 };
 
-pub(crate) const LIBRARY_PAGE_SIZE: usize = 100;
+pub(crate) const LIBRARY_PAGE_SIZE: usize = 500;
 mod albums;
 const MAX_LIBRARY_PAGES: usize = 64;
 const MAX_LIBRARY_ITEMS: usize = 10_000;
@@ -61,6 +62,20 @@ struct StatusInfo {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySavedLibraryResponse {
+    status_info: EmptySavedLibraryStatusInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySavedLibraryStatusInfo {
+    log_id: String,
+    now: u64,
+    now_ts_ms: u64,
+}
+
+#[derive(Deserialize)]
 struct CollectionWriteEnvelope {
     status_code: Option<i64>,
     status_info: Option<StatusInfo>,
@@ -70,12 +85,6 @@ struct CollectionWriteEnvelope {
 struct PlaylistCreateEnvelope {
     status_code: Option<i64>,
     status_info: Option<StatusInfo>,
-    playlist: Option<CreatedPlaylist>,
-}
-
-#[derive(Deserialize)]
-struct CreatedPlaylist {
-    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,38 +143,23 @@ type LibraryPageParser<T> =
 impl SodaClient {
     fn library_url(&self, path: &str, cursor: Option<&str>) -> Result<Url> {
         let device = self.login_device()?;
-        let mut url = Url::parse("https://api.qishui.com")
-            .map_err(|_| soda_upstream_error("Soda library endpoint is invalid"))?;
-        url.set_path(path);
-        url.query_pairs_mut()
-            .append_pair("aid", "386088")
-            .append_pair("iid", &device.install_id)
-            .append_pair("device_id", &device.device_id)
-            .append_pair("version_code", "30050100");
+        let mut url = luna_pc_endpoint(path, &device)?;
         if let Some(cursor) = cursor {
+            let count = if path == "/luna/pc/me/playlist" {
+                50
+            } else {
+                500
+            };
             url.query_pairs_mut()
-                .append_pair("cursor", cursor)
-                .append_pair("count", &LIBRARY_PAGE_SIZE.to_string());
+                .append_pair("cursor", if cursor == "0" { "" } else { cursor })
+                .append_pair("count", &count.to_string());
         }
         Ok(url)
     }
 
     fn pc_playlist_write_url(&self, path: &str) -> Result<Url> {
         let device = self.login_device()?;
-        let mut url = Url::parse("https://api.qishui.com")
-            .map_err(|_| soda_upstream_error("Soda playlist write endpoint is invalid"))?;
-        url.set_path(path);
-        url.query_pairs_mut()
-            .append_pair("aid", "386088")
-            .append_pair("app_name", "luna_pc")
-            .append_pair("device_platform", "windows")
-            .append_pair("version_name", "2.1.0")
-            .append_pair("version_code", "20010000")
-            .append_pair("channel", "official")
-            .append_pair("device_id", &device.device_id)
-            .append_pair("iid", &device.install_id)
-            .append_pair("fp", &device.device_id);
-        Ok(url)
+        luna_pc_endpoint(path, &device)
     }
 
     pub(crate) async fn create_owned_playlist(
@@ -182,17 +176,18 @@ impl SodaClient {
                 return Err(authentication_required());
             }
             let response = self
-                .login_request(Method::POST, self.pc_playlist_write_url(path)?)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&json!({
-                    "name": name,
-                    "is_private": is_private,
-                    "track_ids": [],
-                }))
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(
+                        self.login_request(Method::POST, self.pc_playlist_write_url(path)?),
+                    )
+                    .header(COOKIE, credential.cookie_header()?)
+                    .json(&json!({
+                        "name": name,
+                        "is_private": is_private,
+                        "track_ids": [],
+                    })),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -294,13 +289,14 @@ impl SodaClient {
                 return Err(authentication_required());
             }
             let response = self
-                .login_request(Method::POST, self.pc_playlist_write_url(path)?)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(
+                        self.login_request(Method::POST, self.pc_playlist_write_url(path)?),
+                    )
+                    .header(COOKIE, credential.cookie_header()?)
+                    .json(&body),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -359,13 +355,14 @@ impl SodaClient {
                 return Err(authentication_required());
             }
             let response = self
-                .login_request(Method::POST, self.pc_playlist_write_url(path)?)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&json!({"playlist_ids": [id]}))
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(
+                        self.login_request(Method::POST, self.pc_playlist_write_url(path)?),
+                    )
+                    .header(COOKIE, credential.cookie_header()?)
+                    .json(&json!({"playlist_ids": [id]})),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -453,13 +450,14 @@ impl SodaClient {
                 .map(|id| json!({"id": id, "type": "track"}))
                 .collect::<Vec<_>>();
             let response = self
-                .login_request(Method::POST, self.pc_playlist_write_url(path)?)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&json!({"playlist_id": id, "media": media}))
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(
+                        self.login_request(Method::POST, self.pc_playlist_write_url(path)?),
+                    )
+                    .header(COOKIE, credential.cookie_header()?)
+                    .json(&json!({"playlist_id": id, "media": media})),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -552,13 +550,14 @@ impl SodaClient {
                 return Err(authentication_required());
             }
             let response = self
-                .login_request(Method::POST, self.library_url(path, None)?)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(
+                        self.login_request(Method::POST, self.library_url(path, None)?),
+                    )
+                    .header(COOKIE, credential.cookie_header()?)
+                    .json(&body),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -623,12 +622,11 @@ impl SodaClient {
             })?;
             let url = self.library_url(section.path(), Some(cursor))?;
             let response = self
-                .login_request(Method::GET, url)
-                .header(ACCEPT, "application/json")
-                .header(COOKIE, credential.cookie_header()?)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    add_luna_pc_headers(self.login_request(Method::GET, url))
+                        .header(COOKIE, credential.cookie_header()?),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(authentication_required());
@@ -652,7 +650,19 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let body = read_bounded_response(response, "Soda account library").await?;
-            let mut page = parse(section, owner, credential, &body)?;
+            let mut page = match parse(section, owner, credential, &body) {
+                Ok(page) => page,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "DIAGNOSTIC soda_library_shape section={} bytes={} shape={}",
+                        section.name(),
+                        body.len(),
+                        safe_library_shape(&body)
+                    );
+                    return Err(error);
+                }
+            };
             page.credential = credential.with_response_cookies(&headers)?;
             Ok(page)
         }
@@ -667,6 +677,90 @@ impl SodaClient {
         );
         result
     }
+}
+
+#[cfg(debug_assertions)]
+fn safe_library_shape(body: &[u8]) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    fn fields(value: &Value) -> Map<String, Value> {
+        value.as_object().map_or_else(Map::new, |object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(kind(value))))
+                .collect()
+        })
+    }
+
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return json!({"kind":"non_json","bytes":body.len()});
+    };
+    let mut summary = Map::new();
+    summary.insert("top_level".into(), Value::Object(fields(&value)));
+    if let Some(info) = value.get("status_info") {
+        summary.insert("status_info_fields".into(), Value::Object(fields(info)));
+    }
+    for name in ["status_code", "total_num"] {
+        if let Some(field) = value.get(name).filter(|field| field.is_number()) {
+            summary.insert(name.into(), field.clone());
+        }
+    }
+    if let Some(code) = value
+        .get("status_info")
+        .and_then(|info| info.get("status_code"))
+        .filter(|field| field.is_number())
+    {
+        summary.insert("status_info_code".into(), code.clone());
+    }
+    for name in ["playlists", "mixed_collections", "collections", "data"] {
+        if let Some(items) = value.get(name).and_then(Value::as_array) {
+            summary.insert(format!("{name}_count"), json!(items.len()));
+            if let Some(first) = items.first() {
+                summary.insert(format!("{name}_first_fields"), Value::Object(fields(first)));
+            }
+        }
+    }
+    Value::Object(summary)
+}
+
+#[cfg(debug_assertions)]
+fn safe_created_owner_counts(items: &[Playlist], source_user_id: &str) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut owner_present_count = 0;
+    let mut owner_match_count = 0;
+    let mut owner_mismatch_count = 0;
+    for item in items {
+        if let Some(owner_id) = item
+            .extensions
+            .get("owner_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            owner_present_count += 1;
+            if owner_id == source_user_id {
+                owner_match_count += 1;
+            } else {
+                owner_mismatch_count += 1;
+            }
+        }
+    }
+    json!({
+        "item_count": items.len(),
+        "owner_present_count": owner_present_count,
+        "owner_match_count": owner_match_count,
+        "owner_mismatch_count": owner_mismatch_count,
+    })
 }
 
 fn validate_collection_write(body: &[u8]) -> Result<()> {
@@ -688,7 +782,9 @@ fn validate_collection_write(body: &[u8]) -> Result<()> {
 }
 
 fn parse_playlist_create_ack(body: &[u8]) -> Result<String> {
-    let envelope: PlaylistCreateEnvelope = serde_json::from_slice(body)
+    let response: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
+    let envelope: PlaylistCreateEnvelope = serde_json::from_value(response.clone())
         .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
     let status_code = envelope
         .status_code
@@ -709,14 +805,64 @@ fn parse_playlist_create_ack(body: &[u8]) -> Result<String> {
             ));
         }
     }
-    let id = envelope
-        .playlist
-        .and_then(|playlist| playlist.id)
-        .filter(|id| valid_id(id))
-        .ok_or_else(|| {
-            soda_upstream_error("Soda playlist creation omitted a valid playlist identity")
-        })?;
-    Ok(id)
+    extract_created_playlist_id(&response)
+}
+
+fn extract_created_playlist_id(response: &serde_json::Value) -> Result<String> {
+    // These are the finite response variants supported by libresoda at the
+    // pinned upstream revision. Do not recursively search arbitrary response
+    // fields: an unrelated nested ID must never become a playlist target.
+    const PATHS: &[&[&str]] = &[
+        &["data", "playlist_id"],
+        &["data", "playlist", "id"],
+        &["data", "id"],
+        &["playlist", "id"],
+        &["playlist_id"],
+    ];
+
+    let mut id = None;
+    for path in PATHS {
+        let mut candidate = Some(response);
+        for key in *path {
+            candidate = candidate.and_then(|value| value.get(*key));
+        }
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let value = match candidate {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(value) if value.trim().is_empty() => continue,
+            serde_json::Value::String(value) => value.trim().to_owned(),
+            serde_json::Value::Number(value) => value
+                .as_i64()
+                .map(|value| value.to_string())
+                .ok_or_else(|| {
+                    soda_upstream_error(
+                        "Soda playlist creation returned an invalid playlist identity",
+                    )
+                })?,
+            _ => {
+                return Err(soda_upstream_error(
+                    "Soda playlist creation returned an invalid playlist identity",
+                ));
+            }
+        };
+        if !valid_id(&value) {
+            return Err(soda_upstream_error(
+                "Soda playlist creation returned an invalid playlist identity",
+            ));
+        }
+        if id.as_ref().is_some_and(|existing| existing != &value) {
+            return Err(soda_upstream_error(
+                "Soda playlist creation returned conflicting playlist identities",
+            ));
+        }
+        id = Some(value);
+    }
+
+    id.ok_or_else(|| {
+        soda_upstream_error("Soda playlist creation omitted a valid playlist identity")
+    })
 }
 
 fn validate_playlist_update_ack(body: &[u8]) -> Result<()> {
@@ -805,6 +951,11 @@ fn parse_page(
     bytes: &[u8],
 ) -> Result<LibraryPage> {
     validate_library_status(bytes)?;
+    if matches!(section, LibrarySection::Saved)
+        && let Some(page) = empty_saved_library_page(credential, bytes)
+    {
+        return Ok(page);
+    }
     let envelope: LibraryEnvelope = serde_json::from_slice(bytes)
         .map_err(|_| soda_upstream_error("Soda account playlists returned invalid data"))?;
     let mut unclassified_items = 0;
@@ -849,17 +1000,46 @@ fn parse_page(
             "Soda account library exceeds the supported size",
         ));
     }
+    let items = sources
+        .into_iter()
+        .map(|item| map_playlist(item, section, owner))
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(debug_assertions)]
+    if matches!(section, LibrarySection::Created) {
+        eprintln!(
+            "DIAGNOSTIC soda_created_library_owner_counts {}",
+            safe_created_owner_counts(&items, owner)
+        );
+    }
     Ok(LibraryPage {
-        items: sources
-            .into_iter()
-            .map(|item| map_playlist(item, section, owner))
-            .collect::<Result<_>>()?,
+        items,
         credential: credential.clone(),
         raw_count,
         total: envelope.total_num,
         next_cursor: envelope.next_cursor,
         has_more: envelope.has_more,
         unclassified_items,
+    })
+}
+
+fn empty_saved_library_page(credential: &SodaCredential, bytes: &[u8]) -> Option<LibraryPage> {
+    let response = serde_json::from_slice::<EmptySavedLibraryResponse>(bytes).ok()?;
+    if response.status_info.log_id.trim().is_empty()
+        || response.status_info.log_id.len() > 256
+        || response.status_info.log_id.chars().any(char::is_control)
+        || response.status_info.now == 0
+        || response.status_info.now_ts_ms == 0
+    {
+        return None;
+    }
+    Some(LibraryPage {
+        items: Vec::new(),
+        credential: credential.clone(),
+        raw_count: 0,
+        total: Some(0),
+        next_cursor: None,
+        has_more: Some(false),
+        unclassified_items: 0,
     })
 }
 
@@ -1086,6 +1266,40 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn account_library_diagnostics_report_shape_and_counts_without_values() {
+        let body = br#"{"status_info":{"now":123,"cookie":"private"},"mixed_collections":[{"item_type":"playlist","id":"private-id"}],"total_num":1,"token":"private-token"}"#;
+        let summary = safe_library_shape(body).to_string();
+        assert!(summary.contains("\"mixed_collections_count\":1"));
+        assert!(summary.contains("\"status_info\":\"object\""));
+        assert!(!summary.contains("private"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn created_library_owner_diagnostics_report_only_counts() {
+        let created = page(
+            LibrarySection::Created,
+            json!({
+                "playlists": [
+                    {"id":"11","title":"private title","owner":{"id":"123456"}},
+                    {"id":"12","title":"another private title"}
+                ],
+                "total_num":2
+            }),
+        )
+        .unwrap();
+        let summary = safe_created_owner_counts(&created.items, "123456");
+        assert_eq!(summary["item_count"], 2);
+        assert_eq!(summary["owner_present_count"], 1);
+        assert_eq!(summary["owner_match_count"], 1);
+        assert_eq!(summary["owner_mismatch_count"], 0);
+        let serialized = summary.to_string();
+        assert!(!serialized.contains("123456"));
+        assert!(!serialized.contains("private title"));
+    }
+
     #[test]
     fn collection_writes_require_explicit_success_without_conflicting_statuses() {
         for body in [
@@ -1146,6 +1360,46 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::AuthenticationRequired
+        );
+    }
+
+    #[test]
+    fn playlist_create_ack_supports_only_the_pinned_upstream_id_paths() {
+        for body in [
+            br#"{"status_code":0,"data":{"playlist_id":"42"}}"#.as_slice(),
+            br#"{"status_code":0,"data":{"playlist":{"id":42}}}"#,
+            br#"{"status_code":0,"data":{"id":"42"}}"#,
+            br#"{"status_code":0,"playlist":{"id":"42"}}"#,
+            br#"{"status_code":0,"playlist_id":42}"#,
+        ] {
+            assert_eq!(parse_playlist_create_ack(body).unwrap(), "42");
+        }
+
+        for body in [
+            br#"{"status_code":0,"result":{"playlist_id":"42"}}"#.as_slice(),
+            br#"{"status_code":0,"data":{"playlist_id":"042"}}"#,
+            br#"{"status_code":0,"data":{"playlist_id":0}}"#,
+            br#"{"status_code":0,"data":{"playlist_id":"42"},"playlist_id":"43"}"#,
+        ] {
+            assert_eq!(
+                parse_playlist_create_ack(body).unwrap_err().code,
+                ErrorCode::UpstreamError
+            );
+        }
+
+        let bounded_id = "1".repeat(64);
+        let bounded_body = format!(r#"{{"status_code":0,"playlist_id":"{bounded_id}"}}"#);
+        assert_eq!(
+            parse_playlist_create_ack(bounded_body.as_bytes()).unwrap(),
+            bounded_id
+        );
+        let oversized_id = "1".repeat(65);
+        let oversized_body = format!(r#"{{"status_code":0,"playlist_id":"{oversized_id}"}}"#);
+        assert_eq!(
+            parse_playlist_create_ack(oversized_body.as_bytes())
+                .unwrap_err()
+                .code,
+            ErrorCode::UpstreamError
         );
     }
 
@@ -1310,13 +1564,13 @@ mod tests {
             assert_eq!(query["aid"], "386088");
             assert_eq!(query["app_name"], "luna_pc");
             assert_eq!(query["device_platform"], "windows");
-            assert_eq!(query["version_name"], "2.1.0");
-            assert_eq!(query["version_code"], "20010000");
+            assert_eq!(query["version_name"], "3.7.0");
+            assert_eq!(query["version_code"], "30070000");
             assert_eq!(query["channel"], "official");
             assert_eq!(query["fp"], query["device_id"]);
             assert!(!query["device_id"].is_empty());
-            assert!(!query["iid"].is_empty());
-            assert_ne!(query["device_id"], query["iid"]);
+            assert_eq!(query["iid"], "");
+            assert!(!query.contains_key("install_id"));
             assert!(!query.contains_key("user_id"));
         }
     }
@@ -1370,13 +1624,13 @@ mod tests {
         assert_eq!(query["aid"], "386088");
         assert_eq!(query["app_name"], "luna_pc");
         assert_eq!(query["device_platform"], "windows");
-        assert_eq!(query["version_name"], "2.1.0");
-        assert_eq!(query["version_code"], "20010000");
+        assert_eq!(query["version_name"], "3.7.0");
+        assert_eq!(query["version_code"], "30070000");
         assert_eq!(query["channel"], "official");
         assert_eq!(query["fp"], query["device_id"]);
         assert!(!query["device_id"].is_empty());
-        assert!(!query["iid"].is_empty());
-        assert_ne!(query["device_id"], query["iid"]);
+        assert_eq!(query["iid"], "");
+        assert!(!query.contains_key("install_id"));
         assert!(!query.contains_key("user_id"));
     }
 
@@ -1429,13 +1683,13 @@ mod tests {
         assert_eq!(query["aid"], "386088");
         assert_eq!(query["app_name"], "luna_pc");
         assert_eq!(query["device_platform"], "windows");
-        assert_eq!(query["version_name"], "2.1.0");
-        assert_eq!(query["version_code"], "20010000");
+        assert_eq!(query["version_name"], "3.7.0");
+        assert_eq!(query["version_code"], "30070000");
         assert_eq!(query["channel"], "official");
         assert_eq!(query["fp"], query["device_id"]);
         assert!(!query["device_id"].is_empty());
-        assert!(!query["iid"].is_empty());
-        assert_ne!(query["device_id"], query["iid"]);
+        assert_eq!(query["iid"], "");
+        assert!(!query.contains_key("install_id"));
         assert!(!query.contains_key("user_id"));
     }
 
@@ -1504,13 +1758,13 @@ mod tests {
             assert_eq!(query["aid"], "386088");
             assert_eq!(query["app_name"], "luna_pc");
             assert_eq!(query["device_platform"], "windows");
-            assert_eq!(query["version_name"], "2.1.0");
-            assert_eq!(query["version_code"], "20010000");
+            assert_eq!(query["version_name"], "3.7.0");
+            assert_eq!(query["version_code"], "30070000");
             assert_eq!(query["channel"], "official");
             assert_eq!(query["fp"], query["device_id"]);
             assert!(!query["device_id"].is_empty());
-            assert!(!query["iid"].is_empty());
-            assert_ne!(query["device_id"], query["iid"]);
+            assert_eq!(query["iid"], "");
+            assert!(!query.contains_key("install_id"));
             assert!(!query.contains_key("user_id"));
         }
     }
@@ -1545,6 +1799,40 @@ mod tests {
                 .accept("0", &page)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn saved_library_accepts_only_the_official_status_only_empty_response() {
+        let empty = page(
+            LibrarySection::Saved,
+            json!({"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456}}),
+        )
+        .unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.raw_count, 0);
+        assert_eq!(empty.total, Some(0));
+        assert_eq!(empty.has_more, Some(false));
+        assert!(
+            LibraryPagination::default()
+                .accept("0", &empty)
+                .unwrap()
+                .is_none()
+        );
+
+        for invalid in [
+            json!({"status_info":{"now":123,"now_ts_ms":123456}}),
+            json!({"status_info":{"log_id":"request-log","now":0,"now_ts_ms":123456}}),
+            json!({"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"total_num":0}),
+        ] {
+            assert!(page(LibrarySection::Saved, invalid).is_err());
+        }
+        assert!(
+            page(
+                LibrarySection::Created,
+                json!({"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456}}),
+            )
+            .is_err()
         );
     }
 

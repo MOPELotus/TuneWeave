@@ -451,7 +451,7 @@ impl SodaClient {
                 if let Some(credential) = credential {
                     request = request.header(reqwest::header::COOKIE, credential.cookie_header()?);
                 }
-                let mut response = request.send().await.map_err(soda_network_error)?;
+                let mut response = self.send_login_request(request).await?;
                 status = Some(response.status());
                 if credential.is_some() && response.status() == StatusCode::UNAUTHORIZED {
                     return Err(authentication_required());

@@ -65,12 +65,12 @@ impl SodaClient {
                 .append_pair("device_id", &device.device_id)
                 .append_pair("iid", &device.install_id);
             let response = self
-                .login_request(reqwest::Method::GET, url)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::COOKIE, credential.cookie_header()?)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::GET, url)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .header(reqwest::header::COOKIE, credential.cookie_header()?),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == StatusCode::UNAUTHORIZED {
                 return Err(playlist_authentication_required());

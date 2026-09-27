@@ -127,6 +127,12 @@ Content-Type: application/json
 }
 ```
 
+Soda QR clients may also send an optional `client_context` object containing the
+browser environment fields used by the official PC login SDK. TuneWeave validates
+and encodes this context for the upstream request, then keeps it only in the
+in-memory QR transaction. Do not include cookies, tokens, passwords, or account
+identifiers. Other platforms reject this field.
+
 响应包含 TuneWeave 事务 ID、二维码内容和过期时间。使用事务 ID 轮询：
 
 ```http

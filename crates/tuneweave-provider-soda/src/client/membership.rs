@@ -79,13 +79,13 @@ impl SodaClient {
                 .append_pair("iid", &device.install_id)
                 .append_pair("fp", &device.device_id);
             let mut response = self
-                .login_request(reqwest::Method::POST, url)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::COOKIE, source.cookie_header()?)
-                .json(&json!({"includes":["membership"]}))
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::POST, url)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .header(reqwest::header::COOKIE, source.cookie_header()?)
+                        .json(&json!({"includes":["membership"]})),
+                )
+                .await?;
             status = Some(response.status());
             if response.status() == StatusCode::UNAUTHORIZED {
                 return Err(unauthenticated());

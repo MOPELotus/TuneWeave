@@ -90,15 +90,15 @@ impl SodaClient {
             let url = Url::parse(&format!("https://api.qishui.com{PLAYLIST_SORT_PATH}"))
                 .map_err(|_| soda_upstream_error("Soda playlist sort endpoint is invalid"))?;
             let response = self
-                .login_request(reqwest::Method::POST, url)
-                .header(ACCEPT, "application/json")
-                .header("x-luna-api-version", LUNA_API_VERSION)
-                .header("x-luna-is-login", "1")
-                .header(COOKIE, credential.cookie_header()?)
-                .json(&request)
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::POST, url)
+                        .header(ACCEPT, "application/json")
+                        .header("x-luna-api-version", LUNA_API_VERSION)
+                        .header("x-luna-is-login", "1")
+                        .header(COOKIE, credential.cookie_header()?)
+                        .json(&request),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(playlist_sort_authentication_required());

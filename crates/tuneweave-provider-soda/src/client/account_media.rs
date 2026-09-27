@@ -1,5 +1,6 @@
 use crate::login::SodaCredential;
 use reqwest::header::ACCEPT;
+use serde_json::Value;
 
 use super::*;
 
@@ -113,16 +114,16 @@ impl SodaClient {
                 .append_pair("version_name", "3.5.1")
                 .append_pair("device_platform", "windows");
             let response = self
-                .login_request(reqwest::Method::POST, url)
-                .header(ACCEPT, "application/json")
-                .header(reqwest::header::COOKIE, credential.cookie_header()?)
-                .json(&json!({
-                    "track_id": identity.id(), "media_type": "track",
-                    "queue_type": "search_one_track", "scene_name": "search",
-                }))
-                .send()
-                .await
-                .map_err(soda_network_error)?;
+                .send_login_request(
+                    self.login_request(reqwest::Method::POST, url)
+                        .header(ACCEPT, "application/json")
+                        .header(reqwest::header::COOKIE, credential.cookie_header()?)
+                        .json(&json!({
+                            "track_id": identity.id(), "media_type": "track",
+                            "queue_type": "search_one_track", "scene_name": "search",
+                        })),
+                )
+                .await?;
             http_status = Some(response.status());
             if response.status() == StatusCode::UNAUTHORIZED {
                 return Err(account_media_authentication_required());
@@ -176,41 +177,118 @@ fn parse_account_track(
     identity: &SodaTrackIdentity,
     credential: &SodaCredential,
 ) -> Result<SodaAccountTrack> {
-    let status: AccountTrackStatus = serde_json::from_slice(&body)
+    let parsed = parse_account_track_fields(&body, identity);
+    let (track, collected) = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "DIAGNOSTIC soda_account_track_shape bytes={} shape={}",
+                body.len(),
+                safe_account_track_shape(&body)
+            );
+            return Err(error);
+        }
+    };
+    Ok(SodaAccountTrack {
+        credential: credential.clone(),
+        collected,
+        identity: identity.clone(),
+        track,
+        body,
+    })
+}
+
+fn parse_account_track_fields(
+    body: &[u8],
+    identity: &SodaTrackIdentity,
+) -> Result<(Track, Option<bool>)> {
+    let status: AccountTrackStatus = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda account media returned malformed data"))?;
-    let codes = [
-        status.status_code,
-        status.status_info.and_then(|info| info.status_code),
-    ];
+    let status_info_code = status
+        .status_info
+        .as_ref()
+        .and_then(|info| info.status_code);
+    let codes = [status.status_code, status_info_code];
     if codes.contains(&Some(1_000_016)) {
         return Err(account_media_authentication_required());
     }
-    if !codes.contains(&Some(0)) || codes.into_iter().flatten().any(|code| code != 0) {
+    if codes.iter().flatten().any(|code| *code != 0) {
+        let platform_code = codes
+            .into_iter()
+            .flatten()
+            .find(|code| *code != 0)
+            .or(status.status_code)
+            .or(status_info_code);
+        return Err(
+            soda_upstream_error("Soda account media did not report success")
+                .with_details(json!({"platform_code":platform_code})),
+        );
+    }
+    // Current track_v2 account responses may omit both status-code members while
+    // still returning the account-bound track payload. Treat that as success
+    // only when status metadata is present; the exact track identity and the
+    // account-bound player payload are validated below before media is exposed.
+    if codes.iter().all(Option::is_none) && status.status_info.is_none() {
         return Err(soda_upstream_error(
-            "Soda account media did not report success",
+            "Soda account media omitted status metadata",
         ));
     }
-    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(&body)
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda account media returned invalid metadata"))?;
     if envelope.track.is_none() || envelope.seo_track.is_some() {
         return Err(soda_upstream_error(
             "Soda account media omitted its own track payload",
         ));
     }
-    let mut track = parse_track_detail_response(&body, identity)?;
+    let mut track = parse_track_detail_response(body, identity)?;
     track
         .extensions
         .insert("backend".to_owned(), json!(ACCOUNT_TRACK_BACKEND));
-    Ok(SodaAccountTrack {
-        credential: credential.clone(),
-        collected: envelope
-            .track
-            .as_ref()
-            .and_then(|track| track.state.is_collected),
-        identity: identity.clone(),
-        track,
-        body,
-    })
+    let collected = envelope
+        .track
+        .as_ref()
+        .and_then(|track| track.state.is_collected);
+    Ok((track, collected))
+}
+
+#[cfg(debug_assertions)]
+fn safe_account_track_shape(body: &[u8]) -> Value {
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return json!({"kind":"non_json"});
+    };
+    let Some(object) = value.as_object() else {
+        return json!({"kind":kind(&value)});
+    };
+    let mut fields = serde_json::Map::new();
+    for name in ["status_code", "status_info", "track", "seo_track"] {
+        if let Some(value) = object.get(name) {
+            fields.insert(name.to_owned(), json!(kind(value)));
+        }
+    }
+    let mut summary = serde_json::Map::new();
+    summary.insert("fields".into(), Value::Object(fields));
+    if let Some(code) = object.get("status_code").filter(|value| value.is_number()) {
+        summary.insert("status_code".into(), code.clone());
+    }
+    if let Some(code) = object
+        .get("status_info")
+        .and_then(|info| info.get("status_code"))
+        .filter(|value| value.is_number())
+    {
+        summary.insert("status_info_code".into(), code.clone());
+    }
+    Value::Object(summary)
 }
 
 #[cfg(test)]
@@ -261,6 +339,27 @@ mod tests {
     }
 
     #[test]
+    fn account_metadata_accepts_account_payload_when_track_v2_omits_status_codes() {
+        let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
+        let credential = SodaCredential::test_credential("test-secret")
+            .bind_user("123456")
+            .unwrap();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&test_account_track_fixture(false)).unwrap();
+        body.as_object_mut().unwrap().remove("status_code");
+        body["status_info"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status_code");
+
+        let snapshot =
+            parse_account_track(serde_json::to_vec(&body).unwrap(), &identity, &credential)
+                .expect("track_v2 account payload without status-code members");
+
+        assert_eq!(snapshot.into_track().id, identity.id());
+    }
+
+    #[test]
     fn account_metadata_rejects_missing_status_wrong_identity_and_anonymous_envelopes() {
         let identity = SodaTrackIdentity::parse("7304719759323564095").unwrap();
         let credential = SodaCredential::test_credential("test-secret")
@@ -272,6 +371,7 @@ mod tests {
             match mutation {
                 0 => {
                     body.as_object_mut().unwrap().remove("status_code");
+                    body.as_object_mut().unwrap().remove("status_info");
                 }
                 1 => body["status_code"] = json!(1000016),
                 2 => body["status_info"]["status_code"] = json!(99),
@@ -299,7 +399,20 @@ mod tests {
                     ErrorCode::UpstreamError
                 }
             );
+            if mutation == 2 {
+                assert_eq!(error.details["platform_code"], 99);
+            }
             assert!(!error.to_string().contains("test-secret"));
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn account_status_diagnostics_report_codes_and_shape_without_track_values() {
+        let body = br#"{"status_code":9,"status_info":{"status_code":99,"token":"private"},"track":{"title":"private title"}}"#;
+        let summary = safe_account_track_shape(body).to_string();
+        assert!(summary.contains("\"status_info_code\":99"));
+        assert!(summary.contains("\"track\":\"object\""));
+        assert!(!summary.contains("private"));
     }
 }

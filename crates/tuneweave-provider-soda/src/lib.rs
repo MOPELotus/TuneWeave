@@ -1,5 +1,6 @@
 mod account;
 mod authentication;
+mod bdms;
 mod client;
 mod device;
 mod identity;
