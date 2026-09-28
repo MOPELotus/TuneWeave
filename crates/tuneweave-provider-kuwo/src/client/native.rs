@@ -394,20 +394,20 @@ impl KuwoClient {
             } else {
                 codec::MAX_RESPONSE
             };
-            let response_mime = response
+            let _response_mime = response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.split(';').next())
                 .map(str::trim);
-            let response_mime_class = match response_mime {
+            let _response_mime_class = match _response_mime {
                 Some(value) if value.eq_ignore_ascii_case("application/json") => "json",
                 Some(value) if value.eq_ignore_ascii_case("text/plain") => "text_plain",
                 Some(value) if value.eq_ignore_ascii_case("text/html") => "text_html",
                 Some(_) => "other",
                 None => "missing",
             };
-            let response_size_class = match response.content_length() {
+            let _response_size_class = match response.content_length() {
                 None => "unknown",
                 Some(size) if size <= max_bytes as u64 => "within_limit",
                 Some(_) => "over_limit",
@@ -432,7 +432,7 @@ impl KuwoClient {
                     #[cfg(debug_assertions)]
                     if operation == "native_cloud_playlist" {
                         eprintln!(
-                            "DIAGNOSTIC kuwo_native_response_read status={} mime_class={response_mime_class} content_length={response_size_class}",
+                            "DIAGNOSTIC kuwo_native_response_read status={} mime_class={_response_mime_class} content_length={_response_size_class}",
                             status.map_or(0, |value| value.as_u16())
                         );
                     }

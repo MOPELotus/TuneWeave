@@ -17,7 +17,7 @@ fn favorite_identity_unavailable() -> TuneWeaveError {
     .with_platform(Platform::Migu)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 #[derive(Debug)]
 struct SafeHomeDiagnostic {
     root_keys: Vec<String>,
@@ -40,7 +40,7 @@ struct SafeHomeDiagnostic {
     collected_lists_count: Option<usize>,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 impl std::fmt::Display for SafeHomeDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -68,7 +68,7 @@ impl std::fmt::Display for SafeHomeDiagnostic {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn json_kind(value: Option<&serde_json::Value>) -> &'static str {
     match value {
         None => "missing",
@@ -81,7 +81,7 @@ fn json_kind(value: Option<&serde_json::Value>) -> &'static str {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn safe_home_diagnostic(data: &serde_json::Value) -> SafeHomeDiagnostic {
     let mut root_keys = data
         .as_object()

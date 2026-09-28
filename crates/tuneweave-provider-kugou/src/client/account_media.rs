@@ -162,7 +162,7 @@ impl Selection {
             }
         };
         let hash_match = data.hash.eq_ignore_ascii_case(&self.spec.hash);
-        let std_hash_match = data
+        let _std_hash_match = data
             .std_hash
             .as_deref()
             .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.spec.hash));
@@ -184,17 +184,17 @@ impl Selection {
                 &[
                     ("hash_match", hash_match),
                     ("std_hash_present", data.std_hash.is_some()),
-                    ("std_hash_match", std_hash_match),
-                    ("std_hash_time_present", data.std_hash_time.is_some()),
+                    ("std_hash_match", _std_hash_match),
+                    ("std_hash_time_present", data._std_hash_time.is_some()),
                     (
                         "standard_quality",
                         self.spec.actual_quality == Quality::Standard,
                     ),
                     ("identity_hash_match", hash_match),
-                    ("hash_backup_present", data.is_hash_backup.is_some()),
+                    ("hash_backup_present", data._is_hash_backup.is_some()),
                     (
                         "hash_backup_marked",
-                        data.is_hash_backup.is_some_and(|value| value.0 != 0),
+                        data._is_hash_backup.is_some_and(|value| value.0 != 0),
                     ),
                     ("audio_id_present", data.album_audio_id.is_some()),
                     ("audio_id_match", audio_id_match),
@@ -445,16 +445,17 @@ impl Selection {
                     return Err(error);
                 }
             };
-            if let Err(error) = response.check_url(&url) {
-                #[cfg(debug_assertions)]
+            let url_validation = response.check_url(&url);
+            #[cfg(debug_assertions)]
+            if url_validation.is_err() {
                 diagnostic_tracker_failure(
                     "url_authorization_material_check",
                     &response.bytes,
                     Some(&status),
                     &[("url_contains_no_session_grant", false)],
                 );
-                return Err(error);
             }
+            url_validation?;
             if seen.insert(url.clone()) {
                 urls.push(url);
             }
@@ -541,10 +542,10 @@ struct Tracker {
     hash: String,
     #[serde(default)]
     std_hash: Option<String>,
-    #[serde(default)]
-    std_hash_time: Option<Number>,
-    #[serde(default)]
-    is_hash_backup: Option<Number>,
+    #[serde(default, rename = "std_hash_time")]
+    _std_hash_time: Option<Number>,
+    #[serde(default, rename = "is_hash_backup")]
+    _is_hash_backup: Option<Number>,
     album_audio_id: Option<Number>,
     album_id: Option<Number>,
     url: Urls,

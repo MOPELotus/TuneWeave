@@ -325,7 +325,7 @@ struct AudioTimingContext {
 
 fn validate_timing(bytes: &[u8], timing: AudioTimingContext) -> Result<()> {
     let AudioTimingContext {
-        track,
+        track: _track,
         mdhd,
         stts,
         samples,
@@ -412,7 +412,7 @@ fn validate_timing(bytes: &[u8], timing: AudioTimingContext) -> Result<()> {
                 ticks,
                 ticks.abs_diff(duration),
                 composition_offsets_present,
-                diagnostic_edit_list(bytes, track),
+                diagnostic_edit_list(bytes, _track),
             );
         }
         return Err(invalid());

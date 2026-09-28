@@ -1043,7 +1043,7 @@ impl SodaClient {
     ) -> Result<AudioContent> {
         let track_ref = identity.resource_ref()?;
         let bytes = self.download_authorized_variant(&media.selected).await?;
-        let received_bytes = bytes.len();
+        let _received_bytes = bytes.len();
         let mut validation_phase = if media.selected.spec.encrypted {
             "cenc_authorization"
         } else {
@@ -1075,24 +1075,25 @@ impl SodaClient {
                     media.selected.spec.encrypted,
                     diagnostic_soda_codec(&media.selected.spec.codec),
                     media.selected.spec.size,
-                    received_bytes,
+                    _received_bytes,
                     error.code.as_str(),
                 );
                 return Err(error);
             }
         };
-        if let Err(error) = validate_decrypted_codec(&decrypted, &media.selected.spec.codec) {
-            #[cfg(debug_assertions)]
+        let codec_validation = validate_decrypted_codec(&decrypted, &media.selected.spec.codec);
+        #[cfg(debug_assertions)]
+        if let Err(error) = &codec_validation {
             eprintln!(
                 "DIAGNOSTIC soda_audio_delivery_failed phase=codec_identity encrypted={} codec={} declared_bytes={} received_bytes={} error_code={}",
                 media.selected.spec.encrypted,
                 diagnostic_soda_codec(&media.selected.spec.codec),
                 media.selected.spec.size,
-                received_bytes,
+                _received_bytes,
                 error.code.as_str(),
             );
-            return Err(error);
         }
+        codec_validation?;
         let (content_type, extension) = match decrypted.container {
             SodaAudioContainer::IsoBaseMedia => ("audio/mp4", "m4a"),
             SodaAudioContainer::Flac => ("audio/flac", "flac"),

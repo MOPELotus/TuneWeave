@@ -330,15 +330,16 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, description).await?;
-            if let Err(error) = validate_playlist_update_ack(&response_body) {
-                #[cfg(debug_assertions)]
+            let acknowledgement = validate_playlist_update_ack(&response_body);
+            #[cfg(debug_assertions)]
+            if acknowledgement.is_err() {
                 eprintln!(
                     "DIAGNOSTIC soda_playlist_write_ack operation={} shape={}",
                     operation,
                     safe_library_shape(&response_body)
                 );
-                return Err(error);
             }
+            acknowledgement?;
             let refreshed = credential.with_response_cookies(&headers)?;
             Ok(refreshed)
         }
@@ -404,14 +405,15 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, "Soda playlist deletion").await?;
-            if let Err(error) = validate_playlist_delete_ack(&response_body, id) {
-                #[cfg(debug_assertions)]
+            let acknowledgement = validate_playlist_delete_ack(&response_body, id);
+            #[cfg(debug_assertions)]
+            if acknowledgement.is_err() {
                 eprintln!(
                     "DIAGNOSTIC soda_playlist_write_ack operation=playlist_delete shape={}",
                     safe_library_shape(&response_body)
                 );
-                return Err(error);
             }
+            acknowledgement?;
             let refreshed = credential.with_response_cookies(&headers)?;
             Ok(refreshed)
         }
@@ -506,14 +508,15 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, description).await?;
-            if let Err(error) = validate_playlist_media_write_ack(&response_body, id) {
-                #[cfg(debug_assertions)]
+            let acknowledgement = validate_playlist_media_write_ack(&response_body, id);
+            #[cfg(debug_assertions)]
+            if acknowledgement.is_err() {
                 eprintln!(
                     "DIAGNOSTIC soda_playlist_write_ack operation={operation} shape={}",
                     safe_library_shape(&response_body)
                 );
-                return Err(error);
             }
+            acknowledgement?;
             credential.with_response_cookies(&headers)
         }
         .await;

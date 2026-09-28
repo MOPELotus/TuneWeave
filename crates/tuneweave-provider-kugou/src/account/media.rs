@@ -415,15 +415,15 @@ impl KugouClient {
                 })
                 .map(str::to_owned)
                 .unwrap_or_else(|| "unknown".to_owned());
-            let http_status = status.map_or(0, |value| value.as_u16());
-            let json_content_type = content_type.eq_ignore_ascii_case("application/json");
-            let oversized_declared_body = response
+            let _http_status = status.map_or(0, |value| value.as_u16());
+            let _json_content_type = content_type.eq_ignore_ascii_case("application/json");
+            let _oversized_declared_body = response
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|length| length > RESPONSE_LIMIT as u64);
-            let additional_verification_header = response
+            let _additional_verification_header = response
                 .headers()
                 .get("ssa-code")
                 .is_some_and(|value| value.as_bytes() != b"0" && !value.is_empty());
@@ -441,7 +441,7 @@ impl KugouClient {
                 Err(error) => {
                     #[cfg(debug_assertions)]
                     eprintln!(
-                        "DIAGNOSTIC kugou_media_body_intake_error stage={path} http_status={http_status} json_content_type={json_content_type} oversized_declared_body={oversized_declared_body} additional_verification_header={additional_verification_header}"
+                        "DIAGNOSTIC kugou_media_body_intake_error stage={path} http_status={_http_status} json_content_type={_json_content_type} oversized_declared_body={_oversized_declared_body} additional_verification_header={_additional_verification_header}"
                     );
                     return Err(error);
                 }
@@ -453,7 +453,7 @@ impl KugouClient {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "DIAGNOSTIC kugou_media_status_shape stage={path} http_status={} content_type={content_type} bytes={} shape={}",
-                        http_status,
+                        _http_status,
                         bytes.len(),
                         safe_auth_diagnostic(&bytes)
                     );
@@ -463,7 +463,7 @@ impl KugouClient {
             if status.status != 1 || status.code() != 0 {
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "DIAGNOSTIC kugou_media_status_rejection stage={path} http_status={http_status} platform_status={} platform_code={}",
+                    "DIAGNOSTIC kugou_media_status_rejection stage={path} http_status={_http_status} platform_status={} platform_code={}",
                     status.status,
                     status.code()
                 );

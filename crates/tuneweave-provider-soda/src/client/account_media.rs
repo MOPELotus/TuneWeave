@@ -1,5 +1,6 @@
 use crate::login::SodaCredential;
 use reqwest::header::ACCEPT;
+#[cfg(debug_assertions)]
 use serde_json::Value;
 
 use super::*;

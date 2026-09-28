@@ -387,9 +387,9 @@ fn parse_inner(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<Membershi
         ]),
     })
 }
-fn membership_failure(stage: &'static str) -> TuneWeaveError {
+fn membership_failure(_stage: &'static str) -> TuneWeaveError {
     #[cfg(debug_assertions)]
-    eprintln!("DIAGNOSTIC kuwo_membership_failure={stage}");
+    eprintln!("DIAGNOSTIC kuwo_membership_failure={_stage}");
     invalid()
 }
 fn text(

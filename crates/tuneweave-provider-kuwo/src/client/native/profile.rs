@@ -102,17 +102,17 @@ fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<UserProfile> {
     parse_inner(bytes, input)
 }
 
-fn stage<T>(name: &'static str, result: Result<T>) -> Result<T> {
+fn stage<T>(_name: &'static str, result: Result<T>) -> Result<T> {
     if result.is_err() {
         #[cfg(debug_assertions)]
-        eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={name}");
+        eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={_name}");
     }
     result
 }
 
-fn reject<T>(name: &'static str) -> Result<T> {
+fn reject<T>(_name: &'static str) -> Result<T> {
     #[cfg(debug_assertions)]
-    eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={name}");
+    eprintln!("DIAGNOSTIC kuwo_profile_rejection_stage={_name}");
     Err(invalid())
 }
 

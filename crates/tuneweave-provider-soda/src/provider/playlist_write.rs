@@ -201,7 +201,7 @@ impl SodaProvider {
                 == Some(SODA_ORDINARY_PLAYLIST_TYPE);
             let name_preserved = before.playlist.name == after.playlist.name;
             let description_preserved = before.playlist.description == after.playlist.description;
-            let cover_preserved = before.playlist.cover_url == after.playlist.cover_url;
+            let _cover_preserved = before.playlist.cover_url == after.playlist.cover_url;
             let creator_preserved = before.playlist.creator == after.playlist.creator;
             let owner_id_preserved = before.playlist.extensions.get("owner_id")
                 == after.playlist.extensions.get("owner_id");
@@ -215,12 +215,12 @@ impl SodaProvider {
                 && owner_id_preserved
                 && playlist_type_preserved
                 && sort_type_preserved;
-            let cover_matches_new_primary_track = after
+            let _cover_matches_new_primary_track = after
                 .playlist
                 .cover_url
                 .as_deref()
                 .is_some_and(|cover| after.first_track_cover_url() == Some(cover));
-            let cover_was_derived_from_old_primary_track = before
+            let _cover_was_derived_from_old_primary_track = before
                 .playlist
                 .cover_url
                 .as_deref()
@@ -249,9 +249,9 @@ impl SodaProvider {
                     type_matches,
                     name_preserved,
                     description_preserved,
-                    cover_preserved,
-                    cover_matches_new_primary_track,
-                    cover_was_derived_from_old_primary_track,
+                    _cover_preserved,
+                    _cover_matches_new_primary_track,
+                    _cover_was_derived_from_old_primary_track,
                     cover_transition_confirmed,
                     creator_preserved,
                     owner_id_preserved,

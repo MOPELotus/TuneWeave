@@ -333,6 +333,7 @@ fn account_playlist_business_shape(value: &serde_json::Value) -> String {
     )
 }
 
+#[cfg(debug_assertions)]
 fn account_playlist_proof_shape(value: &serde_json::Value) -> String {
     fn kind(value: Option<&serde_json::Value>) -> &'static str {
         match value {
@@ -396,6 +397,7 @@ fn account_playlist_proof_shape(value: &serde_json::Value) -> String {
     )
 }
 
+#[cfg(debug_assertions)]
 fn safe_shape_keys(value: Option<&serde_json::Value>) -> String {
     let mut keys = value
         .and_then(serde_json::Value::as_object)
