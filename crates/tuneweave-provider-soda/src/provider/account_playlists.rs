@@ -27,43 +27,6 @@ impl AccountPlaylistSnapshot {
         self.tracks.iter().map(|track| track.id.clone()).collect()
     }
 
-    pub(super) fn ordered_sort_media(&self, track_ids: &[String]) -> Result<Vec<(String, i32)>> {
-        let mut durations = BTreeMap::<String, std::collections::VecDeque<i32>>::new();
-        for track in &self.tracks {
-            let duration = track
-                .duration_ms
-                .and_then(|duration| i32::try_from(duration).ok())
-                .ok_or_else(|| {
-                    soda_upstream_error(
-                        "Soda playlist detail omitted a duration required by Android NetMedia",
-                    )
-                })?;
-            durations
-                .entry(track.id.clone())
-                .or_default()
-                .push_back(duration);
-        }
-
-        let mut ordered = Vec::with_capacity(track_ids.len());
-        for id in track_ids {
-            let duration = durations
-                .get_mut(id)
-                .and_then(|values| values.pop_front())
-                .ok_or_else(|| {
-                    soda_upstream_error(
-                        "Soda playlist sort references did not match the complete source list",
-                    )
-                })?;
-            ordered.push((id.clone(), duration));
-        }
-        if durations.values().any(|values| !values.is_empty()) {
-            return Err(soda_upstream_error(
-                "Soda playlist sort references did not include every source occurrence",
-            ));
-        }
-        Ok(ordered)
-    }
-
     pub(super) fn source_user_id(&self) -> &str {
         &self.source_user_id
     }

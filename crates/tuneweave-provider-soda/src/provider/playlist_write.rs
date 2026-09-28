@@ -486,13 +486,12 @@ impl SodaProvider {
                 });
             }
 
-            let ordered_media = before.ordered_sort_media(&desired_ids)?;
             // Once sent, the server may commit even if the ACK or complete readback is lost.
             // This manual reordering request is issued once and is never retried.
             dispatched = true;
             let refreshed = self
                 .client
-                .sort_account_playlist_media(playlist_id, &ordered_media, &desired_ids, &source)
+                .sort_account_playlist_media(playlist_id, &desired_ids, &source)
                 .await;
             self.ensure_account_snapshot_current(account, &source)?;
             self.advance_library_credential(&mut source, &mut stored, refreshed?)?;

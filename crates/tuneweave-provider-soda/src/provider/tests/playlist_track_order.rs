@@ -56,20 +56,15 @@ fn order_request(caller: bool, track_ids: &[&str]) -> tuneweave_core::PlaylistTr
     }
 }
 
-fn sort_ack(ids: &[&str], cookie: &str) -> String {
+fn sort_ack(cookie: &str) -> String {
     crate::test_http::json(
-        &json!({
-            "status_code": 0,
-            "playlistId": "42",
-            "media": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()
-        })
-        .to_string(),
+        &json!({ "status_code": 0 }).to_string(),
         Some(&format!("sessionid_ss={cookie}; Path=/")),
     )
 }
 
 #[tokio::test]
-async fn soda_manual_track_order_uses_selected_android_session_and_confirms_full_readback() {
+async fn soda_manual_track_order_uses_selected_session_and_confirms_full_readback() {
     for caller in [false, true] {
         let mut fixture = SessionFixture::new();
         let source = test_soda_credential().bind_user("123456").unwrap();
@@ -82,7 +77,7 @@ async fn soda_manual_track_order_uses_selected_android_session_and_confirms_full
             account_reply("123456", Some("sessionid_ss=verified; Path=/")),
             created_library_reply(3, "created-before"),
             account_playlist_reply(&["11", "12", "11"], "tracks-before"),
-            sort_ack(&["11", "11", "12"], "sorted"),
+            sort_ack("sorted"),
             account_playlist_reply(&["11", "11", "12"], "tracks-after"),
             created_library_reply(3, "created-after"),
         ])
@@ -135,19 +130,25 @@ async fn soda_manual_track_order_uses_selected_android_session_and_confirms_full
         assert!(requests[1].contains("sessionid_ss=verified"));
         assert!(requests[2].starts_with("GET /luna/pc/playlist/detail?"));
         assert!(requests[2].contains("sessionid_ss=created-before"));
-        assert!(requests[3].starts_with("POST /luna/me/playlist/media/sort HTTP/1.1"));
-        assert!(requests[3].contains("x-luna-api-version: 2023-01-04"));
-        assert!(requests[3].contains("x-luna-is-login: 1"));
+        assert!(
+            requests[3]
+                .starts_with("POST /luna/me/playlist/media/sort?aid=386088&app_name=luna_pc")
+        );
+        assert!(requests[3].contains("content-type: application/json; charset=utf-8"));
+        assert!(requests[3].contains("x-luna-background-type: foreground"));
+        assert!(requests[3].contains("x-luna-is-background-req: 0"));
+        assert!(requests[3].contains("x-luna-is-local-user: 1"));
+        assert!(requests[3].contains("x-ss-stub: "));
         assert!(requests[3].contains("sessionid_ss=tracks-before"));
         let body = requests[3].split_once("\r\n\r\n").unwrap().1;
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(body).unwrap(),
             json!({
-                "playlistId": "42",
+                "playlist_id": "42",
                 "media": [
-                    {"id":"11", "type":"track", "attr":{"duration":180822}},
-                    {"id":"11", "type":"track", "attr":{"duration":180822}},
-                    {"id":"12", "type":"track", "attr":{"duration":180822}}
+                    {"id":"11", "type":"track"},
+                    {"id":"11", "type":"track"},
+                    {"id":"12", "type":"track"}
                 ]
             })
         );
@@ -215,10 +216,7 @@ async fn soda_manual_track_order_reports_unconfirmed_without_retry_after_bad_ack
         account_reply("123456", Some("sessionid_ss=verified; Path=/")),
         created_library_reply(3, "created-before"),
         account_playlist_reply(&["11", "12", "11"], "tracks-before"),
-        crate::test_http::json(
-            r#"{"status_code":7,"playlistId":"42","media":[{"id":"11"},{"id":"11"},{"id":"12"}]}"#,
-            None,
-        ),
+        crate::test_http::json(r#"{"status_code":7}"#, None),
     ])
     .await;
     fixture.provider.client = fixture
@@ -247,7 +245,7 @@ async fn soda_manual_track_order_reports_unconfirmed_when_complete_playlist_read
         account_reply("123456", Some("sessionid_ss=verified; Path=/")),
         created_library_reply(3, "created-before"),
         account_playlist_reply(&["11", "12", "11"], "tracks-before"),
-        sort_ack(&["11", "11", "12"], "sorted"),
+        sort_ack("sorted"),
         account_playlist_reply(&["11", "12", "11"], "tracks-after"),
     ])
     .await;
@@ -279,7 +277,7 @@ async fn soda_manual_track_order_requires_created_library_id_set_to_remain_uncha
         account_reply("123456", Some("sessionid_ss=verified; Path=/")),
         created_library_reply(3, "created-before"),
         account_playlist_reply(&["11", "12", "11"], "tracks-before"),
-        sort_ack(&["11", "11", "12"], "sorted"),
+        sort_ack("sorted"),
         account_playlist_reply(&["11", "11", "12"], "tracks-after"),
         changed_created,
     ])
@@ -338,7 +336,7 @@ async fn soda_manual_track_order_rejects_late_ack_after_selected_account_generat
             account_reply("123456", Some("sessionid_ss=verified; Path=/")),
             created_library_reply(3, "created-before"),
             account_playlist_reply(&["11", "12", "11"], "tracks-before"),
-            sort_ack(&["11", "11", "12"], "sorted"),
+            sort_ack("sorted"),
         ],
         3,
     )
