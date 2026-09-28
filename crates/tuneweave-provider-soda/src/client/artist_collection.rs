@@ -1,5 +1,6 @@
 //! Account-bound artist collection calls from the official Android API.
 use super::*;
+use crate::account::{add_luna_pc_headers, luna_pc_endpoint};
 use crate::login::SodaCredential;
 use reqwest::header::{ACCEPT, COOKIE};
 use tuneweave_core::Artist;
@@ -35,10 +36,16 @@ struct WriteAck {
 #[derive(Deserialize)]
 struct CollectionPage {
     status_code: Option<i64>,
+    status_info: Option<CollectionStatusInfo>,
     artists: Option<Vec<NetArtistSummary>>,
     next_cursor: Option<String>,
     total_num: Option<u64>,
     has_more: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CollectionStatusInfo {
+    status_code: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -67,22 +74,19 @@ impl SodaClient {
         let started = Instant::now();
         let mut http_status = None;
         let result = async {
-            let mut url = Url::parse("https://api.qishui.com")
-                .map_err(|_| soda_upstream_error("Soda artist collection endpoint is invalid"))?;
-            url.set_path(ARTIST_COLLECTION_PATH);
+            let device = self.login_device()?;
+            let mut url = luna_pc_endpoint(ARTIST_COLLECTION_PATH, &device)?;
             {
                 let mut query = url.query_pairs_mut();
-                if let Some(cursor) = cursor {
-                    query.append_pair("cursor", cursor);
-                }
+                query.append_pair("cursor", cursor.unwrap_or_default());
                 query.append_pair("count", &ARTIST_PAGE_SIZE.to_string());
             }
             let response = self
                 .send_login_request(
-                    self.login_request(reqwest::Method::GET, url)
-                        .header(ACCEPT, "application/json")
-                        .header("x-luna-api-version", LUNA_API_VERSION)
-                        .header("x-luna-is-login", "1")
+                    add_luna_pc_headers(self.login_request(reqwest::Method::GET, url))
+                        .header("x-luna-background-type", "foreground")
+                        .header("x-luna-is-background-req", "0")
+                        .header("x-luna-is-local-user", "1")
                         .header(COOKIE, credential.cookie_header()?),
                 )
                 .await?;
@@ -209,14 +213,18 @@ fn parse_collection_page(body: &[u8]) -> Result<ParsedCollectionPage> {
     }
     let page: CollectionPage = serde_json::from_slice(body)
         .map_err(|_| artist_collection_invalid("Soda artist collection returned malformed data"))?;
-    match page.status_code {
-        Some(100_001 | 1_000_016) => return Err(artist_collection_authentication_required()),
-        Some(0) => {}
-        _ => {
-            return Err(artist_collection_invalid(
-                "Soda artist collection read was rejected",
-            ));
-        }
+    let status_codes = [
+        page.status_code,
+        page.status_info.and_then(|info| info.status_code),
+    ];
+    if status_codes.contains(&Some(100_001 | 1_000_016)) {
+        return Err(artist_collection_authentication_required());
+    }
+    if !status_codes.contains(&Some(0)) || status_codes.into_iter().flatten().any(|code| code != 0)
+    {
+        return Err(artist_collection_invalid(
+            "Soda artist collection read was rejected",
+        ));
     }
     let items = page.artists.ok_or_else(|| {
         artist_collection_invalid("Soda artist collection omitted its page items")
@@ -386,6 +394,9 @@ mod tests {
         assert_eq!(parsed.total_num, 2);
         assert!(parsed.has_more);
 
+        let nested_status = br#"{"status_info":{"status_code":0},"artists":[],"next_cursor":"","total_num":0,"has_more":false}"#;
+        assert!(parse_collection_page(nested_status).is_ok());
+
         let final_page = br#"{"status_code":0,"artists":[{"id":"22","name":"B"}],"next_cursor":"","total_num":1,"has_more":false}"#;
         assert!(parse_collection_page(final_page).is_ok());
         let terminal_cursor = br#"{"status_code":0,"artists":[],"next_cursor":"terminal-token","total_num":0,"has_more":false}"#;
@@ -400,6 +411,7 @@ mod tests {
             br#"{"status_code":0,"artists":[{"id":"11","name":"A","count_albums":1000001}],"next_cursor":"","total_num":1,"has_more":false}"#,
             br#"{"status_code":0,"artists":[{"id":"11","name":"A"},{"id":"11","name":"A"}],"next_cursor":"","total_num":2,"has_more":false}"#,
             br#"{"status_code":1000016,"artists":[],"next_cursor":"","total_num":0,"has_more":false}"#,
+            br#"{"status_code":0,"status_info":{"status_code":7},"artists":[],"next_cursor":"","total_num":0,"has_more":false}"#,
         ] {
             assert!(parse_collection_page(body).is_err());
         }
@@ -460,7 +472,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artist_collection_wire_uses_single_ids_selected_cookie_and_mobile_login_headers() {
+    async fn artist_collection_wire_uses_single_ids_and_pc_app_read_context() {
         let credential = SodaCredential::test_credential("selected-artist-cookie")
             .bind_user("123456")
             .unwrap();
@@ -504,9 +516,16 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(body).unwrap(),
             json!({"artist_ids":["11"]})
         );
-        assert!(requests[1].starts_with("GET /luna/me/collection/artist?count=100 "));
+        assert!(requests[1].starts_with("GET /luna/me/collection/artist?aid=386088&"));
         assert!(requests[1].contains("cookie: sessionid_ss=write-rotated\r\n"));
-        assert!(requests[1].contains("x-luna-api-version: 2023-01-04\r\n"));
-        assert!(requests[1].contains("x-luna-is-login: 1\r\n"));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("user-agent: lunapc/3.7.0(")
+        );
+        assert!(requests[1].contains("x-luna-background-type: foreground\r\n"));
+        assert!(requests[1].contains("x-luna-is-background-req: 0\r\n"));
+        assert!(requests[1].contains("x-luna-is-local-user: 1\r\n"));
+        assert!(requests[1].contains("cursor=&count=100"));
     }
 }

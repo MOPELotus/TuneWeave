@@ -81,7 +81,7 @@ async fn artist_subscription_uses_selected_account_and_confirms_complete_readbac
                 serde_json::from_str::<serde_json::Value>(body).unwrap(),
                 json!({"artist_ids":["11"]})
             );
-            assert!(requests[3].starts_with("GET /luna/me/collection/artist?count=100 "));
+            assert!(requests[3].starts_with("GET /luna/me/collection/artist?aid=386088&"));
             assert!(requests[3].contains("cookie: sessionid_ss=write-rotated\r\n"));
         }
     }
@@ -204,8 +204,8 @@ async fn artist_collection_snapshot_requires_advancing_cursors_and_a_stable_comp
     );
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].starts_with("GET /luna/me/collection/artist?count=100 "));
-    assert!(requests[1].starts_with("GET /luna/me/collection/artist?cursor=next&count=100 "));
+    assert!(requests[0].starts_with("GET /luna/me/collection/artist?aid=386088&"));
+    assert!(requests[1].starts_with("GET /luna/me/collection/artist?aid=386088&"));
     assert!(requests[1].contains("cookie: sessionid_ss=page-one\r\n"));
 
     let mut fixture = SessionFixture::new();

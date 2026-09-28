@@ -87,13 +87,17 @@ async fn account_following_artists_uses_selected_session_and_complete_mobile_rea
 
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 3);
-        assert!(requests[1].starts_with("GET /luna/me/collection/artist?count=100 "));
+        assert!(requests[1].starts_with("GET /luna/me/collection/artist?aid=386088&"));
         assert!(requests[1].contains("cookie: sessionid_ss=verified-session\r\n"));
-        assert!(requests[1].contains("x-luna-api-version: 2023-01-04\r\n"));
-        assert!(requests[1].contains("x-luna-is-login: 1\r\n"));
         assert!(
-            requests[2].starts_with("GET /luna/me/collection/artist?cursor=cursor-1&count=100 ")
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("user-agent: lunapc/3.7.0(")
         );
+        assert!(requests[1].contains("x-luna-background-type: foreground\r\n"));
+        assert!(requests[1].contains("x-luna-is-background-req: 0\r\n"));
+        assert!(requests[1].contains("x-luna-is-local-user: 1\r\n"));
+        assert!(requests[2].starts_with("GET /luna/me/collection/artist?aid=386088&"));
         assert!(requests[2].contains("cookie: sessionid_ss=page-one-session\r\n"));
         for wire in &requests[1..] {
             let target = wire
@@ -106,7 +110,53 @@ async fn account_following_artists_uses_selected_session_and_complete_mobile_rea
             let url = origin.join(target).unwrap();
             let query = url.query_pairs().collect::<BTreeMap<_, _>>();
             assert_eq!(query.get("count").map(|value| value.as_ref()), Some("100"));
+            assert_eq!(
+                query.get("app_name").map(|value| value.as_ref()),
+                Some("luna_pc")
+            );
+            assert_eq!(
+                query.get("device_platform").map(|value| value.as_ref()),
+                Some("windows")
+            );
         }
+        let first = origin
+            .join(
+                requests[1]
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        let second = origin
+            .join(
+                requests[2]
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            first
+                .query_pairs()
+                .find(|(key, _)| key == "cursor")
+                .unwrap()
+                .1,
+            ""
+        );
+        assert_eq!(
+            second
+                .query_pairs()
+                .find(|(key, _)| key == "cursor")
+                .unwrap()
+                .1,
+            "cursor-1"
+        );
 
         let serialized = serde_json::to_string(&page).unwrap();
         for secret in [
