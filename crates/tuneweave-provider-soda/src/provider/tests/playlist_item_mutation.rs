@@ -15,7 +15,7 @@ fn created_library_reply(track_count: usize, cookie: &str) -> String {
     crate::test_http::json(
         &json!({
             "status_code": 0,
-            "playlists": [owned_created_playlist(track_count, 0)],
+            "playlists": [owned_created_playlist(track_count, 2)],
             "total_num": 1,
             "has_more": false,
         })
@@ -30,7 +30,7 @@ fn account_playlist_reply(ids: &[&str], cookie: &str) -> String {
     page["playlist"]["id"] = json!("42");
     page["playlist"]["title"] = json!("Owned playlist");
     page["playlist"]["desc"] = json!("Preserved description");
-    page["playlist"]["type"] = json!(0);
+    page["playlist"]["type"] = json!(2);
     page["playlist"]["owner"]["id"] = json!("123456");
     page["playlist"]["count_tracks"] = json!(ids.len());
     page["playlist"]["resource_cnt"]["track_cnt"] = json!(ids.len());
@@ -307,7 +307,7 @@ async fn playlist_track_mutation_requires_an_owned_ordinary_created_playlist() {
     let mut fixture = SessionFixture::new();
     let source = test_soda_credential().bind_user("123456").unwrap();
     fixture.put("personal", &source);
-    for kind in [1, 4] {
+    for kind in [0, 1, 4] {
         let (origin, server) = crate::test_http::serve(vec![
             account_reply("123456", None),
             crate::test_http::json(

@@ -8,7 +8,7 @@ fn created_library_reply(track_count: usize, cookie: &str) -> String {
                 "id": "42",
                 "title": "Owned playlist",
                 "desc": "Preserved description",
-                "type": 0,
+                "type": 2,
                 "count_tracks": track_count,
                 "owner": {"id": "123456"}
             }],
@@ -26,7 +26,7 @@ fn account_playlist_reply(ids: &[&str], cookie: &str) -> String {
     page["playlist"]["id"] = json!("42");
     page["playlist"]["title"] = json!("Owned playlist");
     page["playlist"]["desc"] = json!("Preserved description");
-    page["playlist"]["type"] = json!(0);
+    page["playlist"]["type"] = json!(2);
     page["playlist"]["owner"]["id"] = json!("123456");
     page["playlist"]["count_tracks"] = json!(ids.len());
     page["playlist"]["resource_cnt"]["track_cnt"] = json!(ids.len());

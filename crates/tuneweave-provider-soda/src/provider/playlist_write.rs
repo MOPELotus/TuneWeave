@@ -2,6 +2,9 @@ use super::*;
 
 const PLAYLIST_WRITE_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 const MAX_PLAYLIST_MEDIA_MUTATION_ITEMS: usize = 100;
+// The ordinary PC-created playlist detail reads back with type 2; special
+// collections use distinct types (for example favorites use 1 and 4).
+const SODA_ORDINARY_PLAYLIST_TYPE: i64 = 2;
 
 impl SodaProvider {
     pub(super) async fn mutate_owned_playlist_items(
@@ -94,7 +97,7 @@ impl SodaProvider {
                 .extensions
                 .get("playlist_type")
                 .and_then(serde_json::Value::as_i64)
-                .is_some_and(|kind| kind != 0)
+                .is_some_and(|kind| kind != SODA_ORDINARY_PLAYLIST_TYPE)
             {
                 return Err(TuneWeaveError::new(
                     ErrorCode::CapabilityNotSupported,
@@ -120,7 +123,7 @@ impl SodaProvider {
                     .extensions
                     .get("playlist_type")
                     .and_then(serde_json::Value::as_i64)
-                    != Some(0)
+                    != Some(SODA_ORDINARY_PLAYLIST_TYPE)
             {
                 return Err(TuneWeaveError::new(
                     ErrorCode::PermissionDenied,
@@ -195,7 +198,7 @@ impl SodaProvider {
                     .extensions
                     .get("playlist_type")
                     .and_then(serde_json::Value::as_i64)
-                    != Some(0)
+                    != Some(SODA_ORDINARY_PLAYLIST_TYPE)
                 || !playlist_metadata_preserved(&before.playlist, &after.playlist)
             {
                 return Err(soda_upstream_error(
@@ -354,7 +357,7 @@ impl SodaProvider {
                 .extensions
                 .get("playlist_type")
                 .and_then(serde_json::Value::as_i64)
-                .is_some_and(|kind| kind != 0)
+                .is_some_and(|kind| kind != SODA_ORDINARY_PLAYLIST_TYPE)
             {
                 return Err(TuneWeaveError::new(
                     ErrorCode::CapabilityNotSupported,
@@ -380,7 +383,7 @@ impl SodaProvider {
                     .extensions
                     .get("playlist_type")
                     .and_then(serde_json::Value::as_i64)
-                    != Some(0)
+                    != Some(SODA_ORDINARY_PLAYLIST_TYPE)
             {
                 return Err(TuneWeaveError::new(
                     ErrorCode::PermissionDenied,
@@ -450,7 +453,7 @@ impl SodaProvider {
                     .extensions
                     .get("playlist_type")
                     .and_then(serde_json::Value::as_i64)
-                    != Some(0)
+                    != Some(SODA_ORDINARY_PLAYLIST_TYPE)
                 || !playlist_metadata_preserved(&before.playlist, &after.playlist)
                 || after.source_user_id() != source_user_id.as_str()
             {
