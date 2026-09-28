@@ -275,8 +275,7 @@ fn account_playlist_metadata_only_empty(
     let owner_id = value
         .pointer("/playlist/owner/id")
         .and_then(serde_json::Value::as_str);
-    playlist_id
-        .is_some_and(|id| canonical_positive_decimal(id).as_deref() == Some(expected_playlist_id))
+    playlist_id.is_some_and(|id| canonical_positive_decimal(id) == Some(expected_playlist_id))
         && owner_id == Some(expected_owner_id)
 }
 

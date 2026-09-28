@@ -222,19 +222,21 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
     let ranges = map_sample_ranges(&sizes, &mappings, &offsets, 1, &payloads)?;
     validate_timing(
         bytes,
-        track,
-        child(bytes, mdia, b"mdhd")?,
-        exactly_one(
-            &table,
-            b"stts",
-            "Soda plaintext audio requires one stts box",
-        )?,
-        sizes.len(),
-        table.iter().any(|atom| atom.kind == *b"ctts"),
-        format,
-        sample_rate_fixed,
-        edit_list,
-        movie_scale,
+        AudioTimingContext {
+            track,
+            mdhd: child(bytes, mdia, b"mdhd")?,
+            stts: exactly_one(
+                &table,
+                b"stts",
+                "Soda plaintext audio requires one stts box",
+            )?,
+            samples: sizes.len(),
+            composition_offsets_present: table.iter().any(|atom| atom.kind == *b"ctts"),
+            format,
+            sample_rate_fixed,
+            edit_list,
+            movie_scale,
+        },
     )?;
     // Every chunk is inside mdat and exactly accounted for; no hidden extra payload.
     if payloads.is_empty()
@@ -308,8 +310,8 @@ fn movie_timescale(bytes: &[u8], header: BoxHeader) -> Result<u32> {
     Ok(scale)
 }
 
-fn validate_timing(
-    bytes: &[u8],
+#[derive(Clone, Copy)]
+struct AudioTimingContext {
     track: BoxHeader,
     mdhd: BoxHeader,
     stts: BoxHeader,
@@ -319,7 +321,20 @@ fn validate_timing(
     sample_rate_fixed: u32,
     edit_list: Option<AudioEditList>,
     movie_scale: Option<u32>,
-) -> Result<()> {
+}
+
+fn validate_timing(bytes: &[u8], timing: AudioTimingContext) -> Result<()> {
+    let AudioTimingContext {
+        track,
+        mdhd,
+        stts,
+        samples,
+        composition_offsets_present,
+        format,
+        sample_rate_fixed,
+        edit_list,
+        movie_scale,
+    } = timing;
     let data = payload(bytes, mdhd)?;
     let (scale, duration) = match data.first() {
         Some(0) if data.len() == 24 => (read_u32(data, 12)?, u64::from(read_u32(data, 16)?)),
