@@ -76,6 +76,12 @@ impl SodaClient {
 
 fn parse_page(owner: &str, credential: &SodaCredential, body: &[u8]) -> Result<LibraryPage<Album>> {
     validate_library_status(body)?;
+    // The official mixed-collection endpoint returns only `status_info` for an
+    // empty account library. Accept the same strictly validated empty envelope
+    // used by the saved-playlist reader instead of treating it as malformed.
+    if let Some(page) = super::empty_saved_library_page(credential, body) {
+        return Ok(page);
+    }
     let envelope: AlbumEnvelope = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda saved albums returned malformed data"))?;
     let entries = envelope
@@ -233,6 +239,20 @@ mod tests {
         assert_eq!(result.items[1].extensions["subscribed"], true);
         assert!(result.items[0].cover_url.is_none());
         assert!(result.items[0].kind.is_none());
+        let mut pagination = LibraryPagination::default();
+        assert!(pagination.accept("0", &result).unwrap().is_none());
+        assert!(pagination.absence_is_proven());
+    }
+
+    #[test]
+    fn empty_saved_album_envelope_proves_a_complete_empty_collection() {
+        let result = page(json!({"status_info": {
+            "log_id": "request-log",
+            "now": 123,
+            "now_ts_ms": 123456
+        }}))
+        .unwrap();
+        assert!(result.items.is_empty());
         let mut pagination = LibraryPagination::default();
         assert!(pagination.accept("0", &result).unwrap().is_none());
         assert!(pagination.absence_is_proven());

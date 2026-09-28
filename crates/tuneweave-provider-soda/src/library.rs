@@ -1157,7 +1157,10 @@ fn parse_page(
     })
 }
 
-fn empty_saved_library_page(credential: &SodaCredential, bytes: &[u8]) -> Option<LibraryPage> {
+fn empty_saved_library_page<T>(
+    credential: &SodaCredential,
+    bytes: &[u8],
+) -> Option<LibraryPage<T>> {
     let response = serde_json::from_slice::<EmptySavedLibraryResponse>(bytes).ok()?;
     if response.status_info.log_id.trim().is_empty()
         || response.status_info.log_id.len() > 256
