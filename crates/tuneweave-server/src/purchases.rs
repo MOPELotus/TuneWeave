@@ -36,6 +36,11 @@ pub(super) async fn tracks(
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
+    if !access.provider.supports(Capability::AccountPurchasedTracks) {
+        return Err(
+            TuneWeaveError::unsupported(platform, Capability::AccountPurchasedTracks).into(),
+        );
+    }
     let request = page_request(&params, access.required_account().to_owned())?;
     let result = access.provider.account_purchased_tracks(&request).await;
     let (page, credential) = finish_account_operation(
@@ -65,6 +70,11 @@ pub(super) async fn albums(
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
+    if !access.provider.supports(Capability::AccountPurchasedAlbums) {
+        return Err(
+            TuneWeaveError::unsupported(platform, Capability::AccountPurchasedAlbums).into(),
+        );
+    }
     let request = page_request(&params, access.required_account().to_owned())?;
     let result = access.provider.account_purchased_albums(&request).await;
     let (page, credential) = finish_account_operation(

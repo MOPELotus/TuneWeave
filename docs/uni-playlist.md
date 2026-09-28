@@ -155,7 +155,7 @@ V1 文档拒绝未知字段，并限制项目数量、文本长度、引用、�
 
 咪咕普通歌单与喜欢集合支持账户来源：普通集合使用 `{"ref":"migu:歌单ID","type":"playlist","account":"别名"}`，喜欢集合使用 `{"ref":"migu:本人UID","type":"favorite_tracks","account":"别名"}`。调用方持有凭据时省略 `account`，通过统一凭据请求头提交。两者均可用于 `/v1/uni/playlists/imports` 和 `/v1/uni/materialize/imports`。喜欢来源要求所选账户的个人导航提供稳定的歌单 ID；若上游没有提供，接口返回 `capability_not_supported`，不会从同名自建歌单推断。
 
-咪咕单曲购买库支持 `{"ref":"migu:本人UID","type":"purchased_tracks","account":"别名"}`。来源 UID 必须与所选账户一致；服务器复用已购单曲的完整有序读取和 `source_snapshot_id`，每个项目必须有已解析的公开曲目资料，未解析购买记录会使整次 Uni 导入失败而不会被静默丢弃。购买记录本身仍不授予当前播放或下载权限；已购专辑另用 `purchased_albums` 来源展开，见下文。
+咪咕已购歌曲来源（`type=purchased_tracks`）目前临时关闭。`/v1/uni/playlists/imports` 与 `/v1/uni/materialize/imports` 均返回 `422 capability_not_supported`，不尝试读取或创建部分歌单；恢复前需先修复并重新验收咪咕已购歌曲接口。
 
 咪咕每次详情或曲目窗口都先完整读取，单个歌单最多 10,000 首；大集合的多窗口导入有重复读取成本。`source_snapshot_id` 用于比较所读内容，后续页内容变化、缺少完整性证明或会话失效会使导入失败，保留歌曲顺序及重复条目。该内容标识不等于上游事务版本，也不授予播放权；账户播放和普通非加密歌曲的独立下载授权见[账户媒体说明](authentication.md#咪咕账户歌曲与播放授权)，真实账户兼容性与权益仍待验收。
 
@@ -175,9 +175,9 @@ V1 文档拒绝未知字段，并限制项目数量、文本长度、引用、�
 酷我账户的普通自建歌单详情及曲目来源摘要包含两次核实的完整可编辑资料，因此标签单独变化也会使跨调用导入失败。已核实来源在导入响应及服务器 `import_sources` 的来源扩展中提供 `source_tags` 和 `source_metadata_verified=true`；显式空标签保留为空数组，未知标签不附加该标记。Client materialize 保留这些来源信息并移除账户别名。此扩展不改变 v1 文档的字段白名单，v1 文档仍不包含完整 `import_sources`。收藏与喜欢来源不假定具备同样的详情协议。
 
 
-汽水收藏专辑支持 `{"ref":"soda:本人UID","type":"collected_albums","account":"personal"}`；咪咕已购专辑支持 `{"ref":"migu:本人UID","type":"purchased_albums","account":"personal"}`。两者均可用于持久导入和 Client materialize，调用方凭据模式省略 `account` 并提供凭据请求头。按目录顺序展开每张专辑的完整歌曲，保留重复歌曲；咪咕普通与数字专辑独立识别，不因数字 ID 相同而合并。
+汽水收藏专辑支持 `{"ref":"soda:本人UID","type":"collected_albums","account":"personal"}`，可用于持久导入和 Client materialize；调用方凭据模式省略 `account` 并提供汽水凭据请求头。咪咕已购专辑来源（`type=purchased_albums`）目前临时关闭，持久导入和 Client materialize 均返回 `422 capability_not_supported`。
 
-这两种来源每次元数据或曲目窗口调用都完整展开，最多 128 个专辑条目、10000 首歌曲，单次总期限 120 秒。前后完整读取账户目录，目录变化、无法证明完整、专辑不可读或会话变化时整次失败；跨调用使用内容快照核对，不提供上游事务隔离。大集合的多窗口导入有重复读取成本。收藏与购买只说明来源，实际播放和下载仍分别校验当前权益；真实账户验收待完成。
+汽水收藏专辑来源每次元数据或曲目窗口调用都完整展开，最多 128 个专辑条目、10000 首歌曲，单次总期限 120 秒。前后完整读取账户目录，目录变化、无法证明完整、专辑不可读或会话变化时整次失败；跨调用使用内容快照核对，不提供上游事务隔离。大集合的多窗口导入有重复读取成本。收藏只说明来源，实际播放和下载仍分别校验当前权益；真实账户验收待完成。
 
 咪咕收藏专辑支持 `{"ref":"migu:本人UID","type":"favorite_albums","account":"别名"}`，可用于 `/v1/uni/playlists/imports` 和 `/v1/uni/materialize/imports`；调用方凭据模式省略 `account` 并提交咪咕凭据。服务按目录原序展开普通专辑（`resource_type=2003`）和数字专辑（`resource_type=5`），相同数值 ID 按资源类型区分，不合并；逐张读取完整曲目并保留专辑顺序及重复歌曲。收藏目录每页 10 项、最多 64 页；每张专辑曲目读取最多 64 页。读取前后完整核验收藏目录、本人 UID 和账户会话代际；目录漂移、不完整目录／专辑或会话变化都会使整次来源失败，不创建或返回部分结果。单次最多 128 张专辑、10,000 首歌曲、120 秒和 16 MiB 序列化快照材料。内容摘要只用于跨调用一致性检查，不是上游原子快照，也不代表播放或下载权益；真实账户验证仍待完成。
 

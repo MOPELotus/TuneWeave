@@ -4638,6 +4638,14 @@ async fn set_artist_subscription(
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
+    if !access
+        .provider
+        .supports(Capability::ArtistSubscriptionWrite)
+    {
+        return Err(
+            TuneWeaveError::unsupported(platform, Capability::ArtistSubscriptionWrite).into(),
+        );
+    }
     let account = access.required_account().to_owned();
     let result = access
         .provider
@@ -7621,6 +7629,16 @@ async fn load_uni_playlist_import_source(
     let access = access.expect("remote import source always has provider access");
     let provider = access.provider;
     let provider_account = access.provider_account;
+    let purchase_capability = match source.source_type.as_str() {
+        "purchased_tracks" => Some(Capability::AccountPurchasedTracks),
+        "purchased_albums" => Some(Capability::AccountPurchasedAlbums),
+        _ => None,
+    };
+    if let Some(capability) = purchase_capability
+        && !provider.supports(capability)
+    {
+        return Err(TuneWeaveError::unsupported(platform, capability));
+    }
     let playlist = provider
         .playlist_source(
             source.playlist_ref.id(),
@@ -12697,6 +12715,14 @@ async fn user_following_artists(
         account.as_deref(),
         AccountSelection::Optional,
     )?;
+    if !access
+        .provider
+        .supports(Capability::AccountFollowingArtists)
+    {
+        return Err(
+            TuneWeaveError::unsupported(platform, Capability::AccountFollowingArtists).into(),
+        );
+    }
     let page = access
         .provider
         .user_following_artists(
@@ -17016,6 +17042,14 @@ async fn account_following_artists(
         params.account.as_deref(),
         AccountSelection::Default,
     )?;
+    if !access
+        .provider
+        .supports(Capability::AccountFollowingArtists)
+    {
+        return Err(
+            TuneWeaveError::unsupported(platform, Capability::AccountFollowingArtists).into(),
+        );
+    }
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 25)?;
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());

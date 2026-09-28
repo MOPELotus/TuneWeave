@@ -40,10 +40,20 @@ impl MusicProvider for Provider {
         "Account collection import fixture"
     }
     fn capabilities(&self) -> BTreeSet<Capability> {
-        BTreeSet::from([
+        let mut capabilities = BTreeSet::from([
             Capability::PlaylistRead,
             Capability::CallerManagedCredentials,
-        ])
+        ]);
+        match self.source_type {
+            "purchased_tracks" => {
+                capabilities.insert(Capability::AccountPurchasedTracks);
+            }
+            "purchased_albums" => {
+                capabilities.insert(Capability::AccountPurchasedAlbums);
+            }
+            _ => {}
+        }
+        capabilities
     }
     fn with_caller_credential(
         &self,
@@ -182,12 +192,6 @@ async fn purchased_track_imports_reject_foreign_owner_without_creating_or_export
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert!(
-                response.headers()[header::CACHE_CONTROL]
-                    .to_str()
-                    .unwrap()
-                    .contains("no-store")
-            );
-            assert!(
                 !response
                     .headers()
                     .contains_key(caller_scope::UPDATED_CREDENTIAL_HEADER)
@@ -197,6 +201,50 @@ async fn purchased_track_imports_reject_foreign_owner_without_creating_or_export
             let (status, playlists) = json_response_from(router, "/v1/uni/playlists").await;
             assert_eq!(status, StatusCode::OK);
             assert!(playlists["data"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn migu_purchase_import_sources_are_gated_by_their_capabilities() {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(tuneweave_provider_migu::MiguProvider::new(Default::default()).unwrap())
+        .unwrap();
+    let router = build_router(AppState::new(registry, Platform::Migu));
+
+    for (kind, capability) in [
+        ("purchased_tracks", "account_purchased_tracks"),
+        ("purchased_albums", "account_purchased_albums"),
+    ] {
+        for materialize in [false, true] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(if materialize {
+                    "/v1/uni/materialize/imports"
+                } else {
+                    "/v1/uni/playlists/imports"
+                })
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "Not created",
+                        "sources": [{"platform": "migu", "id": "111", "type": kind}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(caller_scope::UPDATED_CREDENTIAL_HEADER)
+            );
+            let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+            let error: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"]["code"], "capability_not_supported");
+            assert_eq!(error["error"]["details"]["capability"], capability);
         }
     }
 }

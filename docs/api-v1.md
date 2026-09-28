@@ -546,15 +546,7 @@ Concept 账户批量删除普通自建歌单时，2–100 个不同目标使用�
 现有 `PUT /v1/playlists/{reference}/tracks/order` 接受完整歌曲引用排列；同一歌曲出现多次时，以当前顺序依次匹配其条目 ID。它要求全部条目都有可解析歌曲，遇到未知条目返回 `capability_not_supported`，请使用原始条目接口。排序使用独立加密协议并执行完整回读，核对条目、顺序、版本及已知资料；响应包含新快照及 `extensions.confirmed`、`write_requests_dispatched`。目录排序核对全库资料和类别顺序。上游不提供事务保证；发送后任何未确认结果均标为 `write_outcome=unconfirmed`、不可自动重试，不自动回滚或重发。SDK 的空歌曲排列仅适用于空歌单；现有通用 HTTP `tracks/order` 仍要求非空引用。
 
 
-咪咕单曲已购记录使用 `GET /v1/account/purchases/tracks?platform=migu&account=A`，也支持默认账户及调用方凭据。SDK 对应 `account_purchased_tracks`，能力为 `account_purchased_tracks`。仅包含单曲已购接口的记录，专辑订阅附带的歌曲不混入；已购专辑见下文。不会与喜欢或收藏库合并。
-
-每次先核验所选 UID，读取完整 `contentId` 列表，按 `limit` / `offset` 补齐公开歌曲资料，再复核完整列表和同一账户身份。保留顺序与重复记录；`limit` 为 1–100，完整列表最多 10,000 项、每个已购响应最多 1 MiB，整次调用期限 45 秒。`total` 是完整记录数；超出范围的窗口返回空页，读取失败不作为空库。两次观察不一致返回 `conflict`，不承诺上游原子快照。
-
-每项的 `extensions.resource_ref` / `content_id` 保留购买身份；公开目录明确找不到歌曲时 `track=null`、`catalogue_resolved=false`，仍保留该记录。其他目录错误继续返回错误。歌曲资料标记 `catalogue_scope=public`，购买记录不授予当前播放、下载或音质权限。分页扩展包含 `source_user_id`、`source_snapshot_id`、`complete_read` 和 `consistency=two_complete_reads`。凭据更新和 `no-store` 沿用账户接口合同；购买歌曲可通过 `type=purchased_tracks` 导入 Uni，使用所选账户 UID 并保留原始顺序及重复项。真实非空购买库及权益仍待最终账户验收。
-
-咪咕已购专辑／专辑订阅记录使用 `GET /v1/account/purchases/albums?platform=migu&account=A`，SDK 为 `account_purchased_albums`。服务端默认／指定账户和调用方凭据均支持。结果中的普通专辑放在 `album`，数字专辑放在可选的 `digital_album`，最多填充其中一个；数字专辑不会改成普通专辑，即使 ID 相同。新增字段为空时省略，因此旧平台购买库的 JSON 结构保持兼容。缺少标题的记录两者均为空，保留 `extensions.content_id`、`resource_ref`、`resource_type` 和 `catalogue_kind`。
-
-该入口读取官方专辑订阅来源，不声称覆盖平台全部历史订单或退款记录。完整遍历两遍，比较有序类型化记录及分页边界后才切片；保留重复记录，未知类型、循环分页、缺失终止标记及中途失败均返回错误。每页请求 50 项，每遍最多 128 页／6,400 条，单个购买响应最多 1 MiB，两遍累计最多 16 MiB，整个调用期限 120 秒；调用窗口 `limit` 为 1–100。短页仍以明确的 `hasNextPage` 判断是否继续。购买目录字段来自账户响应，价格、期限、订单号及当前媒体权限没有证据时保持未知；`DigitalAlbum.purchased` 不由这一条记录推断当前状态。已购专辑可通过 `type=purchased_albums` 导入 Uni，单曲使用 `purchased_tracks`；两种来源都使用所选账户本人 UID，见 [Uni Playlist](uni-playlist.md)。真实账户验收仍待完成。
+咪咕已购歌曲和已购专辑接口目前临时关闭。真实账户验证分别遇到上游业务错误和无法识别的响应，因此 `/v1/account/purchases/tracks?platform=migu` 与 `/v1/account/purchases/albums?platform=migu` 返回 `422 capability_not_supported`，且不会在 `/v1/capabilities` 中声明这两项能力。错误不会伪装成空购买记录。其他平台各自声明的购买记录能力不受影响；咪咕收藏专辑、喜欢歌曲等不同接口保持独立。
 
 酷狗已购音乐库使用 `GET /v1/account/purchases/tracks?platform=kugou&account=A` 和 `/v1/account/purchases/albums`，调用方凭证模式沿用现有请求头。SDK 对应 `account_purchased_tracks` / `account_purchased_albums`，能力为 `account_purchased_tracks` / `account_purchased_albums`；收藏库接口不作为购买库使用。原生账户的歌曲和专辑记录分别可通过本人 UID 的 `type=purchased_tracks` 与 `type=purchased_albums` 导入 Uni；保留来源顺序及重复项，未解析条目会拒绝，详见 [Uni 账户来源](uni-playlist.md)。
 
@@ -611,6 +603,8 @@ Concept 账户批量删除普通自建歌单时，2–100 个不同目标使用�
 汽水喜欢列表使用账户目录中的真实集合身份和原始名称，支持当前账户读取、指定本人 UID 读取和 Uni `favorite_tracks` 导入。`PUT` / `DELETE /v1/account/favorites/tracks/soda:{id}` 在写入后完整回读核对状态；失败不报告已确认成功，也不自动重发。服务器别名和调用方凭证均可使用，会话更新通过响应头返回。分页、身份边界及待验收项见[登录与凭证](authentication.md)。
 
 `GET /v1/account/following/artists?platform=...&account=...&limit=...&offset=...` 读取所选账户关注的歌手目录，返回 `Artist[]` 和统一分页元数据。`limit` 默认 25、范围 1–100；`offset` 默认 0。可选择服务器账户，或使用 `X-TuneWeave-Credential` 调用方凭证；两者不能同时指定。此入口依赖 provider 的 `account_following_artists` 能力，不支持的平台返回 `capability_not_supported`。它只表示关注目录读取，不隐含关注写入、好友关系读取或媒体权益；写入需要单独的 `artist_subscription_write` 能力。
+
+咪咕的关注歌手目录及关注／取消关注操作当前临时关闭：真实账户请求因上游会话交换字段缺失而失败。咪咕不再声明 `account_following_artists` 或 `artist_subscription_write`；目录读取及写入均返回 `422 capability_not_supported`。恢复前需先修复会话交换链路并重新验收。
 
 汽水单艺人关注使用 `PUT /v1/account/following/artists/soda:{artist_id}?account=A`，取消关注使用同一路径的 `DELETE`；也可省略 `account` 使用默认账户，或改用 `X-TuneWeave-Credential`（两种账户来源不可同时指定）。当前支持单个正十进制艺人 ID；先确认所选账户身份并完整读取关注目录，状态已符合请求时不重复写入，否则提交一次官方 Android 添加/删除请求，再完整分页读回确认。分页游标必须前进且各页总数稳定。写入后的 ACK 或读回不能确认时返回 `write_outcome=unconfirmed`，不可自动重试；响应为 `no-store`。此段说明汽水的单艺人写入语义；关注目录读取按前述 GET 端点及 provider 的能力声明提供。
 

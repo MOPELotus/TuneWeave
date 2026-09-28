@@ -271,8 +271,7 @@ async fn migu_purchases_http_account_selection_records_and_credential_updates_fo
 }
 
 #[tokio::test]
-async fn migu_purchases_http_validation_and_real_provider_missing_credentials_never_use_anonymous_library()
- {
+async fn migu_purchases_http_validation_and_real_provider_rejects_disabled_capabilities() {
     for scope in ["default", "named", "caller"] {
         for extra in [
             "&limit=0",
@@ -305,7 +304,7 @@ async fn migu_purchases_http_validation_and_real_provider_missing_credentials_ne
             .unwrap();
         inspect(
             app.clone().oneshot(request).await.unwrap(),
-            StatusCode::UNAUTHORIZED,
+            StatusCode::UNPROCESSABLE_ENTITY,
             false,
         )
         .await;
@@ -385,10 +384,92 @@ async fn migu_purchases_album_http_preserves_digital_identity_and_account_error_
             .unwrap();
         inspect(
             app.clone().oneshot(request).await.unwrap(),
-            StatusCode::UNAUTHORIZED,
+            StatusCode::UNPROCESSABLE_ENTITY,
             false,
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn migu_following_artist_reads_are_disabled_and_not_advertised() {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(tuneweave_provider_migu::MiguProvider::new(Default::default()).unwrap())
+        .unwrap();
+    let app = build_router(AppState::new(registry, Platform::Migu));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/capabilities?platform=migu")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 65536).await.unwrap();
+    let capabilities: Value = serde_json::from_slice(&body).unwrap();
+    let declared = capabilities["data"][0]["capabilities"].as_array().unwrap();
+    for capability in [
+        "account_purchased_tracks",
+        "account_purchased_albums",
+        "account_following_artists",
+        "artist_subscription_write",
+    ] {
+        assert!(!declared.iter().any(|value| value == capability));
+    }
+
+    for uri in [
+        "/v1/account/following/artists?platform=migu",
+        "/v1/users/migu:123/following/artists",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            !response
+                .headers()
+                .contains_key(caller_scope::UPDATED_CREDENTIAL_HEADER)
+        );
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"]["code"], "capability_not_supported");
+        assert_eq!(
+            error["error"]["details"]["capability"],
+            "account_following_artists"
+        );
+    }
+
+    for method in [Method::PUT, Method::DELETE] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/v1/account/following/artists/migu:123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            !response
+                .headers()
+                .contains_key(caller_scope::UPDATED_CREDENTIAL_HEADER)
+        );
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"]["code"], "capability_not_supported");
+        assert_eq!(
+            error["error"]["details"]["capability"],
+            "artist_subscription_write"
+        );
     }
 }
 
