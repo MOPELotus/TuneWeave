@@ -1,3 +1,4 @@
+use crate::account::{add_luna_pc_headers, luna_pc_endpoint};
 use crate::login::SodaCredential;
 
 use super::*;
@@ -30,6 +31,20 @@ struct Envelope {
     albums: Option<Vec<DigitalAlbumWire>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyEnvelope {
+    status_info: EmptyStatusInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyStatusInfo {
+    log_id: String,
+    now: u64,
+    now_ts_ms: u64,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct DigitalAlbumWire {
@@ -53,24 +68,18 @@ impl SodaClient {
         let mut status = None;
         let result = async {
             let device = self.login_device()?;
-            let mut url = Url::parse("https://api.qishui.com")
-                .map_err(|_| invalid("Soda purchased-albums endpoint is invalid"))?;
-            url.set_path(ENDPOINT_PATH);
-            // GetMyDigitalAlbumsRequestToRequestData emits no endpoint-specific query fields.
-            // These are the same fixed PC 2.1.0 common fields used by adjacent account calls.
-            url.query_pairs_mut()
-                .append_pair("aid", SODA_APP_ID)
-                .append_pair("app_name", "luna_pc")
-                .append_pair("device_platform", "windows")
-                .append_pair("channel", "official")
-                .append_pair("version_name", "2.1.0")
-                .append_pair("version_code", "20010000")
-                .append_pair("device_id", &device.device_id)
-                .append_pair("iid", &device.install_id);
+            let mut url = luna_pc_endpoint(ENDPOINT_PATH, &device)?;
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("cursor", "");
+                query.append_pair("count", "100");
+            }
             let response = self
                 .send_login_request(
-                    self.login_request(reqwest::Method::GET, url)
-                        .header(reqwest::header::ACCEPT, "application/json")
+                    add_luna_pc_headers(self.login_request(reqwest::Method::GET, url))
+                        .header("x-luna-background-type", "foreground")
+                        .header("x-luna-is-background-req", "0")
+                        .header("x-luna-is-local-user", "1")
                         .header(reqwest::header::COOKIE, credential.cookie_header()?),
                 )
                 .await?;
@@ -138,9 +147,13 @@ fn parse(body: &[u8]) -> Result<Vec<DigitalAlbum>> {
         return Err(invalid("Soda rejected the purchased-albums request"));
     }
     if !codes.contains(&Some(0)) {
-        return Err(invalid(
-            "Soda purchased-albums response omitted a verifiable success status",
-        ));
+        return if parse_empty(body) {
+            Ok(Vec::new())
+        } else {
+            Err(invalid(
+                "Soda purchased-albums response omitted a verifiable success status",
+            ))
+        };
     }
 
     let envelope: Envelope = serde_json::from_slice(body)
@@ -161,6 +174,18 @@ fn parse(body: &[u8]) -> Result<Vec<DigitalAlbum>> {
         }
     }
     Ok(albums)
+}
+
+fn parse_empty(body: &[u8]) -> bool {
+    let Ok(response) = serde_json::from_slice::<EmptyEnvelope>(body) else {
+        return false;
+    };
+    let info = response.status_info;
+    !info.log_id.trim().is_empty()
+        && info.log_id.len() <= 256
+        && !info.log_id.chars().any(char::is_control)
+        && info.now > 0
+        && info.now_ts_ms > 0
 }
 
 fn map_album(source: DigitalAlbumWire) -> Result<DigitalAlbum> {
@@ -294,6 +319,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            parse(br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456}}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse(br#"{"status_info":{"log_id":"request-log","now":123,"now_ts_ms":123456},"albums":[]}"#).is_err());
+        assert!(parse(br#"{"status_info":{"log_id":"","now":123,"now_ts_ms":123456}}"#).is_err());
     }
 
     #[test]
@@ -344,12 +376,20 @@ mod tests {
         assert!(request.contains("app_name=luna_pc"));
         assert!(request.contains("device_platform=windows"));
         assert!(request.contains("channel=official"));
-        assert!(request.contains("version_name=2.1.0"));
-        assert!(request.contains("version_code=20010000"));
+        assert!(request.contains("version_name=3.7.0"));
+        assert!(request.contains("version_code=30070000"));
         assert!(request.contains(&format!("device_id={}", device.device_id)));
-        assert!(request.contains(&format!("iid={}", device.install_id)));
-        assert!(!request.contains("cursor="));
-        assert!(!request.contains("count="));
+        assert!(request.contains(&format!("fp={}", device.device_id)));
+        assert!(request.contains("iid="));
+        assert!(request.contains("cursor=&count=100"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("user-agent: lunapc/3.7.0")
+        );
+        assert!(request.contains("x-luna-background-type: foreground\r\n"));
+        assert!(request.contains("x-luna-is-background-req: 0\r\n"));
+        assert!(request.contains("x-luna-is-local-user: 1\r\n"));
         assert!(
             request
                 .to_ascii_lowercase()

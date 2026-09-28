@@ -113,8 +113,7 @@ async fn purchased_album_pages_use_the_selected_identity_and_complete_single_res
                     .to_ascii_lowercase()
                     .contains("cookie: sessionid_ss=verified-session")
             );
-            assert!(!requests[1].contains("cursor="));
-            assert!(!requests[1].contains("count="));
+            assert!(requests[1].contains("cursor=&count=100"));
             assert_eq!(
                 fixture.stored("other").unwrap().secret(),
                 other.serialize().unwrap()
