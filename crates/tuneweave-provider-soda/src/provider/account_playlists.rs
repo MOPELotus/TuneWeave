@@ -12,6 +12,13 @@ pub(super) struct AccountPlaylistSnapshot {
 }
 
 impl AccountPlaylistSnapshot {
+    pub(super) fn first_track_cover_url(&self) -> Option<&str> {
+        self.tracks
+            .first()
+            .and_then(|track| track.album.as_ref())
+            .and_then(|album| album.cover_url.as_deref())
+    }
+
     pub(super) fn contains_track(&self, id: &str) -> bool {
         self.tracks.iter().any(|track| track.id == id)
     }
@@ -179,12 +186,14 @@ impl SodaProvider {
                 ));
             }
             self.ensure_account_snapshot_current(account, source)?;
+            let visible_before = tracks.len();
             let response = self
                 .client
                 .account_playlist_page(
                     playlist_id,
                     cursor,
                     UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+                    visible_before,
                     source,
                 )
                 .await;

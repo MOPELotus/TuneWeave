@@ -506,7 +506,14 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let response_body = read_bounded_response(response, description).await?;
-            validate_playlist_media_write_ack(&response_body)?;
+            if let Err(error) = validate_playlist_media_write_ack(&response_body, id) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC soda_playlist_write_ack operation={operation} shape={}",
+                    safe_library_shape(&response_body)
+                );
+                return Err(error);
+            }
             credential.with_response_cookies(&headers)
         }
         .await;
@@ -1023,27 +1030,43 @@ fn validate_playlist_delete_ack(body: &[u8], requested_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_playlist_media_write_ack(body: &[u8]) -> Result<()> {
-    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
+fn validate_playlist_media_write_ack(body: &[u8], requested_id: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_slice(body)
         .map_err(|_| soda_upstream_error("Soda playlist media write returned invalid data"))?;
-    let status_code = envelope.status_code.ok_or_else(|| {
-        soda_upstream_error("Soda playlist media write omitted its result status")
-    })?;
-    for code in [
-        Some(status_code),
-        envelope.status_info.and_then(|info| info.status_code),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if code == 1_000_016 {
-            return Err(authentication_required());
+    let envelope: CollectionWriteEnvelope = serde_json::from_value(value.clone())
+        .map_err(|_| soda_upstream_error("Soda playlist media write returned invalid data"))?;
+    if let Some(status_code) = envelope.status_code {
+        for code in [
+            Some(status_code),
+            envelope.status_info.and_then(|info| info.status_code),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if code == 1_000_016 {
+                return Err(authentication_required());
+            }
+            if code != 0 {
+                return Err(soda_upstream_error(
+                    "Soda playlist media write was rejected",
+                ));
+            }
         }
-        if code != 0 {
-            return Err(soda_upstream_error(
-                "Soda playlist media write was rejected",
-            ));
-        }
+        return Ok(());
+    }
+
+    // The PC delete endpoint returns an identity-bound playlist snapshot with
+    // status_info but no status_code. This is only an ACK candidate: the provider
+    // still requires a separate complete before/after readback before reporting success.
+    validate_statusless_write_info(&value, "Soda playlist media write")?;
+    let response_playlist_id = value
+        .pointer("/playlist/id")
+        .and_then(serde_json::Value::as_str);
+    let media = value.get("media").and_then(serde_json::Value::as_array);
+    if response_playlist_id != Some(requested_id) || media.is_none() {
+        return Err(soda_upstream_error(
+            "Soda playlist media write omitted its result status",
+        ));
     }
     Ok(())
 }
@@ -1638,7 +1661,7 @@ mod tests {
             br#"{"status_code":0}"#.as_slice(),
             br#"{"status_code":0,"status_info":{"status_code":0}}"#,
         ] {
-            validate_playlist_media_write_ack(body).unwrap();
+            validate_playlist_media_write_ack(body, "42").unwrap();
         }
         for body in [
             br#"{}"#.as_slice(),
@@ -1648,26 +1671,55 @@ mod tests {
             br#"{"status_code":"0"}"#,
         ] {
             assert_eq!(
-                validate_playlist_media_write_ack(body).unwrap_err().code,
+                validate_playlist_media_write_ack(body, "42")
+                    .unwrap_err()
+                    .code,
                 ErrorCode::UpstreamError,
                 "{}",
                 String::from_utf8_lossy(body)
             );
         }
         assert_eq!(
-            validate_playlist_media_write_ack(br#"{"status_code":1000016}"#)
+            validate_playlist_media_write_ack(br#"{"status_code":1000016}"#, "42")
                 .unwrap_err()
                 .code,
             ErrorCode::AuthenticationRequired
         );
         assert_eq!(
             validate_playlist_media_write_ack(
-                br#"{"status_code":0,"status_info":{"status_code":1000016}}"#
+                br#"{"status_code":0,"status_info":{"status_code":1000016}}"#,
+                "42"
             )
             .unwrap_err()
             .code,
             ErrorCode::AuthenticationRequired
         );
+        validate_playlist_media_write_ack(
+            br#"{"status_info":{"log_id":"safe-log","now":1,"now_ts_ms":1000},"playlist":{"id":"42"},"media":[]}"#,
+            "42",
+        )
+        .expect("the PC delete response can use its identity-bound statusless snapshot");
+        for (body, requested_id) in [
+            (
+                br#"{"status_info":{"log_id":"safe-log","now":1,"now_ts_ms":1000},"playlist":{"id":"43"},"media":[]}"#.as_slice(),
+                "42",
+            ),
+            (
+                br#"{"status_info":{"log_id":"safe-log","now":1,"now_ts_ms":1000},"playlist":{"id":"42"}}"#,
+                "42",
+            ),
+            (
+                br#"{"status_info":{"log_id":"safe-log","now":0,"now_ts_ms":1000},"playlist":{"id":"42"},"media":[]}"#,
+                "42",
+            ),
+        ] {
+            assert_eq!(
+                validate_playlist_media_write_ack(body, requested_id)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::UpstreamError
+            );
+        }
     }
 
     #[tokio::test]

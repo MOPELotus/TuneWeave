@@ -39,6 +39,7 @@ impl SodaClient {
         playlist_id: &str,
         cursor: u64,
         count: u32,
+        visible_before: usize,
         credential: &SodaCredential,
     ) -> Result<SodaAccountPlaylistPage> {
         if credential.user_id().is_none() {
@@ -103,7 +104,14 @@ impl SodaClient {
             }
             let headers = response.headers().clone();
             let body = read_bounded_response(response, "Soda account playlist").await?;
-            let page = parse_account_playlist_page(&body, playlist_id, cursor, count, &user_id)?;
+            let page = parse_account_playlist_page(
+                &body,
+                playlist_id,
+                cursor,
+                count,
+                visible_before,
+                &user_id,
+            )?;
             let credential = credential.with_response_cookies(&headers)?;
             Ok(SodaAccountPlaylistPage { page, credential })
         }
@@ -133,6 +141,7 @@ fn parse_account_playlist_page(
     playlist_id: &str,
     cursor: u64,
     count: u32,
+    visible_before: usize,
     expected_owner_id: &str,
 ) -> Result<SodaPlaylistPage> {
     if count == 0 || count > UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE {
@@ -184,31 +193,31 @@ fn parse_account_playlist_page(
             ));
         }
     };
-    // The official PC playlist screen treats absent media_resources as an empty list and
-    // absent has_more as terminal. Accept that shape only for an explicitly identified,
-    // zero-count playlist owned by the selected account; never infer an empty library from
-    // an incomplete response for someone else's playlist or a later page.
+    // The PC detail endpoint can omit `has_more`; for track pages, infer the page
+    // boundary only from complete counts and the visible tracks accumulated so far.
+    // Its metadata-only empty shape is accepted only for an identified, zero-count
+    // playlist owned by the selected account on the first page.
     let metadata_only_empty =
         account_playlist_metadata_only_empty(&value, playlist_id, cursor, count, expected_owner_id);
-    let has_complete_page_proof = proof
+    let has_explicit_track_count = proof
         .playlist
         .as_ref()
         .and_then(|playlist| playlist.count_tracks)
-        .is_some()
-        && value
-            .get("has_more")
-            .and_then(serde_json::Value::as_bool)
-            .is_some()
-        && value
-            .get("media_resources")
-            .is_some_and(serde_json::Value::is_array);
+        .is_some();
+    let has_media_resources = value
+        .get("media_resources")
+        .is_some_and(serde_json::Value::is_array);
+    let has_valid_pagination_type = value
+        .get("has_more")
+        .is_none_or(serde_json::Value::is_boolean);
     if (!codes.contains(&Some(0))
         && proof
             .status_info
             .as_ref()
             .and_then(|info| info.now)
             .is_none_or(|now| now == 0))
-        || (!has_complete_page_proof && !metadata_only_empty)
+        || (!has_valid_pagination_type
+            || (!(has_explicit_track_count && has_media_resources) && !metadata_only_empty))
     {
         #[cfg(debug_assertions)]
         eprintln!(
@@ -219,7 +228,29 @@ fn parse_account_playlist_page(
             "Soda account playlist omitted verifiable metadata or pagination",
         ));
     }
-    let page = parse_playlist_response(body, playlist_id, cursor, count)?;
+    let mut page = parse_playlist_response(body, playlist_id, cursor, count)?;
+    if value.get("has_more").is_none() && !metadata_only_empty {
+        // The official PC account endpoint can omit `has_more` on an otherwise
+        // complete track page. Infer the boundary only from the selected account's
+        // declared total and the exact number of tracks already read across pages.
+        // If tracks remain, the ordinary parser still requires an advancing cursor.
+        let visible_after = visible_before
+            .checked_add(page.tracks.len())
+            .and_then(|visible| u64::try_from(visible).ok())
+            .ok_or_else(|| soda_upstream_error("Soda account playlist count overflowed"))?;
+        if visible_after > page.total {
+            return Err(soda_upstream_error(
+                "Soda account playlist page exceeded its declared visible track total",
+            ));
+        }
+        if visible_after < page.total {
+            let mut continued = value.clone();
+            continued["has_more"] = serde_json::Value::Bool(true);
+            let continued = serde_json::to_vec(&continued)
+                .map_err(|_| soda_upstream_error("Soda account playlist could not be verified"))?;
+            page = parse_playlist_response(&continued, playlist_id, cursor, count)?;
+        }
+    }
     if let Some(count_tracks) = proof
         .playlist
         .as_ref()
@@ -401,6 +432,7 @@ mod tests {
             "7200303561195061287",
             0,
             UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+            0,
             "2186250840705864",
         )
     }
@@ -458,10 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn account_playlist_requires_explicit_counts_pagination_and_success_evidence() {
+    fn account_playlist_requires_counts_valid_pagination_types_and_success_evidence() {
         for pointer in [
             "/playlist/count_tracks",
-            "/has_more",
             "/media_resources",
             "/status_info/now",
         ] {
@@ -469,6 +500,9 @@ mod tests {
             *value.pointer_mut(pointer).unwrap() = serde_json::Value::Null;
             assert!(parse(&value).is_err(), "{pointer}");
         }
+        let mut malformed_pagination = crate::client::test_account_playlist_fixture();
+        malformed_pagination["has_more"] = json!(null);
+        assert!(parse(&malformed_pagination).is_err());
         for pointer in ["/playlist/id", "/media_resources/0/id"] {
             let mut value = crate::client::test_account_playlist_fixture();
             *value.pointer_mut(pointer).unwrap() = json!("123");
@@ -485,6 +519,52 @@ mod tests {
         assert!(
             parse(&value).unwrap().has_more,
             "filtered empty pages may continue"
+        );
+    }
+
+    #[test]
+    fn account_playlist_infers_missing_pagination_only_from_cross_page_visible_count() {
+        let mut final_page = crate::client::test_account_playlist_fixture();
+        final_page.as_object_mut().unwrap().remove("has_more");
+        let page = parse(&final_page).expect("declared one-page playlist is complete");
+        assert_eq!(page.tracks.len(), 2);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+
+        let mut first_page = final_page.clone();
+        first_page["playlist"]["count_tracks"] = json!(3);
+        first_page["playlist"]["resource_cnt"]["track_cnt"] = json!(3);
+        let page = parse(&first_page).expect("remaining tracks require the next cursor");
+        assert!(page.has_more);
+        assert_eq!(page.next_cursor, Some(2));
+
+        let mut second_page = first_page;
+        second_page["media_resources"] = json!([second_page["media_resources"][0].clone()]);
+        let page = parse_account_playlist_page(
+            &serde_json::to_vec(&second_page).unwrap(),
+            "7200303561195061287",
+            2,
+            UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+            2,
+            "2186250840705864",
+        )
+        .expect("the cross-page total confirms the terminal page");
+        assert_eq!(page.tracks.len(), 1);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+
+        let mut incomplete = second_page;
+        incomplete["media_resources"] = json!([]);
+        assert!(
+            parse_account_playlist_page(
+                &serde_json::to_vec(&incomplete).unwrap(),
+                "7200303561195061287",
+                2,
+                UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+                2,
+                "2186250840705864",
+            )
+            .is_err()
         );
     }
 
@@ -564,6 +644,7 @@ mod tests {
                     "7200303561195061287",
                     cursor,
                     UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE,
+                    0,
                     "2186250840705864",
                 )
                 .is_err()
@@ -576,6 +657,7 @@ mod tests {
                 "7200303561195061287",
                 0,
                 UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE + 1,
+                0,
                 "2186250840705864",
             )
             .is_err()

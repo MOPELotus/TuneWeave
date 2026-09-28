@@ -191,16 +191,73 @@ impl SodaProvider {
                 .await?;
             self.ensure_account_snapshot_current(account, &source)?;
             let after_ids = after.track_ids();
-            if after_ids != expected_ids
-                || !is_selected_account_playlist(&after.playlist, &source_user_id)
-                || after
-                    .playlist
-                    .extensions
-                    .get("playlist_type")
-                    .and_then(serde_json::Value::as_i64)
-                    != Some(SODA_ORDINARY_PLAYLIST_TYPE)
-                || !playlist_metadata_preserved(&before.playlist, &after.playlist)
+            let ids_match = after_ids == expected_ids;
+            let owner_matches = is_selected_account_playlist(&after.playlist, &source_user_id);
+            let type_matches = after
+                .playlist
+                .extensions
+                .get("playlist_type")
+                .and_then(serde_json::Value::as_i64)
+                == Some(SODA_ORDINARY_PLAYLIST_TYPE);
+            let name_preserved = before.playlist.name == after.playlist.name;
+            let description_preserved = before.playlist.description == after.playlist.description;
+            let cover_preserved = before.playlist.cover_url == after.playlist.cover_url;
+            let creator_preserved = before.playlist.creator == after.playlist.creator;
+            let owner_id_preserved = before.playlist.extensions.get("owner_id")
+                == after.playlist.extensions.get("owner_id");
+            let playlist_type_preserved = before.playlist.extensions.get("playlist_type")
+                == after.playlist.extensions.get("playlist_type");
+            let sort_type_preserved = before.playlist.extensions.get("current_sort_type")
+                == after.playlist.extensions.get("current_sort_type");
+            let metadata_preserved = name_preserved
+                && description_preserved
+                && creator_preserved
+                && owner_id_preserved
+                && playlist_type_preserved
+                && sort_type_preserved;
+            let cover_matches_new_primary_track = after
+                .playlist
+                .cover_url
+                .as_deref()
+                .is_some_and(|cover| after.first_track_cover_url() == Some(cover));
+            let cover_was_derived_from_old_primary_track = before
+                .playlist
+                .cover_url
+                .as_deref()
+                .is_some_and(|cover| before.first_track_cover_url() == Some(cover));
+            let cover_transition_confirmed = track_derived_cover_transition_matches(
+                before.playlist.cover_url.as_deref(),
+                after.playlist.cover_url.as_deref(),
+                before.first_track_cover_url(),
+                after.first_track_cover_url(),
+                before_ids.is_empty(),
+                after_ids.is_empty(),
+            );
+            if !ids_match
+                || !owner_matches
+                || !type_matches
+                || !metadata_preserved
+                || !cover_transition_confirmed
             {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DIAGNOSTIC soda_playlist_track_readback ids_match={} expected_count={} actual_count={} owner_matches={} type_matches={} name_preserved={} description_preserved={} cover_preserved={} cover_matches_new_primary_track={} cover_was_derived_from_old_primary_track={} cover_transition_confirmed={} creator_preserved={} owner_id_preserved={} playlist_type_preserved={} sort_type_preserved={}",
+                    ids_match,
+                    expected_ids.len(),
+                    after_ids.len(),
+                    owner_matches,
+                    type_matches,
+                    name_preserved,
+                    description_preserved,
+                    cover_preserved,
+                    cover_matches_new_primary_track,
+                    cover_was_derived_from_old_primary_track,
+                    cover_transition_confirmed,
+                    creator_preserved,
+                    owner_id_preserved,
+                    playlist_type_preserved,
+                    sort_type_preserved,
+                );
                 return Err(soda_upstream_error(
                     "Soda complete playlist readback did not confirm the requested track mutation and preserve other entries",
                 ));
@@ -251,6 +308,10 @@ impl SodaProvider {
                     ),
                     ("source_user_id".to_owned(), json!(source_user_id)),
                     ("existing_track_order_preserved".to_owned(), json!(true)),
+                    (
+                        "playlist_cover_changed".to_owned(),
+                        json!(before.playlist.cover_url != after.playlist.cover_url),
+                    ),
                     ("write_requests_dispatched".to_owned(), json!(1)),
                     ("atomic".to_owned(), json!(false)),
                 ]),
@@ -446,7 +507,16 @@ impl SodaProvider {
                 )
                 .await?;
             self.ensure_account_snapshot_current(account, &source)?;
-            if after.track_ids() != desired_ids
+            let after_ids = after.track_ids();
+            let cover_transition_confirmed = track_derived_cover_transition_matches(
+                before.playlist.cover_url.as_deref(),
+                after.playlist.cover_url.as_deref(),
+                before.first_track_cover_url(),
+                after.first_track_cover_url(),
+                before_ids.is_empty(),
+                after_ids.is_empty(),
+            );
+            if after_ids != desired_ids
                 || !is_selected_account_playlist(&after.playlist, &source_user_id)
                 || after
                     .playlist
@@ -454,7 +524,8 @@ impl SodaProvider {
                     .get("playlist_type")
                     .and_then(serde_json::Value::as_i64)
                     != Some(SODA_ORDINARY_PLAYLIST_TYPE)
-                || !playlist_metadata_preserved(&before.playlist, &after.playlist)
+                || !playlist_non_cover_metadata_preserved(&before.playlist, &after.playlist)
+                || !cover_transition_confirmed
                 || after.source_user_id() != source_user_id.as_str()
             {
                 return Err(soda_upstream_error(
@@ -493,6 +564,10 @@ impl SodaProvider {
                         json!("sort_ack_and_complete_playlist_and_created_library_readback"),
                     ),
                     ("source_user_id".to_owned(), json!(source_user_id)),
+                    (
+                        "playlist_cover_changed".to_owned(),
+                        json!(before.playlist.cover_url != after.playlist.cover_url),
+                    ),
                     ("write_requests_dispatched".to_owned(), json!(1)),
                     ("atomic".to_owned(), json!(false)),
                 ]),
@@ -1217,15 +1292,32 @@ fn created_playlist_ids(playlists: &[Playlist]) -> BTreeSet<String> {
         .collect()
 }
 
-fn playlist_metadata_preserved(before: &Playlist, after: &Playlist) -> bool {
+fn playlist_non_cover_metadata_preserved(before: &Playlist, after: &Playlist) -> bool {
     before.id == after.id
         && before.name == after.name
         && before.description == after.description
-        && before.cover_url == after.cover_url
         && before.creator == after.creator
         && before.extensions.get("owner_id") == after.extensions.get("owner_id")
         && before.extensions.get("playlist_type") == after.extensions.get("playlist_type")
         && before.extensions.get("current_sort_type") == after.extensions.get("current_sort_type")
+}
+
+fn track_derived_cover_transition_matches(
+    before_cover: Option<&str>,
+    after_cover: Option<&str>,
+    before_primary_track_cover: Option<&str>,
+    after_primary_track_cover: Option<&str>,
+    before_is_empty: bool,
+    after_is_empty: bool,
+) -> bool {
+    let prior_cover_was_default_or_track_derived = before_is_empty
+        || before_cover.is_none()
+        || before_cover.is_some_and(|cover| before_primary_track_cover == Some(cover));
+    before_cover == after_cover
+        || (prior_cover_was_default_or_track_derived
+            && after_cover.is_some_and(|cover| after_primary_track_cover == Some(cover)))
+        || (after_is_empty
+            && before_cover.is_some_and(|cover| before_primary_track_cover == Some(cover)))
 }
 
 fn same_track_multiset(left: &[String], right: &[String]) -> bool {
@@ -1240,4 +1332,53 @@ fn same_track_multiset(left: &[String], right: &[String]) -> bool {
         *counts.entry(id.clone()).or_default() -= 1;
     }
     counts.values().all(|count| *count == 0)
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::track_derived_cover_transition_matches;
+
+    #[test]
+    fn track_mutations_accept_only_confirmed_track_derived_cover_changes() {
+        assert!(track_derived_cover_transition_matches(
+            Some("unchanged"),
+            Some("unchanged"),
+            None,
+            None,
+            false,
+            false,
+        ));
+        assert!(track_derived_cover_transition_matches(
+            Some("empty-default"),
+            Some("first-track-cover"),
+            None,
+            Some("first-track-cover"),
+            true,
+            false,
+        ));
+        assert!(track_derived_cover_transition_matches(
+            Some("old-track-cover"),
+            Some("new-first-track-cover"),
+            Some("old-track-cover"),
+            Some("new-first-track-cover"),
+            false,
+            false,
+        ));
+        assert!(track_derived_cover_transition_matches(
+            Some("old-track-cover"),
+            Some("empty-default"),
+            Some("old-track-cover"),
+            None,
+            false,
+            true,
+        ));
+        assert!(!track_derived_cover_transition_matches(
+            Some("custom-cover"),
+            Some("first-track-cover"),
+            Some("old-track-cover"),
+            Some("first-track-cover"),
+            false,
+            false,
+        ));
+    }
 }
