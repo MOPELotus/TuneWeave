@@ -354,7 +354,7 @@ Rust 调用方在 `begin_auth_challenge` 后使用 `auth_challenge_status(&recei
 
 ### 咪咕账户歌单内容与喜欢列表
 
-普通 `GET /v1/playlists/migu:{id}` 与 `/tracks` 现支持服务器 `account` 或调用方凭据；未指定账户来源时仍使用公开链。喜欢集合可通过 `/v1/account/favorites/playlist?platform=migu`、`/tracks?platform=migu` 读取，也支持 `/v1/users/migu:{uid}/favorites/playlist` 和 `/tracks`。用户入口只允许选中账户本人。喜欢集合采用平台个人导航给出的实际歌单 ID，并核验所有者，不从自建歌单的同名标题推断。若所选账户的“喜欢的音乐”导航项缺少 `actionUrl` 或其值仅含空白字符，喜欢列表读取及依赖该身份的喜欢写入会返回 `capability_not_supported`；不会从自建歌单或标题猜测 ID。该限制针对当前账户返回的数据，不影响普通自建歌单操作。
+普通 `GET /v1/playlists/migu:{id}` 与 `/tracks` 现支持服务器 `account` 或调用方凭据；未指定账户来源时仍使用公开链。喜欢集合可通过 `/v1/account/favorites/playlist?platform=migu`、`/tracks?platform=migu` 读取，也支持 `/v1/users/migu:{uid}/favorites/playlist` 和 `/tracks`。用户入口只允许选中账户本人。喜欢集合采用平台个人导航给出的实际歌单 ID，并核验所有者，不从自建歌单的同名标题推断。若所选账户的“喜欢的音乐”导航项缺少 `actionUrl` 或其值仅含空白字符，喜欢列表读取会返回 `capability_not_supported`；不会从自建歌单或标题猜测 ID。该限制针对当前账户返回的数据，不影响普通自建歌单操作。
 
 账户详情和曲目入口均完整读取所选歌单再返回详情或应用 `limit`（1–100）与 `offset`。每个物理页请求 50 条，最多 200 页、10,000 首。明确曲目总数、页间发布时间和所有者必须一致，读取前后再次核对歌单详情；喜欢集合还会再次核对导航 ID。缺少完整性字段、提前空页／短页、整页重复或元数据变化会返回错误，不返回截断结果。普通重复歌曲保留原位置；无法区分异常重放的整页重复会明确拒绝。收藏歌单可属于其他作者，喜欢集合必须属于当前用户。
 
@@ -362,7 +362,7 @@ Rust 调用方在 `begin_auth_challenge` 后使用 `auth_challenge_status(&recei
 
 每个上游业务请求后均核验同一账户 UID，再接受其凭据轮换。六个普通／喜欢读取入口在成功或后续普通错误时返回已核验的新凭据，并遵循 `no-store`；认证失效、重登或注销竞争抑制旧凭据。真实普通／付费账户及私有可见性仍待最终验收。
 
-咪咕喜欢歌曲写入使用 `PUT /v1/account/favorites/tracks/migu:{contentId}`，取消喜欢使用同一路径的 `DELETE`；通过 `account` 选择服务器账户，或提供调用方凭据。每次调用只发送一次写入，随后完整读取实际喜欢歌单，并核对平台返回的单曲喜欢状态。集合身份变化、读取不完整、状态缺失或两处结果不一致均不能确认成功；列表中缺少歌曲本身不能证明已经取消喜欢。
+咪咕喜欢歌曲写入使用 `PUT /v1/account/favorites/tracks/migu:{contentId}`，取消喜欢使用同一路径的 `DELETE`；通过 `account` 选择服务器账户，或提供调用方凭据。若平台提供稳定的喜欢歌单 ID，写入后完整读取歌单并核对单曲状态；若平台未提供该 ID，则先读取所选账户的单曲喜欢状态，状态已经符合请求时不发送写入，否则只写一次并再次读取该状态。后一种结果不声称喜欢列表可枚举，扩展字段 `verified_by` 标明确认方式，`write_performed` 标明是否实际发送了写入。不会从自建歌单或标题猜测 ID。
 
 写入可能已经发生、但结果未能确认时，错误携带 `details.write_outcome: "unconfirmed"` 和 `retryable: false`，不要自动重发。整个操作沿用同一次登录，写后读取不能切换账户；已核验的凭据更新仍可随成功或普通失败返回，认证失效或代际冲突时抑制更新。操作响应遵循 `no-store`。真实账户写后状态仍须最终验收；歌单增删改、歌单收藏和其他音乐库写入不由此接口代替。
 

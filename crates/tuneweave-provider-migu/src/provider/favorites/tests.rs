@@ -91,6 +91,29 @@ fn frames(subscribed: bool, ids: &[u32]) -> Vec<serde_json::Value> {
         json!({"code":"000000","isInfavors":[{"contentId":"1","isInfavor":if subscribed {"1"} else {"0"}}]}), profile()]);
     result
 }
+fn favorite_state(id: &str, subscribed: bool) -> serde_json::Value {
+    json!({"code":"000000","isInfavors":[{"contentId":id,"isInfavor":if subscribed {"1"} else {"0"}}]})
+}
+fn missing_favorite_id_frames(before: bool, after: Option<bool>) -> Vec<serde_json::Value> {
+    let mut home = home("77");
+    home["userPrivateItems"][1]["actionUrl"] = json!("");
+    let mut values = vec![
+        profile(),
+        data(home),
+        profile(),
+        favorite_state("1", before),
+        profile(),
+    ];
+    if let Some(after) = after {
+        values.extend([
+            json!({"code":"000000"}),
+            profile(),
+            favorite_state("1", after),
+            profile(),
+        ]);
+    }
+    values
+}
 fn wire(values: &[serde_json::Value]) -> Vec<String> {
     values.iter().enumerate().map(|(i,v)| {
         let body=v.to_string();
@@ -235,6 +258,85 @@ async fn favorite_writes_use_one_mutation_full_collection_and_explicit_state_for
             }
         }
     }
+}
+
+#[tokio::test]
+async fn favorite_write_without_home_playlist_id_uses_explicit_track_state_and_never_guesses() {
+    for subscribed in [false, true] {
+        let before = !subscribed;
+        let values = missing_favorite_id_frames(before, Some(subscribed));
+        let count = values.len();
+        let (mut p, requests) = server(wire(&values)).await;
+        let (store, a, b) = setup(&mut p);
+        let result = p
+            .set_track_subscription("1", subscribed, Some("A"))
+            .await
+            .unwrap();
+        assert_eq!(result.subscribed, subscribed);
+        assert_eq!(
+            result.extensions["verified_by"],
+            "explicit_single_track_state"
+        );
+        assert_eq!(result.extensions["write_performed"], true);
+        assert!(!result.extensions.contains_key("favorite_playlist_ref"));
+        assert_eq!(read(&store, "A").token(), format!("p{}", count - 1));
+        assert_eq!(read(&store, "B"), b);
+        assert_ne!(read(&store, "A"), a);
+
+        let requests = requests.await.unwrap();
+        assert_eq!(requests.len(), 9);
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("POST ")).count(),
+            1
+        );
+        assert!(requests[1].contains("/pc/user/home-page/v2.0 "));
+        assert!(
+            requests[3].starts_with("GET /pc/v1.0/content/inMusicLists.do?type=1&contentId=1 ")
+        );
+        assert!(
+            requests[7].starts_with("GET /pc/v1.0/content/inMusicLists.do?type=1&contentId=1 ")
+        );
+        assert!(!requests.iter().any(|r| r.contains("playlistId=77")));
+        let write = requests.iter().find(|r| r.starts_with("POST ")).unwrap();
+        let (headers, body) = write.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body,
+            if subscribed {
+                json!({"contentIds":["1"]})
+            } else {
+                json!({"channel":"23","contentId":"1","songflag":"2"})
+            }
+        );
+        assert!(headers.starts_with(if subscribed {
+            "POST /pc/user/api/add-music-list-song/v1.0 "
+        } else {
+            "POST /pc/user/h5-import-musiclist/v1.0 "
+        }));
+    }
+}
+
+#[tokio::test]
+async fn favorite_write_without_home_playlist_id_does_not_mutate_an_already_matching_track() {
+    let values = missing_favorite_id_frames(false, None);
+    let (mut p, requests) = server(wire(&values)).await;
+    let (store, account, _) = setup(&mut p);
+    let result = p
+        .set_track_subscription("1", false, Some("A"))
+        .await
+        .unwrap();
+    assert!(!result.subscribed);
+    assert_eq!(
+        result.extensions["verified_by"],
+        "explicit_single_track_state"
+    );
+    assert_eq!(result.extensions["write_performed"], false);
+    assert!(!result.extensions.contains_key("favorite_playlist_ref"));
+    assert_eq!(read(&store, "A").token(), "p4");
+    assert_ne!(read(&store, "A"), account);
+    let requests = requests.await.unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(!requests.iter().any(|r| r.starts_with("POST ")));
 }
 
 #[tokio::test]
