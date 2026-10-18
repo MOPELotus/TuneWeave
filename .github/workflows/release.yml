@@ -140,6 +140,11 @@ jobs:
           fi
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
+      - name: Verify release compatibility contract
+        run: |
+          python3 scripts/release_manifest.py --check
+          python3 -m unittest discover -s scripts -p 'test_release_manifest.py'
+
       - name: Validate and stage release manifest
         shell: bash
         env:
@@ -161,7 +166,8 @@ jobs:
             test -f "dist/${asset}"
             test -f "dist/${checksum}"
           done < <(jq -r '.artifacts[] | [.file, .verification.checksum_file] | @tsv' release-manifest.json)
-          cp release-manifest.json dist/release-manifest.json
+          python3 scripts/release_manifest.py --output dist/release-manifest.json
+          python3 scripts/release_manifest.py --manifest dist/release-manifest.json --check
 
       - name: Create or update release
         shell: bash

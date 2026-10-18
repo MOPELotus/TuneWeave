@@ -1,5 +1,7 @@
 # 安装与配置
 
+发行清单的 `compatibility_profiles` 是面向客户端的向后兼容声明，不能仅凭服务版本较新或 `api_version` 相同就自动更新。历史清单可能没有该字段，完整规则见 [客户端兼容性声明](api-v1.md#客户端兼容性声明)。
+
 ## 运行预编译包
 
 从 GitHub Release 下载与系统匹配的单文件可执行程序：Windows 文件名为 `tuneweave-<version>-windows-<architecture>.exe`，Linux 和 macOS 文件名分别为 `tuneweave-<version>-linux-<architecture>` 和 `tuneweave-<version>-macos-<architecture>`，均无需解压。每个发布文件都有同名 `.sha256` 校验文件，下载程序也可以从仓库根目录的 [`release-manifest.json`](../release-manifest.json) 获取版本、文件名、下载地址和校验地址。

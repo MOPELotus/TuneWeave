@@ -79,5 +79,8 @@
         "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v1.0.0-beta.1/tuneweave-v1.0.0-beta.1-macos-aarch64.sha256"
       }
     }
+  ],
+  "compatibility_profiles": [
+    "tuneweave-http-v1"
   ]
 }

@@ -16,6 +16,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-manifest:
+    name: Release compatibility contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Verify generated compatibility declaration
+        run: python3 scripts/release_manifest.py --check
+      - name: Test manifest boundaries and staging
+        run: python3 -m unittest discover -s scripts -p 'test_release_manifest.py'
+
   watchman:
     name: Watchman adapter (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
