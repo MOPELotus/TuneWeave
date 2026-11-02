@@ -33,6 +33,9 @@ future ports can be audited precisely.
 
 - Source: https://github.com/L-1124/QQMusicApi
 - Reviewed commit: `873255f2774361ac97366bd89a14b8ed9d230aae`
+- Additional reviewed commit: `27861e51432ea6b6e88dc35c4e8c8e239c0339e8`
+  (Android profile/QIMEI/GetSession, artist filters, and read-only sound-power
+  endpoint facts; independently validated against official services).
 - License: GNU General Public License v3.0 or later
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.
@@ -72,6 +75,8 @@ independent implementation of observed request and response behavior.
 
 - Source: https://github.com/guohuiyuan/music-lib
 - Reviewed commit: `b299302e3163765d3efcc9df592700b41867c3d8`
+- Additional reviewed commit: `6353508e84cd357b5bc3acf32d95a16e01bbe20c`
+  (Soda chart identifiers and discovery sub-channel protocol facts).
 - License: GNU Affero General Public License v3.0
 - Used for: Kuwo lyric, album, playlist, and field-model research, plus Soda
   Music share, `track_v2`, lyric, catalog, entitlement, and session research.

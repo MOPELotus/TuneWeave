@@ -2320,7 +2320,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuneweave-core"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-bilibili"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-kugou"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-kuwo"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-migu"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-netease"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-qq"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-provider-soda"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "aes",
  "async-trait",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "tuneweave-server"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "async-trait",
  "axum",
