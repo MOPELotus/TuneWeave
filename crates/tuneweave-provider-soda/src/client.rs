@@ -38,6 +38,7 @@ mod artist;
 pub(crate) mod artist_catalog;
 mod artist_collection;
 mod playlist_sort;
+pub(crate) mod recent_history;
 pub(crate) use account_media::SodaAccountTrack;
 pub(crate) use account_playlist::SodaAccountPlaylistPage;
 pub(crate) use artist_catalog::SodaArtistCatalogue;

@@ -17434,6 +17434,7 @@ fn recent_history_access(
     state: &AppState,
     headers: &HeaderMap,
     params: RecentPodcastEpisodeHistoryQuery,
+    allow_offset: bool,
 ) -> Result<(Platform, ProviderAccess, PageRequest), ApiError> {
     let platform = account_platform(state, params.platform.as_deref())?;
     let limit = parse_u32_parameter("limit", params.limit.as_deref(), 100)?;
@@ -17444,7 +17445,7 @@ fn recent_history_access(
         .into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
-    if offset != 0 {
+    if offset != 0 && !(allow_offset && platform == Platform::Soda) {
         return Err(
             TuneWeaveError::invalid_request("recent history does not support offset").into(),
         );
@@ -17469,12 +17470,17 @@ async fn account_recent_track_history(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<RecentTrackHistoryEntry>>>, ApiError> {
     let (platform, access, request) =
-        recent_history_access(&state, &headers, query_params(params)?)?;
-    let page = access.provider.recent_track_history(&request).await?;
+        recent_history_access(&state, &headers, query_params(params)?, true)?;
+    let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
+    let result = access.provider.recent_track_history(&request).await;
+    let (page, update) = finish_account_operation(
+        access.provider.as_ref(), platform, credentials.credentials.contains_key(&platform), result,
+    )?;
     Ok(Json(
         access
             .response(page.items, platform)
-            .with_pagination(page.pagination),
+            .with_pagination(page.pagination)
+            .with_caller_credential(update),
     ))
 }
 
@@ -17484,7 +17490,7 @@ async fn account_recent_album_history(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<RecentAlbumHistoryEntry>>>, ApiError> {
     let (platform, access, request) =
-        recent_history_access(&state, &headers, query_params(params)?)?;
+        recent_history_access(&state, &headers, query_params(params)?, false)?;
     let page = access.provider.recent_album_history(&request).await?;
     Ok(Json(
         access
@@ -17499,7 +17505,7 @@ async fn account_recent_playlist_history(
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<RecentPlaylistHistoryEntry>>>, ApiError> {
     let (platform, access, request) =
-        recent_history_access(&state, &headers, query_params(params)?)?;
+        recent_history_access(&state, &headers, query_params(params)?, false)?;
     let page = access.provider.recent_playlist_history(&request).await?;
     Ok(Json(
         access

@@ -50,6 +50,7 @@ mod library_operations;
 mod membership;
 mod playlist_write;
 mod purchased_album_source;
+mod recent_history;
 mod session_revocation;
 
 const MAX_UPSTREAM_PAGES_PER_SEARCH: u32 = 6;
@@ -719,6 +720,7 @@ impl MusicProvider for SodaProvider {
             Capability::ChartCatalog,
             Capability::ChartTracks,
             Capability::PlaylistCatalog,
+            Capability::RecentTrackHistory,
             Capability::Lyrics,
             Capability::TrackAvailability,
         ])
@@ -743,6 +745,13 @@ impl MusicProvider for SodaProvider {
         request: &tuneweave_core::PlaylistCatalogTaxonomyRequest,
     ) -> Result<tuneweave_core::PlaylistCatalogTaxonomy> {
         self.discovery_taxonomy(request)
+    }
+
+    async fn recent_track_history(
+        &self,
+        request: &PageRequest,
+    ) -> Result<Page<tuneweave_core::RecentTrackHistoryEntry>> {
+        self.read_recent_history(request).await
     }
 
     async fn chart_tracks(
@@ -2191,6 +2200,7 @@ mod tests {
     mod playlist_track_order;
     mod playlist_visibility;
     mod purchased_album_source;
+    mod recent_history;
     mod secondary_encryption;
     mod session_revocation;
     mod suggestions;
@@ -3496,6 +3506,7 @@ mod tests {
                 Capability::ChartCatalog,
                 Capability::ChartTracks,
                 Capability::PlaylistCatalog,
+                Capability::RecentTrackHistory,
                 Capability::Lyrics,
                 Capability::TrackAvailability,
             ])
