@@ -77,10 +77,15 @@ fn query(raw: &str, path: &str, kind: KugouLoginClient) -> BTreeMap<String, Stri
     assert_eq!(query["uuid"], "-");
     assert_eq!(raw.split_once("\r\n\r\n").unwrap().1, "");
     let head = raw.split_once("\r\n").unwrap().1.to_ascii_lowercase();
+    let router = if path == "/tracker/v5/url" {
+        "gateway.kugou.com"
+    } else {
+        "trackercdngz.kugou.com"
+    };
+    assert!(head.contains(&format!("x-router: {router}\r\n")));
     for forbidden in [
         "cookie:",
         "authorization:",
-        "x-router:",
         "x-forwarded-for:",
         "x-real-ip:",
     ] {

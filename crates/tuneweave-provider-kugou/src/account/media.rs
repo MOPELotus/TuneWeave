@@ -374,7 +374,7 @@ impl KugouClient {
             KugouLoginClient::Web => return Err(malformed()),
         };
         query.insert("signature", signature);
-        let target = format!("https://{host}{path}");
+        let target = format!("https://{HOST}{path}");
         #[cfg(test)]
         let target = self
             .login_test_origin
@@ -388,6 +388,7 @@ impl KugouClient {
                 .http
                 .get(target)
                 .header("accept", "application/json")
+                .header("x-router", host)
                 .header(
                     "user-agent",
                     "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi",

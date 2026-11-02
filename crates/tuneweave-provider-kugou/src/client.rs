@@ -56,7 +56,7 @@ mod web_media;
 
 const SEARCH_ENDPOINT: &str = "https://songsearch.kugou.com/song_search_v2";
 const ANDROID_GATEWAY: &str = "https://gateway.kugou.com";
-const DEVICE_REGISTRATION_ENDPOINT: &str = "https://userservice.kugou.com/risk/v2/r_register_dev";
+const DEVICE_REGISTRATION_ENDPOINT: &str = "https://userservice.kugou.com/risk/v3/r_register_dev";
 const LYRIC_SEARCH_ENDPOINT: &str = "https://lyrics.kugou.com/v1/search";
 const LYRIC_DOWNLOAD_ENDPOINT: &str = "https://lyrics.kugou.com/download";
 const TRACKER_ENDPOINT: &str = "https://gateway.kugou.com/v5/url";
@@ -1303,7 +1303,7 @@ impl KugouClient {
         self.log_upstream_request(
             "device_registration",
             "userservice.kugou.com",
-            "/risk/v2/r_register_dev",
+            "/risk/v3/r_register_dev",
             http_status,
             started,
             retry_count,
