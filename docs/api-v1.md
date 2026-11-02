@@ -875,3 +875,9 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 `GET /v1/search?platform=netease&q=晴天&type=track&variant=modern` 读取新版单曲搜索；`type=lyric` 使用新的歌词搜索，结果仍为歌曲，并在扩展字段保留命中的歌词片段。仅这两种搜索类型支持 `modern`，旧默认、`legacy` 和 `cloud` 不变。`offset` 和 `limit` 支持分页；歌词端点的原始 `more` 不是页尾标志，统一分页根据其已验证的 `totalCount` 计算。
 
 `/v1/search/suggestions?platform=netease&client=mobile&q=周杰伦` 使用新版移动端联想，保留建议、推荐和原始卡片扩展。移动端音乐 Banner 使用官方 v3 入口；PC Banner 保留原入口。
+
+## 网易云每日风格推荐
+
+`GET /v1/recommendations/styles?platform=netease` 读取平台当前风格分类和标签；`GET /v1/recommendations/styles/selection?platform=netease&account=personal` 读取当前选择。`GET /v1/recommendations/styles/tracks` 读取风格歌曲，`GET /v1/extensions/netease/recommendations/daily-v1` 读取新版日推；这两个歌曲入口支持 `account`、`offset` 和 `limit=1..100`，先验证完整歌曲窗口再分页，保留重复歌曲。上述目录、选择和歌曲请求均需要登录，调用方凭证沿用统一请求头。
+
+更新风格使用 `PUT /v1/recommendations/styles/selection`，JSON 为 `{"platform":"netease","account":"personal","category_id":1,"tag_ids":[2]}`；ID 必须来自当前目录，选择 1–64 个不同标签且属于同一分类。请求先读取并验证目录，写入后读取所选标签确认，只有与请求一致才返回成功。操作总限时 45 秒，账户更换会拒绝迟到结果；写入发出后超时或回读失败会返回 `write_outcome=unconfirmed`，不自动重发。上述响应均为 `no-store`。

@@ -2213,6 +2213,23 @@ impl PlaybackHistoryRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationStyleTag {
+    pub id: u64,
+    pub name: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationStyleCategory {
+    pub id: u64,
+    pub name: String,
+    pub tags: Vec<RecommendationStyleTag>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationStyleSelection {
+    pub category_id: u64,
+    pub tag_ids: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecommendationRequest {
     pub limit: u32,
     pub offset: u32,

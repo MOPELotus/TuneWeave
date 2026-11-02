@@ -6,6 +6,7 @@ mod cloud_transfers;
 mod playlist_catalog;
 mod playlist_submissions;
 mod purchases;
+mod recommendation_styles;
 use album_collections::{
     account_digital_albums, digital_album_subscribe, digital_album_unsubscribe,
     digital_albums_subscribe, digital_albums_unsubscribe, user_favorite_digital_albums,
@@ -1520,6 +1521,22 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/extensions/qq/api", post(qq_extension_api))
         .route("/extensions/qq/batch", post(qq_extension_batch))
+        .route(
+            "/recommendations/styles",
+            get(recommendation_styles::catalog),
+        )
+        .route(
+            "/recommendations/styles/selection",
+            get(recommendation_styles::selection).put(recommendation_styles::update),
+        )
+        .route(
+            "/recommendations/styles/tracks",
+            get(recommendation_styles::tracks),
+        )
+        .route(
+            "/extensions/netease/recommendations/daily-v1",
+            get(recommendation_styles::daily),
+        )
         .route("/extensions/netease/api", post(netease_extension_api))
         .route(
             "/extensions/netease/batch",

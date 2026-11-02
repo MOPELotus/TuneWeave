@@ -181,6 +181,8 @@ pub enum Capability {
     RecentPodcastEpisodeHistory,
     RecommendationFeed,
     Recommendations,
+    RecommendationStyles,
+    RecommendationStyleWrite,
     VideoRecommendations,
     PodcastEpisodeRecommendations,
     PersonalFm,

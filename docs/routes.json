@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 298,
+  "route_count": 303,
   "routes": [
     {
       "method": "GET",
@@ -572,6 +572,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/extensions/netease/recommendations/daily-v1"
+    },
+    {
+      "method": "GET",
       "path": "/v1/extensions/netease/register/anonimous"
     },
     {
@@ -793,6 +797,22 @@
     {
       "method": "GET",
       "path": "/v1/recommendations/podcast-episodes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/styles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/styles/selection"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/recommendations/styles/selection"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/recommendations/styles/tracks"
     },
     {
       "method": "GET",

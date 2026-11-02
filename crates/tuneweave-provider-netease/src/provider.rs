@@ -3,6 +3,8 @@ mod cloud_transfer;
 mod new_search;
 #[path = "recent_history.rs"]
 mod recent_history;
+#[path = "recommendation_styles.rs"]
+mod recommendation_styles;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -806,6 +808,8 @@ impl MusicProvider for NeteaseProvider {
             Capability::RecentPlaylistHistory,
             Capability::RecentPodcastEpisodeHistory,
             Capability::Recommendations,
+            Capability::RecommendationStyles,
+            Capability::RecommendationStyleWrite,
             Capability::VideoRecommendations,
             Capability::PodcastEpisodeRecommendations,
             Capability::PersonalFm,
@@ -3137,6 +3141,32 @@ impl MusicProvider for NeteaseProvider {
         let response = client.request_weapi(path, payload).await?;
         ensure_account_access(&client, &response.body, "recent podcast episode history")?;
         map_recent_podcast_episode_history(response.body, request)
+    }
+
+    async fn recommendation_styles(
+        &self,
+        account: Option<&str>,
+    ) -> Result<Vec<tuneweave_core::RecommendationStyleCategory>> {
+        self.read_recommendation_styles(account).await
+    }
+    async fn recommendation_style_selection(
+        &self,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::RecommendationStyleSelection> {
+        self.read_recommendation_style_selection(account).await
+    }
+    async fn update_recommendation_style(
+        &self,
+        selection: &tuneweave_core::RecommendationStyleSelection,
+        account: Option<&str>,
+    ) -> Result<tuneweave_core::RecommendationStyleSelection> {
+        self.write_recommendation_style(selection, account).await
+    }
+    async fn style_recommended_tracks(&self, request: &PageRequest) -> Result<Page<Track>> {
+        self.read_native_recommendations(request, false).await
+    }
+    async fn daily_recommended_tracks_v1(&self, request: &PageRequest) -> Result<Page<Track>> {
+        self.read_native_recommendations(request, true).await
     }
 
     async fn recommended_tracks(&self, request: &RecommendationRequest) -> Result<Page<Track>> {

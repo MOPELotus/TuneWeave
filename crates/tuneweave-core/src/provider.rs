@@ -1802,6 +1802,47 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn recommendation_styles(
+        &self,
+        _account: Option<&str>,
+    ) -> Result<Vec<crate::RecommendationStyleCategory>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationStyles,
+        ))
+    }
+    async fn recommendation_style_selection(
+        &self,
+        _account: Option<&str>,
+    ) -> Result<crate::RecommendationStyleSelection> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationStyles,
+        ))
+    }
+    async fn update_recommendation_style(
+        &self,
+        _selection: &crate::RecommendationStyleSelection,
+        _account: Option<&str>,
+    ) -> Result<crate::RecommendationStyleSelection> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationStyleWrite,
+        ))
+    }
+    async fn style_recommended_tracks(&self, _request: &PageRequest) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationStyles,
+        ))
+    }
+    async fn daily_recommended_tracks_v1(&self, _request: &PageRequest) -> Result<Page<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::Recommendations,
+        ))
+    }
+
     async fn recommendation_feed(
         &self,
         _request: &RecommendationFeedRequest,
