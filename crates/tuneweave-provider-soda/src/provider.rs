@@ -48,6 +48,7 @@ mod discovery;
 mod favorites;
 mod library_operations;
 mod membership;
+mod music_wall;
 mod playlist_write;
 mod purchased_album_source;
 mod recent_history;
@@ -721,6 +722,7 @@ impl MusicProvider for SodaProvider {
             Capability::ChartTracks,
             Capability::PlaylistCatalog,
             Capability::RecentTrackHistory,
+            Capability::MusicWall,
             Capability::Lyrics,
             Capability::TrackAvailability,
         ])
@@ -752,6 +754,14 @@ impl MusicProvider for SodaProvider {
         request: &PageRequest,
     ) -> Result<Page<tuneweave_core::RecentTrackHistoryEntry>> {
         self.read_recent_history(request).await
+    }
+
+    async fn music_wall(
+        &self,
+        user_id: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.read_music_wall(user_id, account).await
     }
 
     async fn chart_tracks(
@@ -2192,6 +2202,7 @@ mod tests {
     mod library_lifecycle;
     mod lyrics;
     mod membership;
+    mod music_wall;
     mod plaintext_media;
     mod playlist_create;
     mod playlist_delete;
@@ -3507,6 +3518,7 @@ mod tests {
                 Capability::ChartTracks,
                 Capability::PlaylistCatalog,
                 Capability::RecentTrackHistory,
+                Capability::MusicWall,
                 Capability::Lyrics,
                 Capability::TrackAvailability,
             ])

@@ -47,6 +47,7 @@ pub(crate) mod charts;
 pub(crate) mod discovery;
 mod lyrics;
 pub(crate) mod membership;
+mod music_wall;
 pub(crate) mod player_info;
 pub(crate) mod session_revocation;
 mod suggestions;
@@ -3007,7 +3008,7 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> Option<String> {
     (!value.is_empty() && value.len() <= maximum_bytes).then(|| value.to_owned())
 }
 
-fn canonical_positive_decimal(value: &str) -> Option<&str> {
+pub(crate) fn canonical_positive_decimal(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()
         && !value.starts_with('0')

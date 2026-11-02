@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 305,
+  "route_count": 306,
   "routes": [
     {
       "method": "GET",
@@ -629,6 +629,10 @@
     {
       "method": "POST",
       "path": "/v1/extensions/qq/batch"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/soda/music-wall"
     },
     {
       "method": "GET",

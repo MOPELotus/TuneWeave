@@ -4,6 +4,7 @@ mod artist_filters;
 mod chart_periods;
 mod cloud_transfers;
 mod migu_identifiers;
+mod music_wall;
 mod playlist_catalog;
 mod playlist_submissions;
 mod purchases;
@@ -1481,6 +1482,7 @@ pub fn build_router(state: AppState) -> Router {
             get(account_favorite_intelligence),
         )
         .route("/account/history", get(account_history))
+        .route("/extensions/soda/music-wall", get(music_wall::read))
         .route("/account/history/tracks", get(account_recent_track_history))
         .route("/account/history/albums", get(account_recent_album_history))
         .route(
@@ -17474,7 +17476,10 @@ async fn account_recent_track_history(
     let credentials = CallerCredentialSet::from_headers(&headers, &state)?;
     let result = access.provider.recent_track_history(&request).await;
     let (page, update) = finish_account_operation(
-        access.provider.as_ref(), platform, credentials.credentials.contains_key(&platform), result,
+        access.provider.as_ref(),
+        platform,
+        credentials.credentials.contains_key(&platform),
+        result,
     )?;
     Ok(Json(
         access

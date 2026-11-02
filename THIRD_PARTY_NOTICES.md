@@ -81,6 +81,18 @@ source. Its AGPL-3.0 implementation is used only to identify protocol facts
 that are independently validated against official services and reimplemented
 under TuneWeave's architecture.
 
+## sodahub-org/libresoda
+
+- Source: https://github.com/sodahub-org/libresoda
+- Reviewed commit: `719a6f4e993f72e49d8514b2b2a4c1153c5e5719`
+- License: GNU Affero General Public License v3.0
+- Used for: identifying official Soda recent-playback and music-wall endpoint
+  contracts, independently tested against official services.
+
+TuneWeave does not copy, translate, link, bundle, or redistribute libresoda
+source. Its implementation uses independently verified protocol facts and
+TuneWeave's existing account isolation, credential lifecycle, and transport.
+
 ## UnblockNeteaseMusic/server
 
 - Source: https://github.com/UnblockNeteaseMusic/server

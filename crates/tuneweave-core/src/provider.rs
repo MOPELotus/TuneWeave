@@ -1765,6 +1765,18 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    /// Provider-native music wall content. Duration units remain provider-owned.
+    async fn music_wall(
+        &self,
+        _user_id: Option<&str>,
+        _account: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::MusicWall,
+        ))
+    }
+
     async fn recent_album_history(
         &self,
         _request: &PageRequest,
