@@ -5204,30 +5204,14 @@ fn validate_bilibili_media_url(value: &str) -> Result<String> {
     }
     let url = Url::parse(value)
         .map_err(|_| bilibili_upstream_error("Bilibili playback returned an invalid media URL"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| bilibili_upstream_error("Bilibili playback media URL omitted its host"))?;
-    let allowed_host = host == "bilivideo.com"
-        || host.ends_with(".bilivideo.com")
-        || host == "bilivideo.cn"
-        || host.ends_with(".bilivideo.cn")
-        || host.ends_with(".akamaized.net");
-    let mcdn_host = host.ends_with(".mcdn.bilivideo.cn");
-    let allowed_route = match url.port() {
-        None => {
-            url.path().starts_with("/upgcxcode/")
-                || (mcdn_host && url.path().starts_with("/v1/resource/"))
-        }
-        Some(4483) => mcdn_host && url.path().starts_with("/upgcxcode/"),
-        Some(8082) => mcdn_host && url.path().starts_with("/v1/resource/"),
-        Some(_) => false,
-    };
+    // These URLs come from the fixed official playback endpoint. CDN hosts,
+    // ports and paths are platform-controlled and change independently of us.
+    // We return them to clients; this function does not fetch their contents.
     if url.scheme() != "https"
-        || !allowed_host
+        || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || !allowed_route
     {
         return Err(bilibili_upstream_error(
             "Bilibili playback returned an unsafe media URL",
@@ -8874,30 +8858,42 @@ mod tests {
     }
 
     #[test]
-    fn playback_media_urls_accept_known_mcdn_routes_only() {
+    fn playback_media_urls_accept_upstream_cdn_hosts_ports_and_paths() {
         for allowed in [
+            "https://b-baaa9ic0255d3c4bi3ygwqsbdk4b.edge.mountaintoys.cn:4483/upgcxcode/60/62/43125246260/audio.m4s?deadline=2000000000",
             "https://xy113x200x108x47xy.mcdn.bilivideo.cn:4483/upgcxcode/65/46/244954665/audio.m4s?deadline=2000000000",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/resource/35306865840-1-30280.m4s?deadline=2000000000",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/resource/upgcxcode/40/58/audio.m4s?deadline=2000000000",
+            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/resource/audio.m4s",
+            "https://new-cdn.example:9443/new/media/audio.m4s?signature=opaque",
         ] {
-            assert_eq!(
-                validate_bilibili_media_url(allowed).expect("trusted mcdn media URL"),
-                allowed
-            );
+            assert_eq!(validate_bilibili_media_url(allowed).unwrap(), allowed);
         }
-
         for rejected in [
-            "https://upos-sz-mirrorcos.bilivideo.com:8082/upgcxcode/audio.m4s",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8080/v1/resource/audio.m4s",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:4483/v1/resource/audio.m4s",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/upgcxcode/audio.m4s",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn:8082/v1/other/audio.m4s",
-            "https://xy60x163x166x213xy.mcdn.bilivideo.cn.example:8082/v1/resource/audio.m4s",
+            "http://cdn.example/audio.m4s",
+            "ftp://cdn.example/audio.m4s",
+            "https://user:password@cdn.example/audio.m4s",
+            "https://cdn.example/audio.m4s#fragment",
+            "https://cdn.example:99999/audio.m4s",
+            "https://",
+            "https://cdn.example/\nmedia",
         ] {
-            let error = validate_bilibili_media_url(rejected)
-                .expect_err("untrusted mcdn media URL must be rejected");
-            assert_eq!(error.code, ErrorCode::UpstreamError, "{rejected}");
+            assert!(validate_bilibili_media_url(rejected).is_err(), "{rejected}");
         }
+    }
+
+    #[test]
+    fn playback_manifest_preserves_new_cdn_backups_with_normal_primary() {
+        let mut fixture = playback_manifest_fixture();
+        let backup = json!(["https://new-cdn.example:4483/rotated/audio.m4s?deadline=2000000000"]);
+        fixture["data"]["dash"]["audio"][0]["backupUrl"] = backup.clone();
+        fixture["data"]["dash"]["audio"][0]["backup_url"] = backup;
+        let bytes = serde_json::to_vec(&fixture).unwrap();
+        let manifest =
+            parse_playback_manifest(&bytes, 60_977_932, "BV1Jt411P77c", 106_101_299).unwrap();
+        assert!(!manifest.audio_tracks.is_empty());
+        assert_eq!(
+            manifest.audio_tracks[0].backup_urls,
+            ["https://new-cdn.example:4483/rotated/audio.m4s?deadline=2000000000"]
+        );
     }
 
     fn playback_manifest_fixture() -> Value {
