@@ -1,3 +1,4 @@
+mod song_identifiers;
 use std::{
     collections::BTreeMap,
     fmt,

@@ -2213,6 +2213,14 @@ impl PlaybackHistoryRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MiguSongIdentifiers {
+    pub song_id: String,
+    pub content_id: String,
+    pub copyright_id: String,
+    pub track_ref: ResourceRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecommendationStyleTag {
     pub id: u64,
     pub name: String,

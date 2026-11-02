@@ -1795,6 +1795,19 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn migu_song_identifiers(&self, _song_id: &str) -> Result<crate::MiguSongIdentifiers> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SongIdLookup,
+        ))
+    }
+    async fn migu_tracks_by_song_ids(&self, _ids: &[String]) -> Result<Vec<Track>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SongIdLookup,
+        ))
+    }
+
     async fn recommended_tracks(&self, _request: &RecommendationRequest) -> Result<Page<Track>> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

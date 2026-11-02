@@ -304,6 +304,7 @@ impl MusicProvider for MiguProvider {
             Capability::DigitalAlbumTracks,
             Capability::TrackAvailability,
             Capability::TrackDetail,
+            Capability::SongIdLookup,
             Capability::ChartCatalog,
             Capability::ChartTracks,
             Capability::ChartHistoricalTracks,
@@ -780,6 +781,18 @@ impl MusicProvider for MiguProvider {
     async fn digital_album_tracks(&self, id: &str, request: &PageRequest) -> Result<Page<Track>> {
         self.require_public_source()?;
         self.read_album_tracks(id, request, true).await
+    }
+
+    async fn migu_song_identifiers(
+        &self,
+        song_id: &str,
+    ) -> Result<tuneweave_core::MiguSongIdentifiers> {
+        self.require_public_source()?;
+        self.client.song_identifiers(song_id).await
+    }
+    async fn migu_tracks_by_song_ids(&self, ids: &[String]) -> Result<Vec<Track>> {
+        self.require_public_source()?;
+        self.client.tracks_by_song_ids(ids).await
     }
 
     async fn track(&self, id: &str, account: Option<&str>) -> Result<Track> {
@@ -1260,6 +1273,7 @@ mod tests {
                 Capability::DigitalAlbumTracks,
                 Capability::TrackAvailability,
                 Capability::TrackDetail,
+                Capability::SongIdLookup,
                 Capability::ChartCatalog,
                 Capability::ChartTracks,
                 Capability::ChartHistoricalTracks,

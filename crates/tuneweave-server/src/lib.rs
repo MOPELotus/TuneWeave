@@ -3,6 +3,7 @@ mod artist_catalog;
 mod artist_filters;
 mod chart_periods;
 mod cloud_transfers;
+mod migu_identifiers;
 mod playlist_catalog;
 mod playlist_submissions;
 mod purchases;
@@ -1518,6 +1519,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/extensions/netease/register/checktoken/v3",
             get(netease_check_token_v3).post(netease_check_token_v3_refresh),
+        )
+        .route(
+            "/extensions/migu/song-identifiers",
+            get(migu_identifiers::identifiers),
+        )
+        .route(
+            "/extensions/migu/songs/by-songid",
+            post(migu_identifiers::tracks),
         )
         .route("/extensions/qq/api", post(qq_extension_api))
         .route("/extensions/qq/batch", post(qq_extension_batch))

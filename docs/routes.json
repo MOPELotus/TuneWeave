@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 303,
+  "route_count": 305,
   "routes": [
     {
       "method": "GET",
@@ -537,6 +537,14 @@
     {
       "method": "GET",
       "path": "/v1/episodes/{reference}/stream/redirect"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/extensions/migu/song-identifiers"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/extensions/migu/songs/by-songid"
     },
     {
       "method": "GET",

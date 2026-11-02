@@ -60,6 +60,7 @@ pub enum Capability {
     PodcastEpisodeStream,
     PodcastEpisodeLyrics,
     TrackDetail,
+    SongIdLookup,
     TrackSubscriptionWrite,
     ScrobbleWrite,
     TrackAvailability,

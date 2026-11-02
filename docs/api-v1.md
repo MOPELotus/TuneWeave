@@ -881,3 +881,5 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 `GET /v1/recommendations/styles?platform=netease` 读取平台当前风格分类和标签；`GET /v1/recommendations/styles/selection?platform=netease&account=personal` 读取当前选择。`GET /v1/recommendations/styles/tracks` 读取风格歌曲，`GET /v1/extensions/netease/recommendations/daily-v1` 读取新版日推；这两个歌曲入口支持 `account`、`offset` 和 `limit=1..100`，先验证完整歌曲窗口再分页，保留重复歌曲。上述目录、选择和歌曲请求均需要登录，调用方凭证沿用统一请求头。
 
 更新风格使用 `PUT /v1/recommendations/styles/selection`，JSON 为 `{"platform":"netease","account":"personal","category_id":1,"tag_ids":[2]}`；ID 必须来自当前目录，选择 1–64 个不同标签且属于同一分类。请求先读取并验证目录，写入后读取所选标签确认，只有与请求一致才返回成功。操作总限时 45 秒，账户更换会拒绝迟到结果；写入发出后超时或回读失败会返回 `write_outcome=unconfirmed`，不自动重发。上述响应均为 `no-store`。
+
+咪咕 songId 专用查询：`GET /v1/extensions/migu/song-identifiers?song_id=1114323823` 返回 `song_id`、`content_id`、`copyright_id` 及以 contentId 为身份的 `track_ref`；`POST /v1/extensions/migu/songs/by-songid` 接受 `{"song_ids":["1114323823"]}`，返回完整歌曲。SDK 对应 `migu_song_identifiers`、`migu_tracks_by_song_ids`，能力为 `song_id_lookup`。这些入口使用公开来源，不接受账户或调用方凭据；songId 必须是正十进制字符串，一次 1–100 项，保留请求顺序和重复项。映射会核对购买状态入口提供的身份提示与歌曲详情，缺失或矛盾时返回错误，不跟随应用跳转地址，也不推断购买或播放权益。
