@@ -883,3 +883,5 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 更新风格使用 `PUT /v1/recommendations/styles/selection`，JSON 为 `{"platform":"netease","account":"personal","category_id":1,"tag_ids":[2]}`；ID 必须来自当前目录，选择 1–64 个不同标签且属于同一分类。请求先读取并验证目录，写入后读取所选标签确认，只有与请求一致才返回成功。操作总限时 45 秒，账户更换会拒绝迟到结果；写入发出后超时或回读失败会返回 `write_outcome=unconfirmed`，不自动重发。上述响应均为 `no-store`。
 
 咪咕 songId 专用查询：`GET /v1/extensions/migu/song-identifiers?song_id=1114323823` 返回 `song_id`、`content_id`、`copyright_id` 及以 contentId 为身份的 `track_ref`；`POST /v1/extensions/migu/songs/by-songid` 接受 `{"song_ids":["1114323823"]}`，返回完整歌曲。SDK 对应 `migu_song_identifiers`、`migu_tracks_by_song_ids`，能力为 `song_id_lookup`。这些入口使用公开来源，不接受账户或调用方凭据；songId 必须是正十进制字符串，一次 1–100 项，保留请求顺序和重复项。映射会核对购买状态入口提供的身份提示与歌曲详情，缺失或矛盾时返回错误，不跟随应用跳转地址，也不推断购买或播放权益。
+
+汽水榜单目录使用 `GET /v1/charts?platform=soda&view=summary`，`overview`、`modern` 返回同一组已知官方榜单。目录范围明确标记为 `curated_chart_ids`，包含热歌、新歌、欧美和音乐人榜，逐一读取实时官方详情，不声称涵盖所有榜单，也不把推荐歌单当作榜单。歌曲使用 `GET /v1/charts/soda:chart:7036274230471712007/tracks?limit=20&offset=0`；先验证完整榜单及曲目身份、总数，再应用本地分页，保留官方顺序。榜单数量按当前响应读取，不固定为 50；原始 `rank_type`、`rank_delta` 保留在歌曲扩展，不推断未提供的上期名次。仅支持当前期，拒绝账户和调用方凭据，匿名读取不需要签名辅助服务。
