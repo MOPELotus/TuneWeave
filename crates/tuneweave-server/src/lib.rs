@@ -1,5 +1,6 @@
 mod album_collections;
 mod artist_catalog;
+mod artist_filters;
 mod chart_periods;
 mod cloud_transfers;
 mod playlist_catalog;
@@ -1016,6 +1017,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/artists/{reference}/fans", get(artist_fans))
         .route("/artists/{reference}/videos", get(artist_videos))
+        .route(
+            "/artists/{reference}/videos/tags",
+            get(artist_filters::video_tags),
+        )
         .route("/artists/{reference}/tracks", get(artist_tracks))
         .route("/artists/{reference}/top-tracks", get(artist_top_tracks))
         .route("/videos", get(music_videos))
@@ -10783,6 +10788,10 @@ struct ArtistHomepageTabParams {
     #[serde(alias = "num", alias = "page_size")]
     limit: Option<String>,
     account: Option<String>,
+    order: Option<String>,
+    album_type: Option<String>,
+    tag_id: Option<String>,
+    include_categories: Option<String>,
 }
 
 async fn artist_homepage_tab(
@@ -10801,6 +10810,12 @@ async fn artist_homepage_tab(
     if !(1..=100).contains(&limit) {
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
+    let filter = artist_filters::parse_filter(
+        params.order.as_deref(),
+        params.album_type.as_deref(),
+        params.tag_id.as_deref(),
+        params.include_categories.as_deref(),
+    )?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
@@ -10811,7 +10826,7 @@ async fn artist_homepage_tab(
     )?;
     let tab = access
         .provider
-        .artist_homepage_tab(
+        .artist_homepage_tab_filtered(
             reference.id(),
             &ArtistHomepageTabRequest {
                 kind: parse_artist_homepage_tab_kind(&tab)?,
@@ -10819,6 +10834,7 @@ async fn artist_homepage_tab(
                 limit,
                 account: access.provider_account.clone(),
             },
+            &filter,
         )
         .await?;
     Ok(Json(access.response(tab, platform)))
@@ -11256,7 +11272,7 @@ async fn artist_stats(
 async fn artist_albums(
     State(state): State<AppState>,
     Path(reference): Path<String>,
-    Query(params): Query<PageParams>,
+    Query(params): Query<artist_filters::AlbumParams>,
     headers: HeaderMap,
 ) -> Result<Json<ApiResponse<Vec<Album>>>, ApiError> {
     let reference = parse_reference(reference)?;
@@ -11265,6 +11281,12 @@ async fn artist_albums(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let filter = artist_filters::parse_filter(
+        params.order.as_deref(),
+        params.album_type.as_deref(),
+        None,
+        None,
+    )?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
@@ -11275,13 +11297,14 @@ async fn artist_albums(
     )?;
     let page = access
         .provider
-        .artist_albums(
+        .artist_albums_filtered(
             reference.id(),
             &PageRequest {
                 limit,
                 offset,
                 account: access.provider_account.clone(),
             },
+            &filter,
         )
         .await?;
     let response = access
@@ -11336,6 +11359,7 @@ struct ArtistVideoListParams {
     #[serde(rename = "type")]
     kind: Option<String>,
     order: Option<String>,
+    tag_id: Option<String>,
 }
 
 async fn artist_videos(
@@ -11350,6 +11374,7 @@ async fn artist_videos(
         return Err(TuneWeaveError::invalid_request("limit must be between 1 and 100").into());
     }
     let offset = parse_u32_parameter("offset", params.offset.as_deref(), 0)?;
+    let filter = artist_filters::parse_filter(None, None, params.tag_id.as_deref(), None)?;
     let account = optional_trimmed(params.account);
     let platform = reference.platform();
     let access = CallerCredentialSet::from_headers(&headers, &state)?.select_provider(
@@ -11365,7 +11390,7 @@ async fn artist_videos(
     request.order = optional_trimmed(params.order);
     let page = access
         .provider
-        .artist_videos(reference.id(), &request)
+        .artist_videos_filtered(reference.id(), &request, &filter)
         .await?;
     let response = access
         .response(page.items, platform)

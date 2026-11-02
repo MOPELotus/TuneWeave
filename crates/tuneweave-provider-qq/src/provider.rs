@@ -1,3 +1,5 @@
+#[path = "artist_filters.rs"]
+mod artist_filters;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -4258,6 +4260,7 @@ impl MusicProvider for QqProvider {
             Capability::ArtistAlbums,
             Capability::ArtistTracks,
             Capability::ArtistVideos,
+            Capability::ArtistVideoTags,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -4671,16 +4674,12 @@ impl MusicProvider for QqProvider {
         id: &str,
         request: &ArtistHomepageTabRequest,
     ) -> Result<ArtistHomepageTab> {
-        self.validate_public_account(request.account.as_deref())?;
-        let request_api = qq_singer_homepage_tab_request(id, request)?;
-        let response = self
-            .client
-            .request_android(&[request_api])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ singer homepage tab request returned no response"))?;
-        map_qq_singer_homepage_tab(id.trim(), request, response)
+        self.artist_homepage_tab_filtered(
+            id,
+            request,
+            &tuneweave_core::ArtistCatalogFilter::default(),
+        )
+        .await
     }
 
     async fn similar_artists(
@@ -4886,12 +4885,12 @@ impl MusicProvider for QqProvider {
         request: &ArtistTrackListRequest,
     ) -> Result<Page<Track>> {
         self.validate_public_account(request.account.as_deref())?;
-        if request.order != ArtistTrackOrder::Hot {
+        if request.order == ArtistTrackOrder::PlatformDefault {
             return Err(TuneWeaveError::invalid_request(
-                "QQ singer song list only exposes the upstream hot order",
+                "QQ singer song order must be hot or time",
             )
             .with_platform(Platform::Qq)
-            .with_details(json!({ "allowed_order": "hot" })));
+            .with_details(json!({ "allowed_orders": ["hot", "time"] })));
         }
         if !(1..=100).contains(&request.limit) {
             return Err(TuneWeaveError::invalid_request(
@@ -4899,7 +4898,12 @@ impl MusicProvider for QqProvider {
             )
             .with_platform(Platform::Qq));
         }
-        let request_api = qq_singer_songs_request(id, request.limit, request.offset)?;
+        let mut request_api = qq_singer_songs_request(id, request.limit, request.offset)?;
+        request_api.param["order"] = json!(if request.order == ArtistTrackOrder::Time {
+            0
+        } else {
+            1
+        });
         let response = self
             .client
             .request_android(&[request_api])
@@ -4910,27 +4914,45 @@ impl MusicProvider for QqProvider {
         map_qq_singer_songs(id.trim(), request.limit, request.offset, response)
     }
 
+    async fn artist_albums_filtered(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PageRequest,
+        filter: &tuneweave_core::ArtistCatalogFilter,
+    ) -> Result<Page<Album>> {
+        self.read_filtered_artist_albums(id, request, filter).await
+    }
+    async fn artist_videos_filtered(
+        &self,
+        id: &str,
+        request: &ArtistVideoListRequest,
+        filter: &tuneweave_core::ArtistCatalogFilter,
+    ) -> Result<Page<Video>> {
+        self.read_filtered_artist_videos(id, request, filter).await
+    }
+    async fn artist_homepage_tab_filtered(
+        &self,
+        id: &str,
+        request: &ArtistHomepageTabRequest,
+        filter: &tuneweave_core::ArtistCatalogFilter,
+    ) -> Result<ArtistHomepageTab> {
+        self.read_filtered_artist_tab(id, request, filter).await
+    }
+    async fn artist_video_tags(
+        &self,
+        id: &str,
+        account: Option<&str>,
+    ) -> Result<Vec<tuneweave_core::ArtistVideoTag>> {
+        self.read_artist_video_tags(id, account).await
+    }
+
     async fn artist_albums(
         &self,
         id: &str,
         request: &tuneweave_core::PageRequest,
     ) -> Result<Page<Album>> {
-        self.validate_public_account(request.account.as_deref())?;
-        if !(1..=100).contains(&request.limit) {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ singer album page size must be between 1 and 100",
-            )
-            .with_platform(Platform::Qq));
-        }
-        let request_api = qq_singer_albums_request(id, request.limit, request.offset)?;
-        let response = self
-            .client
-            .request_android(&[request_api])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ singer album request returned no response"))?;
-        map_qq_singer_albums(id.trim(), request.limit, request.offset, response)
+        self.artist_albums_filtered(id, request, &tuneweave_core::ArtistCatalogFilter::default())
+            .await
     }
 
     async fn artist_videos(
@@ -4938,45 +4960,8 @@ impl MusicProvider for QqProvider {
         id: &str,
         request: &ArtistVideoListRequest,
     ) -> Result<Page<Video>> {
-        self.validate_public_account(request.account.as_deref())?;
-        if !(1..=100).contains(&request.limit) {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ singer MV page size must be between 1 and 100",
-            )
-            .with_platform(Platform::Qq));
-        }
-        if request.cursor.is_some() {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ singer MV list does not support cursors",
-            )
-            .with_platform(Platform::Qq));
-        }
-        if request
-            .order
-            .as_deref()
-            .is_some_and(|order| !order.eq_ignore_ascii_case("hot"))
-        {
-            return Err(TuneWeaveError::invalid_request(
-                "QQ singer MV list only exposes the upstream hot order",
-            )
-            .with_platform(Platform::Qq)
-            .with_details(json!({ "allowed_order": "hot" })));
-        }
-        let request_api = qq_singer_mvs_request(id, request.limit, request.offset)?;
-        let response = self
-            .client
-            .request_android(&[request_api])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| qq_data_error("QQ singer MV request returned no response"))?;
-        map_qq_singer_mvs(
-            id.trim(),
-            request.limit,
-            request.offset,
-            request.kind,
-            response,
-        )
+        self.artist_videos_filtered(id, request, &tuneweave_core::ArtistCatalogFilter::default())
+            .await
     }
 
     async fn music_videos(&self, request: &MusicVideoListRequest) -> Result<Page<Video>> {
@@ -27375,13 +27360,13 @@ mod tests {
             .expect_err("invalid singer song page size");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         request.limit = 10;
-        request.order = ArtistTrackOrder::Time;
+        request.order = ArtistTrackOrder::PlatformDefault;
         let error = provider
             .artist_tracks("0025NhlN2yWrP4", &request)
             .await
             .expect_err("unsupported singer song order");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
-        assert_eq!(error.details["allowed_order"], "hot");
+
         request.order = ArtistTrackOrder::Hot;
         request.account = Some("missing-account".to_owned());
         let error = provider
@@ -27422,13 +27407,13 @@ mod tests {
             .expect_err("unsupported singer MV cursor");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         videos.cursor = None;
-        videos.order = Some("time".to_owned());
+        videos.order = Some("unsupported".to_owned());
         let error = provider
             .artist_videos("0025NhlN2yWrP4", &videos)
             .await
             .expect_err("unsupported singer MV order");
         assert_eq!(error.code, ErrorCode::InvalidRequest);
-        assert_eq!(error.details["allowed_order"], "hot");
+
         videos.order = Some("HOT".to_owned());
         videos.account = Some("missing-account".to_owned());
         let error = provider

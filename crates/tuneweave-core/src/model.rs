@@ -2707,6 +2707,22 @@ pub enum ArtistTrackOrder {
     PlatformDefault,
 }
 
+/// Optional native filters for artist albums, videos and homepage tabs.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtistCatalogFilter {
+    pub order: Option<ArtistTrackOrder>,
+    pub album_type: Option<u32>,
+    pub video_tag_id: Option<u64>,
+    pub include_categories: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtistVideoTag {
+    pub id: u64,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtistTrackListRequest {
     pub limit: u32,

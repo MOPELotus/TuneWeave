@@ -863,3 +863,10 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 `POST /v1/extensions/netease/api` 与 `/v1/extensions/netease/batch` 的 `protocol` 支持 `neapi`；其他传输方式保持原有语义。单请求示例为 `{"uri":"/api/search/get","protocol":"neapi","data":{"s":"周杰伦","type":1,"limit":2,"offset":0}}`，账户仍通过 `account` 或调用方凭据请求头选择。NEAPI 只接受不带查询串的 `/api/` 路径，业务参数放在 `data` 中。
 
 配置按需从官方接口取得，在当前 Provider 的内存中缓存并按官方期限更新，不写入临时目录或响应。请求与响应使用认证加密容器；配置和响应都限制字节数、解压大小及解析深度。官方当前省略的 Zstd 结束标记只在所有数据块完整时补齐，截断块仍返回错误。仅遇到明确的密钥版本拒绝状态时更新配置并重试一次，网络错误不会自动重发。源码中暴露的通用接口不代表调用账户具备相应业务权限。
+
+## QQ 歌手目录筛选
+
+`GET /v1/artists/qq:{mid}/tracks?order=time` 按最新顺序读取歌曲；`order=hot` 保留原热门默认值。专辑入口 `/v1/artists/qq:{mid}/albums` 新增同样的 `order`，以及 `album_type=0`（录音室）、`1`（现场）、`11`（EP）。MV 入口 `/videos` 支持 `order=hot|time` 与 `tag_id`；先通过 `/v1/artists/qq:{mid}/videos/tags` 获取平台实际标签。标签 ID `0` 可以表示全部。
+
+`/v1/artists/qq:{mid}/tabs/{tab}` 支持 `order=hot|time`；`album` Tab 可指定 `album_type`，`video` Tab 可指定 `tag_id`，这两类 Tab 还可设置 `include_categories=true`。未指定参数时保留原排序，跨目录的筛选会返回参数错误。SDK 对应 `ArtistCatalogFilter`、`artist_albums_filtered`、`artist_videos_filtered`、`artist_homepage_tab_filtered` 和 `artist_video_tags`；旧 SDK 方法的默认行为保持不变。
+

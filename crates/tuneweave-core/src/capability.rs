@@ -99,6 +99,7 @@ pub enum Capability {
     ArtistDigitalAlbums,
     ArtistFans,
     ArtistVideos,
+    ArtistVideoTags,
     ArtistTracks,
     ArtistTopTracks,
     ArtistSubscriptionWrite,

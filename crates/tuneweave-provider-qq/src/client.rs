@@ -222,9 +222,13 @@ impl QqClient {
     pub fn new(config: QqConfig) -> Result<Self> {
         let mut builder = Client::builder()
             .user_agent(ANDROID_USER_AGENT)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .redirect(Policy::none());
         let mut login_builder = Client::builder()
             .user_agent(WEB_USER_AGENT)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .redirect(Policy::none());
         let proxy_url = config
             .proxy_url
@@ -691,7 +695,11 @@ impl QqClient {
             return Ok(());
         }
         let device = self.lock_device()?.device().clone();
-        let comm = android_comm(&device, None);
+        let mut comm = android_comm(&device, None);
+        if let Some(fields) = comm.as_object_mut() {
+            fields.remove("uid");
+            fields.remove("sid");
+        }
         let request = QqApiRequest::new(
             "music.getSession.session",
             "GetSession",

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 297,
+  "route_count": 298,
   "routes": [
     {
       "method": "GET",
@@ -389,6 +389,10 @@
     {
       "method": "GET",
       "path": "/v1/artists/{reference}/videos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/artists/{reference}/videos/tags"
     },
     {
       "method": "POST",

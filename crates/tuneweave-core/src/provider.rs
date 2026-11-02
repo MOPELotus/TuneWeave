@@ -974,6 +974,62 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn artist_albums_filtered(
+        &self,
+        id: &str,
+        request: &PageRequest,
+        filter: &crate::ArtistCatalogFilter,
+    ) -> Result<Page<Album>> {
+        if *filter != crate::ArtistCatalogFilter::default() {
+            return Err(TuneWeaveError::invalid_request(
+                "this platform does not support artist album filters",
+            )
+            .with_platform(self.platform()));
+        }
+        self.artist_albums(id, request).await
+    }
+
+    async fn artist_videos_filtered(
+        &self,
+        id: &str,
+        request: &ArtistVideoListRequest,
+        filter: &crate::ArtistCatalogFilter,
+    ) -> Result<Page<Video>> {
+        if *filter != crate::ArtistCatalogFilter::default() {
+            return Err(TuneWeaveError::invalid_request(
+                "this platform does not support artist video filters",
+            )
+            .with_platform(self.platform()));
+        }
+        self.artist_videos(id, request).await
+    }
+
+    async fn artist_homepage_tab_filtered(
+        &self,
+        id: &str,
+        request: &ArtistHomepageTabRequest,
+        filter: &crate::ArtistCatalogFilter,
+    ) -> Result<ArtistHomepageTab> {
+        if *filter != crate::ArtistCatalogFilter::default() {
+            return Err(TuneWeaveError::invalid_request(
+                "this platform does not support artist tab filters",
+            )
+            .with_platform(self.platform()));
+        }
+        self.artist_homepage_tab(id, request).await
+    }
+
+    async fn artist_video_tags(
+        &self,
+        _id: &str,
+        _account: Option<&str>,
+    ) -> Result<Vec<crate::ArtistVideoTag>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::ArtistVideoTags,
+        ))
+    }
+
     async fn artist_digital_albums(
         &self,
         _id: &str,
