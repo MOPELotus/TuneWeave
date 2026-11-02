@@ -179,24 +179,29 @@ fn qimei_payload(device: &QqDevice, timestamp: u64) -> Value {
         "harmony": "0",
         "clone": "0",
         "containe": "",
-        "oz": "UhYmelwouA+V2nPWbOvLTgN2/m8jwGB+yUB5v9tysQg=",
-        "oo": "Xecjt+9S1+f8Pz2VLSxgpw==",
+        "oz": device_security_field(&device.android_id),
+        "oo": device_security_field("MI 6"),
         "kelong": "0",
         "uptimes": format_utc_datetime(uptime),
         "multiUser": "0",
-        "bod": "Xiaomi",
+        "bod": "msm8998",
         "dv": "sagit",
-        "firstLevel": "",
+        "firstLevel": "25",
         "manufact": "Xiaomi",
-        "name": "MI 6",
+        "name": "sagit",
         "host": "se.infra",
-        "kernel": device.proc_version
+        "kernel": device.proc_version,
+        "brd": "Xiaomi",
+        "pre": "0",
+        "av": "20.9.0.8",
+        "ch": "",
+        "ip": device_private_ip(&device.android_id)
     });
     json!({
         "androidId": device.android_id,
         "platformId": 1,
         "appKey": APP_KEY,
-        "appVersion": "14.9.0.8",
+        "appVersion": "20.9.0.8",
         "beaconIdSrc": random_beacon_id(timestamp),
         "brand": "Xiaomi",
         "channelId": CHANNEL_ID,
@@ -205,13 +210,13 @@ fn qimei_payload(device: &QqDevice, timestamp: u64) -> Value {
         "imsi": "",
         "mac": "",
         "model": "MI 6",
-        "networkType": "unknown",
+        "networkType": "wifi",
         "oaid": "",
         "osVersion": "Android 10,level 29",
         "qimei": "",
         "qimei36": "",
         "sdkVersion": "1.2.13.6",
-        "targetSdkVersion": "33",
+        "targetSdkVersion": "30",
         "audit": "",
         "userId": "{}",
         "packageId": PACKAGE_ID,
@@ -219,6 +224,23 @@ fn qimei_payload(device: &QqDevice, timestamp: u64) -> Value {
         "sdkName": "",
         "reserved": serde_json::to_string(&reserved).expect("reserved QIMEI object is serializable")
     })
+}
+
+fn device_private_ip(android_id: &str) -> String {
+    let digest = Md5::digest(android_id.as_bytes());
+    format!("192.168.{}.{}", digest[0], u16::from(digest[1]) % 253 + 2)
+}
+
+fn device_security_field(value: &str) -> String {
+    let key = b"lvcwmSYVr2Axv1gn";
+    let iv = b"Zs0ntDqG2jyhKN0c";
+    let mut buffer = vec![0; value.len() + 16];
+    buffer[..value.len()].copy_from_slice(value.as_bytes());
+    BASE64.encode(
+        cbc::Encryptor::<Aes128>::new(key.into(), iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, value.len())
+            .expect("device field buffer has a padding block"),
+    )
 }
 
 fn aes_encrypt(key: &[u8], plaintext: &[u8]) -> Vec<u8> {
@@ -333,6 +355,23 @@ fn qimei_data_error(message: impl Into<String>) -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_profile_tracks_identity_and_app_version() {
+        let first = QqDevice::default();
+        let mut second = first.clone();
+        second.android_id = "0123456789abcdef".into();
+        let a = qimei_payload(&first, 1_709_164_800);
+        let b = qimei_payload(&second, 1_709_164_800);
+        let ar: Value = serde_json::from_str(a["reserved"].as_str().unwrap()).unwrap();
+        let br: Value = serde_json::from_str(b["reserved"].as_str().unwrap()).unwrap();
+        assert_eq!(a["appVersion"], "20.9.0.8");
+        assert_eq!(a["networkType"], "wifi");
+        assert_ne!(ar["oz"], br["oz"]);
+        assert_eq!(ar["oo"], br["oo"]);
+        assert_eq!(ar["av"], a["appVersion"]);
+        assert_eq!(ar["oz"], device_security_field(&first.android_id));
+    }
 
     #[test]
     fn utc_conversion_covers_epoch_and_leap_day() {

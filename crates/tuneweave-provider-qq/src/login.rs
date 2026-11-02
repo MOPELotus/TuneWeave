@@ -363,7 +363,7 @@ async fn create_mobile_qr(client: &QqClient) -> Result<CreatedQr> {
                 json!({
                     "tmeAppID": "qqmusic",
                     "ct": 11,
-                    "cv": 14090008
+                    "cv": 20090008
                 }),
             ),
             &[("ct", json!(23)), ("cv", json!(0))],

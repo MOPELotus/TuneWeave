@@ -25,7 +25,7 @@ use crate::{
 const API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const SIGNED_API_ENDPOINT: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const QUICK_SEARCH_ENDPOINT: &str = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
-const ANDROID_USER_AGENT: &str = "QQMusic 14090008(android 10)";
+const ANDROID_USER_AGENT: &str = "QQMusic 20090008(android 10)";
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const QQ_SEARCH_MAX_ATTEMPTS: u8 = 30;
 const QQ_SEARCH_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -696,9 +696,9 @@ impl QqClient {
             "music.getSession.session",
             "GetSession",
             json!({
-                "uid": device.session_uid.unwrap_or_default(),
+                "uid": device.session_uid.clone().unwrap_or_default(),
                 "vkey": 0,
-                "caller": 0
+                "caller": if device.session_uid.as_deref().is_some_and(|v| !v.is_empty()) && device.session_sid.as_deref().is_some_and(|v| !v.is_empty()) { 1 } else { 2 }
             }),
         );
         let response = self.post_api(&comm, &[request], None).await?;
@@ -1094,10 +1094,11 @@ fn zzc_sign(payload: &[u8]) -> String {
 fn android_comm(device: &QqDevice, credential: Option<&QqCredential>) -> Value {
     let mut comm = json!({
         "ct": 11,
-        "cv": 14090008,
-        "v": 14090008,
+        "cv": 20090008,
+        "v": 20090008,
         "chid": "10003505",
         "tmeAppID": "qqmusic",
+        "traceid": format!("10002_{}_{}", credential.map_or(device.open_udid.as_str(), |value| value.string_music_id()), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
         "QIMEI": device.qimei.as_deref().unwrap_or_default(),
         "QIMEI36": device.qimei36.as_deref().unwrap_or_default(),
         "OpenUDID": device.open_udid,
@@ -1775,6 +1776,14 @@ mod tests {
             ..QqDevice::default()
         };
         let comm = android_comm(&device, None);
+        assert_eq!(comm["cv"], 20_090_008);
+        assert_eq!(comm["v"], 20_090_008);
+        assert!(
+            comm["traceid"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("10002_{}_", device.open_udid))
+        );
         assert_eq!(comm["QIMEI"], "q16");
         assert_eq!(comm["QIMEI36"], "q36");
         assert!(comm.get("uid").is_none());

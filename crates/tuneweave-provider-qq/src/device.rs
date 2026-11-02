@@ -70,9 +70,11 @@ impl QqDevice {
                 .session_sid
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
-            && self
-                .session_saved_at
-                .is_some_and(|saved_at| now.saturating_sub(saved_at) < 86_400)
+            && self.session_saved_at.is_some_and(|saved_at| {
+                now >= saved_at
+                    && now.saturating_add(28_800) / 86_400
+                        == saved_at.saturating_add(28_800) / 86_400
+            })
     }
 }
 
@@ -327,6 +329,24 @@ mod tests {
         assert!(!device.has_current_qimei(86_500));
         device.qimei36 = None;
         assert!(!device.has_current_qimei(101));
+    }
+
+    #[test]
+    fn session_refreshes_at_china_midnight_and_rejects_future_cache() {
+        let mut device = QqDevice {
+            session_uid: Some("uid".into()),
+            session_sid: Some("sid".into()),
+            session_saved_at: Some(57_599),
+            ..QqDevice::default()
+        };
+        assert!(device.has_current_session(57_599));
+        assert!(!device.has_current_session(57_600));
+        assert!(!device.has_current_session(57_598));
+        device.session_saved_at = Some(57_600);
+        assert!(device.has_current_session(86_400));
+        assert!(!device.has_current_session(144_000));
+        device.session_sid = None;
+        assert!(!device.has_current_session(86_400));
     }
 
     #[cfg(windows)]

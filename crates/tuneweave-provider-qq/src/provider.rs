@@ -10425,7 +10425,7 @@ fn lyric_request(id: &str, options: &LyricsRequest) -> Result<(QqApiRequest, QqT
         "needSingingAnnotations": options.singing_annotations,
         "type": options.song_type.unwrap_or(1),
         "ct": 11,
-        "cv": 14090008
+        "cv": 20090008
     });
     match &identifier {
         QqTrackIdentifier::Numeric(id) => param["songId"] = json!(id),
@@ -20551,7 +20551,7 @@ mod tests {
                 "needSingingAnnotations": true,
                 "type": 7,
                 "ct": 11,
-                "cv": 14090008,
+                "cv": 20090008,
                 "songId": 100
             })
         );
