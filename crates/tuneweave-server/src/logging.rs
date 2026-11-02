@@ -444,11 +444,18 @@ struct FileWriteErrorCounter(Arc<AtomicUsize>);
 
 impl FileWriteErrorCounter {
     fn record(&self) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_add(1))
-            });
+        let mut current = self.0.load(Ordering::Acquire);
+        loop {
+            match self.0.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn total(&self) -> usize {
@@ -1077,6 +1084,25 @@ fn invalid_config(message: impl Into<String>) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_write_error_counter_preserves_concurrent_updates_and_saturates() {
+        let counter = super::FileWriteErrorCounter::default();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let counter = &counter;
+                scope.spawn(move || {
+                    for _ in 0..1_000 {
+                        counter.record();
+                    }
+                });
+            }
+        });
+        assert_eq!(counter.total(), 8_000);
+        counter.0.store(usize::MAX - 1, super::Ordering::Release);
+        counter.record();
+        counter.record();
+        assert_eq!(counter.total(), usize::MAX);
+    }
     use std::{
         io::Write,
         sync::{
