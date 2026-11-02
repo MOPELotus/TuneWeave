@@ -9,7 +9,10 @@ use aws_lc_rs::{
     agreement, hmac,
     rand::SystemRandom,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+};
 use flate2::read::GzDecoder;
 use md5::{Digest, Md5};
 use num_bigint::BigUint;
@@ -42,7 +45,7 @@ pub(crate) struct WeapiPayload {
 }
 
 pub(crate) struct XeapiPayload {
-    pub b: String,
+    pub c: String,
     pub s: String,
     pub r: String,
 }
@@ -85,10 +88,10 @@ pub(crate) fn decrypt_xeapi_public_key(encrypted: &str) -> Result<String, &'stat
 
 pub(crate) fn build_xeapi_plaintext(uri: &str, data: &Map<String, Value>) -> String {
     let mut fields = Map::new();
-    fields.insert(
-        "body".to_owned(),
-        Value::String(BASE64.encode(encode_form(data, true))),
-    );
+    let content = encode_form(data, true);
+    if !content.is_empty() {
+        fields.insert("content".to_owned(), Value::String(content));
+    }
 
     let query = uri
         .split_once('?')
@@ -132,7 +135,7 @@ pub(crate) fn encrypt_xeapi(
 
     let first = encrypt_aes_256_ecb(&XEAPI_STATIC_KEY, plaintext.as_bytes());
     let transformed = xeapi_mid_transform(&first);
-    let b = encrypt_aes_128_ecb(&dynamic_key, &transformed);
+    let c = encrypt_aes_128_ecb(&dynamic_key, &transformed);
     let s = encrypt_xeapi_s(&dynamic_key, peer_public_key, server_key)?;
     let session_id = session.map_or("", |(id, _)| id);
     let r = encrypt_aes_256_ecb(
@@ -141,7 +144,7 @@ pub(crate) fn encrypt_xeapi(
     );
 
     Ok(XeapiPayload {
-        b: BASE64.encode(b),
+        c: URL_SAFE_NO_PAD.encode(c),
         s: BASE64.encode(s),
         r: BASE64.encode(r),
     })
@@ -247,7 +250,7 @@ fn xeapi_mid_transform(ciphertext: &[u8]) -> Vec<u8> {
         .enumerate()
         .map(|(index, byte)| byte ^ random[index & 0x0f])
         .collect::<Vec<_>>();
-    let encoded = BASE64.encode(xored).into_bytes();
+    let encoded = xored;
     let rotation = if encoded.is_empty() {
         0
     } else {
@@ -392,12 +395,7 @@ mod tests {
         let value: Value = serde_json::from_str(&plaintext).expect("parse plaintext");
         assert_eq!(value["queryString"], "existing=1&e_r=true");
         assert_eq!(
-            String::from_utf8(
-                BASE64
-                    .decode(value["body"].as_str().expect("body"))
-                    .expect("base64 body")
-            )
-            .expect("UTF-8 body"),
+            value["content"],
             "array=a%2C%2C3&nested=%5Bobject+Object%5D&space=Tune+Weave"
         );
     }
@@ -422,7 +420,7 @@ mod tests {
         )
         .expect("encrypt XEAPI envelope");
 
-        assert!(!BASE64.decode(encrypted.b).expect("B").is_empty());
+        assert!(!URL_SAFE_NO_PAD.decode(encrypted.c).expect("C").is_empty());
         assert!(BASE64.decode(encrypted.s).expect("S").len() > 60);
         assert!(!BASE64.decode(encrypted.r).expect("R").is_empty());
     }

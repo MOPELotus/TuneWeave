@@ -1381,7 +1381,7 @@ impl NeteaseClient {
         let mut http_status = None;
         let outcome = async {
             let response = request
-                .form(&[("B", encrypted.b), ("S", encrypted.s), ("R", encrypted.r)])
+                .form(&[("C", encrypted.c), ("S", encrypted.s), ("R", encrypted.r)])
                 .send()
                 .await
                 .map_err(request_error)?;
@@ -1455,10 +1455,7 @@ impl NeteaseClient {
         ];
         let request = self.apply_network_identity(
             self.http
-                .post(format!(
-                    "{}/api/gorilla/anti/crawler/security/key/get",
-                    self.base_url
-                ))
+                .post(format!("{}/api/bsr/sk/get", self.base_url))
                 .header(header::USER_AGENT, XEAPI_USER_AGENT)
                 .header(header::COOKIE, format!("deviceId={}", self.device_id))
                 .form(&form),
@@ -1475,7 +1472,7 @@ impl NeteaseClient {
         self.log_validated_upstream_request(
             "xeapi_public_key",
             self.base_upstream_host,
-            "/api/gorilla/anti/crawler/security/key/get",
+            "/api/bsr/sk/get",
             http_status,
             started,
             &outcome,
