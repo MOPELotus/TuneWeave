@@ -19360,11 +19360,12 @@ fn parse_search_variant(value: Option<&str>) -> Result<SearchVariant, TuneWeaveE
         "default" | "auto" => Ok(SearchVariant::Default),
         "legacy" | "search" => Ok(SearchVariant::Legacy),
         "cloud" | "cloudsearch" => Ok(SearchVariant::Cloud),
+        "modern" => Ok(SearchVariant::Modern),
         value => Err(TuneWeaveError::invalid_request(format!(
             "unsupported search variant: {value}"
         ))
         .with_details(json!({
-            "allowed": ["default", "legacy", "cloud"]
+            "allowed": ["default", "legacy", "cloud", "modern"]
         }))),
     }
 }

@@ -870,3 +870,8 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 
 `/v1/artists/qq:{mid}/tabs/{tab}` 支持 `order=hot|time`；`album` Tab 可指定 `album_type`，`video` Tab 可指定 `tag_id`，这两类 Tab 还可设置 `include_categories=true`。未指定参数时保留原排序，跨目录的筛选会返回参数错误。SDK 对应 `ArtistCatalogFilter`、`artist_albums_filtered`、`artist_videos_filtered`、`artist_homepage_tab_filtered` 和 `artist_video_tags`；旧 SDK 方法的默认行为保持不变。
 
+## 网易云新版搜索与移动端建议
+
+`GET /v1/search?platform=netease&q=晴天&type=track&variant=modern` 读取新版单曲搜索；`type=lyric` 使用新的歌词搜索，结果仍为歌曲，并在扩展字段保留命中的歌词片段。仅这两种搜索类型支持 `modern`，旧默认、`legacy` 和 `cloud` 不变。`offset` 和 `limit` 支持分页；歌词端点的原始 `more` 不是页尾标志，统一分页根据其已验证的 `totalCount` 计算。
+
+`/v1/search/suggestions?platform=netease&client=mobile&q=周杰伦` 使用新版移动端联想，保留建议、推荐和原始卡片扩展。移动端音乐 Banner 使用官方 v3 入口；PC Banner 保留原入口。

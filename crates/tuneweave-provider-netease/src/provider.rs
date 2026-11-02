@@ -1,4 +1,6 @@
 mod cloud_transfer;
+#[path = "new_search.rs"]
+mod new_search;
 #[path = "recent_history.rs"]
 mod recent_history;
 
@@ -844,6 +846,19 @@ impl MusicProvider for NeteaseProvider {
                 "search query cannot be empty",
             ));
         }
+        if query.variant == SearchVariant::Modern {
+            return self.search_modern(query).await.map(|page| Page {
+                items: page
+                    .items
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        SearchItem::Track(track) => Some(track),
+                        _ => None,
+                    })
+                    .collect(),
+                pagination: page.pagination,
+            });
+        }
         let limit = query.limit.clamp(1, 100);
         let client = self.client_for(query.account.as_deref())?;
         let response = client
@@ -907,6 +922,9 @@ impl MusicProvider for NeteaseProvider {
                 "NetEase search does not support Bilibili video filters",
             )
             .with_platform(Platform::Netease));
+        }
+        if query.variant == SearchVariant::Modern {
+            return self.search_modern(query).await;
         }
         let limit = query.limit.clamp(1, 100);
         let client = self.client_for(query.account.as_deref())?;
@@ -6569,10 +6587,15 @@ fn netease_banner_request(
     request: &BannerListRequest,
 ) -> Result<(&'static str, Value, NeteaseBannerProtocol)> {
     match request.catalog {
-        BannerCatalog::Music => Ok((
+        BannerCatalog::Music if request.client == BannerClient::Pc => Ok((
             "/api/v2/banner/get",
-            json!({ "clientType": netease_banner_client(request.client) }),
+            json!({ "clientType": "pc" }),
             NeteaseBannerProtocol::Eapi,
+        )),
+        BannerCatalog::Music => Ok((
+            "/api/banner/get/v3",
+            json!({ "clientType": netease_banner_client(request.client) }),
+            NeteaseBannerProtocol::Weapi,
         )),
         BannerCatalog::Podcast if request.client == BannerClient::Pc => Ok((
             "/api/djradio/banner/get",
@@ -15666,9 +15689,11 @@ fn netease_search_suggestion_request(
 ) -> (&'static str, Value, bool) {
     match client {
         SearchSuggestionClient::Web => ("/api/search/suggest/web", json!({ "s": query }), true),
-        SearchSuggestionClient::Mobile => {
-            ("/api/search/suggest/keyword", json!({ "s": query }), true)
-        }
+        SearchSuggestionClient::Mobile => (
+            "/api/search/suggest/keyword/get",
+            json!({ "keyword": query }),
+            true,
+        ),
         SearchSuggestionClient::Pc => (
             "/api/search/pc/suggest/keyword/get",
             json!({ "keyword": query }),
@@ -15686,6 +15711,18 @@ fn map_netease_search_suggestions(
         SearchSuggestionClient::Web => {
             let result = search_suggestion_container(&response, "result", client)?;
             (map_netease_web_search_suggestions(result)?, Vec::new())
+        }
+        SearchSuggestionClient::Mobile if response.get("data").is_some() => {
+            let data = search_suggestion_container(&response, "data", client)?;
+            let suggestions = optional_search_suggestion_array(data, "suggests", client)?
+                .into_iter()
+                .map(|raw| map_netease_keyword_suggestion(raw, None))
+                .collect::<Result<Vec<_>>>()?;
+            let recommendations = optional_search_suggestion_array(data, "recs", client)?
+                .into_iter()
+                .map(|raw| map_netease_keyword_suggestion(raw, None))
+                .collect::<Result<Vec<_>>>()?;
+            (suggestions, recommendations)
         }
         SearchSuggestionClient::Mobile => {
             let result = search_suggestion_container(&response, "result", client)?;
@@ -16900,6 +16937,11 @@ fn netease_catalog_search_request(
             }),
             variant,
         ),
+        (SearchVariant::Modern, _) => {
+            return Err(TuneWeaveError::invalid_request(
+                "modern search requires the resource search mapper",
+            ));
+        }
         (SearchVariant::Default, _) => unreachable!("default search variant is resolved above"),
     })
 }
@@ -17947,8 +17989,8 @@ mod tests {
             ),
             (
                 SearchSuggestionClient::Mobile,
-                "/api/search/suggest/keyword",
-                json!({"s": "海阔天空"}),
+                "/api/search/suggest/keyword/get",
+                json!({"keyword": "海阔天空"}),
                 true,
             ),
             (
@@ -23987,9 +24029,9 @@ mod tests {
         let music = BannerListRequest::new(BannerClient::Iphone);
         let (path, payload, protocol) =
             netease_banner_request(&music).expect("build music banner request");
-        assert_eq!(path, "/api/v2/banner/get");
+        assert_eq!(path, "/api/banner/get/v3");
         assert_eq!(payload, json!({ "clientType": "iphone" }));
-        assert_eq!(protocol, NeteaseBannerProtocol::Eapi);
+        assert_eq!(protocol, NeteaseBannerProtocol::Weapi);
 
         let mut podcast = BannerListRequest::new(BannerClient::Pc);
         podcast.catalog = BannerCatalog::Podcast;

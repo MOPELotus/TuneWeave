@@ -33,6 +33,7 @@ pub enum SearchVariant {
     Default,
     Legacy,
     Cloud,
+    Modern,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
