@@ -43,6 +43,7 @@ pub(crate) use account_playlist::SodaAccountPlaylistPage;
 pub(crate) use artist_catalog::SodaArtistCatalogue;
 mod catalog;
 pub(crate) mod charts;
+pub(crate) mod discovery;
 mod lyrics;
 pub(crate) mod membership;
 pub(crate) mod player_info;

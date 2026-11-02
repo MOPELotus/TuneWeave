@@ -44,6 +44,7 @@ mod artist_catalog;
 mod artist_collection;
 mod auth_generation;
 mod charts;
+mod discovery;
 mod favorites;
 mod library_operations;
 mod membership;
@@ -717,6 +718,7 @@ impl MusicProvider for SodaProvider {
             Capability::TrackDetail,
             Capability::ChartCatalog,
             Capability::ChartTracks,
+            Capability::PlaylistCatalog,
             Capability::Lyrics,
             Capability::TrackAvailability,
         ])
@@ -727,6 +729,20 @@ impl MusicProvider for SodaProvider {
         request: &tuneweave_core::ChartCatalogRequest,
     ) -> Result<tuneweave_core::ChartCatalog> {
         self.read_chart_catalog(request).await
+    }
+
+    async fn playlist_catalog(
+        &self,
+        request: &tuneweave_core::PlaylistCatalogRequest,
+    ) -> Result<Page<Playlist>> {
+        self.read_discovery(request).await
+    }
+
+    async fn playlist_catalog_taxonomy(
+        &self,
+        request: &tuneweave_core::PlaylistCatalogTaxonomyRequest,
+    ) -> Result<tuneweave_core::PlaylistCatalogTaxonomy> {
+        self.discovery_taxonomy(request)
     }
 
     async fn chart_tracks(
@@ -3479,6 +3495,7 @@ mod tests {
                 Capability::TrackDetail,
                 Capability::ChartCatalog,
                 Capability::ChartTracks,
+                Capability::PlaylistCatalog,
                 Capability::Lyrics,
                 Capability::TrackAvailability,
             ])
