@@ -178,6 +178,7 @@ pub enum Capability {
     ListeningHistory,
     RecentTrackHistory,
     MusicWall,
+    SoundPower,
     RecentAlbumHistory,
     RecentPlaylistHistory,
     RecentPodcastEpisodeHistory,

@@ -9,6 +9,7 @@ mod playlist_catalog;
 mod playlist_submissions;
 mod purchases;
 mod recommendation_styles;
+mod sound_power;
 use album_collections::{
     account_digital_albums, digital_album_subscribe, digital_album_unsubscribe,
     digital_albums_subscribe, digital_albums_unsubscribe, user_favorite_digital_albums,
@@ -1483,6 +1484,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/account/history", get(account_history))
         .route("/extensions/soda/music-wall", get(music_wall::read))
+        .route(
+            "/extensions/qq/sound-power/{section}",
+            get(sound_power::read),
+        )
         .route("/account/history/tracks", get(account_recent_track_history))
         .route("/account/history/albums", get(account_recent_album_history))
         .route(

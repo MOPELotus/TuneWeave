@@ -875,6 +875,27 @@ pub struct PlatformApiRequest {
     pub account: Option<String>,
 }
 
+/// Read-only QQ sound-power sections; native response fields remain provider-owned.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "section", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SoundPowerQuery {
+    Detail,
+    HugevipRule,
+    FriendRank {
+        offset: u32,
+        limit: u32,
+        last_uin: String,
+        rankno: u64,
+    },
+    MedalEntry {
+        encrypted_uin: String,
+    },
+    Tasks {
+        activity_id: String,
+        module_ids: Vec<String>,
+    },
+}
+
 impl PlatformApiRequest {
     #[must_use]
     pub fn new(uri: impl Into<String>, data: Value) -> Self {

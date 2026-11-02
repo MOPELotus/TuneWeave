@@ -1777,6 +1777,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn sound_power(
+        &self,
+        _query: &crate::SoundPowerQuery,
+        _account: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::SoundPower,
+        ))
+    }
+
     async fn recent_album_history(
         &self,
         _request: &PageRequest,

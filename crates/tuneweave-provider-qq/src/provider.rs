@@ -1,5 +1,7 @@
 #[path = "artist_filters.rs"]
 mod artist_filters;
+#[path = "sound_power.rs"]
+mod sound_power;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -4261,6 +4263,7 @@ impl MusicProvider for QqProvider {
             Capability::ArtistTracks,
             Capability::ArtistVideos,
             Capability::ArtistVideoTags,
+            Capability::SoundPower,
             Capability::TrackDetail,
             Capability::TrackSubscriptionWrite,
             Capability::Lyrics,
@@ -6343,6 +6346,14 @@ impl MusicProvider for QqProvider {
             removed,
             caller_credential_discard_required,
         })
+    }
+
+    async fn sound_power(
+        &self,
+        query: &tuneweave_core::SoundPowerQuery,
+        account: Option<&str>,
+    ) -> Result<Value> {
+        self.read_sound_power(query, account).await
     }
 
     async fn platform_api(&self, request: &PlatformApiRequest) -> Result<Value> {

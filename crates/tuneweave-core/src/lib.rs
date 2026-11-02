@@ -12,6 +12,8 @@ mod observability;
 mod platform;
 mod provider;
 mod registry;
+
+pub use model::SoundPowerQuery;
 mod resolver;
 mod scrobble;
 mod uni_playlist_document;
