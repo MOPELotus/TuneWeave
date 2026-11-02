@@ -202,6 +202,129 @@ fn neapi_error() -> TuneWeaveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn server(responses: Vec<(String, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (headers, body) in responses {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing NEAPI request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("NEAPI test accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() < 16 * 1024);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(bytes).unwrap());
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (origin, task)
+    }
+    fn configuration() -> Configuration {
+        Configuration {
+            version: 7,
+            encrypt_key: [7; 32],
+            decrypt_key: [7; 32],
+        }
+    }
+    fn refresh() -> (String, String) {
+        (
+            String::new(),
+            json!({"code":200,"data":{"version":7,"file":"","circleTime":60000}}).to_string(),
+        )
+    }
+    async fn cached_client(origin: &str, ttl: Duration) -> NeteaseClient {
+        let mut client = NeteaseClient::new(NeteaseConfig {
+            base_url: origin.into(),
+            xeapi_base_url: origin.into(),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        client.http = reqwest::Client::builder()
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .build()
+            .unwrap();
+        *client.neapi_config.lock().await = Some((configuration(), Instant::now(), ttl));
+        client
+    }
+    #[tokio::test]
+    async fn neapi_expired_cache_and_explicit_rejection_refresh_then_retry_once() {
+        let reply = encrypt(br#"{"code":200,"result":"ok"}"#, &configuration()).unwrap();
+        let (origin, task) = server(vec![
+            refresh(),
+            ("X-User-Status: 777\r\n".into(), String::new()),
+            refresh(),
+            (String::new(), reply.clone()),
+            (String::new(), reply),
+        ]);
+        let client = cached_client(&origin, Duration::ZERO).await;
+        for _ in 0..2 {
+            let result = client
+                .request_neapi("/api/search/get", json!({"s":"query","limit":1}))
+                .await
+                .unwrap();
+            assert_eq!(result.body["result"], "ok");
+        }
+        let requests = task.join().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(
+            requests[0].starts_with("GET /api/gorilla/algorithm/record?version=7&behavior=update ")
+        );
+        assert!(requests[1].starts_with("POST /neapi/search/get "));
+        assert!(requests[2].starts_with("GET /api/gorilla/algorithm/record?"));
+        assert!(requests[3].starts_with("POST /neapi/search/get "));
+        assert!(requests[4].starts_with("POST /neapi/search/get "));
+        assert!(!requests[1].contains("s=query"));
+    }
+    #[tokio::test]
+    async fn neapi_repeated_key_rejection_stops_after_one_retry() {
+        let (origin, task) = server(vec![
+            ("X-User-Status: 999\r\n".into(), String::new()),
+            refresh(),
+            ("X-User-Status: 777\r\n".into(), String::new()),
+        ]);
+        let client = cached_client(&origin, Duration::from_secs(60)).await;
+        assert!(
+            client
+                .request_neapi("/api/search/get", json!({"s":"query"}))
+                .await
+                .is_err()
+        );
+        assert_eq!(task.join().unwrap().len(), 3);
+    }
     #[tokio::test]
     #[ignore = "requires live NetEase access"]
     async fn live_neapi_configuration_and_search() {
