@@ -3,6 +3,7 @@ mod client;
 mod crypto;
 mod dto;
 mod identity;
+mod neapi;
 mod provider;
 mod scrobble;
 

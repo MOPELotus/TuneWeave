@@ -11,6 +11,9 @@ future ports can be audited precisely.
 - Additional reviewed commit: `a8c781fd64faab17fedfd46e0615a2609307f163`
   (`module/record_recent_song.js`, `module/record_recent_album.js`,
   `module/record_recent_playlist.js`; recent-history WeAPI endpoint/limit behavior).
+- Additional reviewed commit: `984cc021b8598cf94c22134f32a8426887fb2de7`
+  (CSR XEAPI and NEAPI wire/configuration format research; independently implemented
+  with bounded parsing and authenticated response validation).
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.

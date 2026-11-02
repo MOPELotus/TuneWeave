@@ -1,3 +1,5 @@
+#[path = "client/neapi.rs"]
+mod neapi_requests;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -124,6 +126,7 @@ pub struct NeteaseClient {
     web_client_id: String,
     real_ip: Option<Ipv4Addr>,
     xeapi_state: Arc<RwLock<XeapiState>>,
+    neapi_config: neapi_requests::ConfigurationCache,
     anti_cheat_v3_token: Arc<RwLock<Option<(String, Instant)>>>,
     base_upstream_host: &'static str,
     web_upstream_host: &'static str,
@@ -373,6 +376,7 @@ impl NeteaseClient {
             web_client_id,
             real_ip,
             xeapi_state: Arc::new(RwLock::new(XeapiState::default())),
+            neapi_config: Arc::new(tokio::sync::Mutex::new(None)),
             anti_cheat_v3_token: Arc::new(RwLock::new(None)),
             base_upstream_host,
             web_upstream_host,

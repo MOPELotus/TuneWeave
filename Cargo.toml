@@ -68,6 +68,7 @@ tuneweave-provider-netease = { path = "crates/tuneweave-provider-netease" }
 tuneweave-provider-qq = { path = "crates/tuneweave-provider-qq" }
 tuneweave-provider-soda = { path = "crates/tuneweave-provider-soda" }
 url = "2.5.8"
+zstd = { version = "0.14.3", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

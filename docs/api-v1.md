@@ -857,3 +857,9 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 历史读取先确认期号属于该榜单，再核对该期详情，固定榜单和期号读完全部物理页后提供统一窗口。未知期号返回 `ResourceNotFound`；上游退回当前期、身份或数量矛盾返回错误，不返回部分歌曲。显示名次可能跳号，`chart_rank` 保留上游名次，`chart_position` 表示从 0 开始的列表位置；`original_index`、`last_sort`、`last_original_index` 分别保留，不据此补造涨跌。
 
 期数和曲目读取均为公开来源，不接受账户或调用方凭据；每个上游响应限制 1 MiB，整个读取限制 45 秒。期数目录最多 100 个年份组、10000 个期号，歌曲最多 128 个物理页（每页 100 首）。完整读取和固定期号不代表上游提供不可变或原子快照，也不代表播放、下载权益。
+
+## 网易云 NEAPI 扩展传输
+
+`POST /v1/extensions/netease/api` 与 `/v1/extensions/netease/batch` 的 `protocol` 支持 `neapi`；其他传输方式保持原有语义。单请求示例为 `{"uri":"/api/search/get","protocol":"neapi","data":{"s":"周杰伦","type":1,"limit":2,"offset":0}}`，账户仍通过 `account` 或调用方凭据请求头选择。NEAPI 只接受不带查询串的 `/api/` 路径，业务参数放在 `data` 中。
+
+配置按需从官方接口取得，在当前 Provider 的内存中缓存并按官方期限更新，不写入临时目录或响应。请求与响应使用认证加密容器；配置和响应都限制字节数、解压大小及解析深度。官方当前省略的 Zstd 结束标记只在所有数据块完整时补齐，截断块仍返回错误。仅遇到明确的密钥版本拒绝状态时更新配置并重试一次，网络错误不会自动重发。源码中暴露的通用接口不代表调用账户具备相应业务权限。

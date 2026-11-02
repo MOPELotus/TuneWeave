@@ -4202,6 +4202,7 @@ impl MusicProvider for NeteaseProvider {
                 client.request_linuxapi(uri, request.data.clone()).await?
             }
             NeteaseApiProtocol::Xeapi => client.request_xeapi(uri, request.data.clone()).await?,
+            NeteaseApiProtocol::Neapi => client.request_neapi(uri, request.data.clone()).await?,
         };
         ensure_platform_api_success(&response.body)?;
         Ok(response.body)
@@ -4218,6 +4219,7 @@ impl MusicProvider for NeteaseProvider {
             NeteaseApiProtocol::Api => client.request_api("/api/batch", data).await?,
             NeteaseApiProtocol::Linuxapi => client.request_linuxapi("/api/batch", data).await?,
             NeteaseApiProtocol::Xeapi => client.request_xeapi("/api/batch", data).await?,
+            NeteaseApiProtocol::Neapi => client.request_neapi("/api/batch", data).await?,
         };
         ensure_platform_api_success(&response.body)?;
         Ok(response.body)
@@ -5310,6 +5312,7 @@ enum NeteaseApiProtocol {
     Api,
     Linuxapi,
     Xeapi,
+    Neapi,
 }
 
 impl NeteaseApiProtocol {
@@ -5320,13 +5323,14 @@ impl NeteaseApiProtocol {
             Some("api") => Ok(Self::Api),
             Some("linuxapi") => Ok(Self::Linuxapi),
             Some("xeapi") => Ok(Self::Xeapi),
+            Some("neapi") => Ok(Self::Neapi),
             Some(value) => Err(TuneWeaveError::invalid_request(format!(
                 "unsupported NetEase API protocol: {value}"
             ))
             .with_platform(Platform::Netease)
             .with_details(json!({
                 "protocol": value,
-                "supported": ["eapi", "weapi", "api", "linuxapi", "xeapi"]
+                "supported": ["eapi", "weapi", "api", "linuxapi", "xeapi", "neapi"]
             }))),
         }
     }
@@ -32051,7 +32055,7 @@ mod tests {
     #[ignore = "requires live NetEase access"]
     async fn live_platform_api_supports_every_reference_protocol() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
-        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi"] {
+        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi", "neapi"] {
             let mut request = PlatformApiRequest::new(
                 "/api/search/get",
                 json!({ "s": "TuneWeave", "type": 1, "limit": 1, "offset": 0 }),
@@ -32157,7 +32161,7 @@ mod tests {
     #[ignore = "requires live NetEase access"]
     async fn live_platform_batch_supports_every_reference_protocol() {
         let provider = NeteaseProvider::new(NeteaseConfig::default()).expect("build provider");
-        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi"] {
+        for protocol in ["eapi", "weapi", "api", "linuxapi", "xeapi", "neapi"] {
             let mut request = PlatformBatchRequest::new(BTreeMap::from([(
                 "/api/v2/banner/get".to_owned(),
                 json!({ "clientType": "pc" }),
