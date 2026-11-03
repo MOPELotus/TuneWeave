@@ -61,11 +61,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if origin and origin != "http://" + self.headers.get("Host", ""):
             self.reply(403, b'{"error":"foreign_origin"}')
             return
-        if self.command == "GET" and path.path in ["/", "/app.js", "/style.css", "/qrcode.js", "/info"]:
+        if self.command == "GET" and path.path in ["/", "/app.js", "/flow.js", "/style.css", "/qrcode.js", "/info"]:
             if path.path == "/info":
                 self.reply(200, json.dumps({"version": "1.0.0-beta.2", "isolated": True}).encode())
                 return
-            name = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/qrcode.js": "node_modules/qrcode-generator/dist/qrcode.js"}[path.path]
+            name = {"/": "index.html", "/app.js": "app.js", "/flow.js": "flow.js", "/style.css": "style.css", "/qrcode.js": "node_modules/qrcode-generator/dist/qrcode.js"}[path.path]
             p = ROOT / name
             kind = "text/html" if p.suffix == ".html" else "text/css" if p.suffix == ".css" else "application/javascript"
             self.reply(200, p.read_bytes(), kind + "; charset=utf-8")
