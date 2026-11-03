@@ -78,6 +78,9 @@ const SPACE_PLAYLIST_WEB_LOCATION: &str = "333.999";
 const SEASON_ARCHIVE_PAGE_SIZE: u32 = 30;
 const FAVORITE_MEDIA_PAGE_SIZE: u32 = 20;
 const VIDEO_SEARCH_PAGE_SIZE: u32 = 20;
+const VIDEO_SEARCH_MAX_ATTEMPTS: u8 = 3;
+const VIDEO_SEARCH_RETRY_BUDGET: Duration = Duration::from_secs(20);
+const VIDEO_SEARCH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(6);
 const WEB_DEVICE_B_NUT: &str = "100";
 pub(crate) const WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PASSPORT_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -1088,7 +1091,7 @@ struct VideoSearchData {
     num_pages: u32,
     seid: FlexibleText,
     #[serde(default)]
-    result: Vec<VideoSearchItem>,
+    result: Vec<Value>,
 }
 
 #[derive(Deserialize)]
@@ -3311,12 +3314,62 @@ impl BilibiliClient {
         retry_count: u8,
         fallback: bool,
     ) -> Result<BilibiliVideoSearchPage> {
+        tokio::time::timeout(VIDEO_SEARCH_RETRY_BUDGET, async {
+            for attempt in 0..VIDEO_SEARCH_MAX_ATTEMPTS {
+                let outcome = self
+                    .video_search_response_once(
+                        operation,
+                        endpoint_template,
+                        &endpoint,
+                        cookie_header,
+                        page,
+                        retry_count.saturating_add(attempt),
+                        fallback,
+                    )
+                    .await;
+                let retry = outcome.as_ref().is_err_and(|error| {
+                    error.retryable
+                        && matches!(
+                            error.code,
+                            ErrorCode::UpstreamError | ErrorCode::UpstreamTimeout
+                        )
+                });
+                if !retry || attempt + 1 == VIDEO_SEARCH_MAX_ATTEMPTS {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
+            }
+            unreachable!("search retry loop always returns its last attempt")
+        })
+        .await
+        .map_err(|_| {
+            TuneWeaveError::new(
+                ErrorCode::UpstreamTimeout,
+                "Bilibili video search retry budget expired",
+            )
+            .with_platform(Platform::Bilibili)
+            .retryable(true)
+        })?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn video_search_response_once(
+        &self,
+        operation: &'static str,
+        endpoint_template: &'static str,
+        endpoint: &str,
+        cookie_header: Option<&str>,
+        page: u32,
+        retry_count: u8,
+        fallback: bool,
+    ) -> Result<BilibiliVideoSearchPage> {
         let started = Instant::now();
         let mut http_status = None;
         let outcome = async {
             let mut request = self
                 .http
                 .get(endpoint)
+                .timeout(VIDEO_SEARCH_ATTEMPT_TIMEOUT)
                 .header(REFERER, VIDEO_SEARCH_REFERER);
             if let Some(cookie_header) = cookie_header {
                 request = request.header(COOKIE, cookie_header);
@@ -4289,11 +4342,28 @@ fn parse_video_search_response(
             bilibili_upstream_error("Bilibili video search returned an invalid total")
         })?;
     let mut videos = Vec::with_capacity(data.result.len());
-    for item in data.result {
-        if is_known_non_video_search_item_type(&item.r#type) {
+    for raw_item in data.result {
+        let object = raw_item.as_object().ok_or_else(|| {
+            bilibili_upstream_error("Bilibili video search returned an invalid item")
+        })?;
+        let item_type = match object.get("type") {
+            None => "",
+            Some(Value::String(value)) => value.as_str(),
+            Some(_) => {
+                return Err(bilibili_upstream_error(
+                    "Bilibili video search returned an invalid item type",
+                ));
+            }
+        };
+        // A video search page can also contain unrelated cards with their own schemas.
+        // Classify before decoding video fields so one card cannot reject valid videos.
+        if !is_supported_video_search_item_type(item_type) {
             continue;
         }
-        let result_type = parse_video_search_result_type(&item.r#type)?;
+        let result_type = parse_video_search_result_type(item_type)?;
+        let item: VideoSearchItem = serde_json::from_value(raw_item).map_err(|_| {
+            bilibili_upstream_error("Bilibili video search returned an invalid video item")
+        })?;
         if matches!(
             result_type,
             BilibiliVideoSearchResultType::SponsoredVideo(_)
@@ -6203,8 +6273,8 @@ fn map_video_search_item(item: VideoSearchItem) -> Result<BilibiliSearchVideo> {
     })
 }
 
-fn is_known_non_video_search_item_type(value: &str) -> bool {
-    matches!(value, "ketang")
+fn is_supported_video_search_item_type(value: &str) -> bool {
+    matches!(value, "" | "video" | "video_ad") || value.starts_with("video_ad_")
 }
 
 fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResultType> {
@@ -6219,6 +6289,9 @@ fn parse_video_search_result_type(value: &str) -> Result<BilibiliVideoSearchResu
                 .and_then(|code| code.parse::<u32>().ok())
                 .ok_or_else(|| {
                     bilibili_upstream_error("Bilibili video search returned an unknown item type")
+                        .with_details(
+                            json!({"item_type": value.chars().take(128).collect::<String>()}),
+                        )
                 })?;
             Ok(BilibiliVideoSearchResultType::SponsoredVideo(Some(code)))
         }
@@ -8306,7 +8379,7 @@ mod tests {
     }
 
     #[test]
-    fn video_search_skips_known_non_video_and_unnamed_sponsored_cards_without_hiding_drift() {
+    fn video_search_skips_unrelated_cards_but_still_validates_video_items() {
         let item = |kind: &str, aid: u64, title: &str| {
             json!({
                 "type": kind,
@@ -8350,9 +8423,94 @@ mod tests {
             .expect_err("unnamed organic result remains invalid");
         assert_eq!(error.code, ErrorCode::UpstreamError);
 
-        let error = parse_video_search_response(&response("activity", "unknown"), 1)
-            .expect_err("unknown non-video result remains a protocol drift");
-        assert_eq!(error.code, ErrorCode::UpstreamError);
+        let page = parse_video_search_response(&response("activity", "unknown"), 1)
+            .expect("unrelated cards do not invalidate a video page");
+        assert_eq!(page.videos.len(), 1);
+        assert_eq!(page.videos[0].title, "normal");
+
+        let mut mixed: Value = serde_json::from_slice(&response("video", "second")).unwrap();
+        mixed["data"]["result"][1] = json!({"type": "future_card", "card": {"text": "unrelated"}});
+        let page = parse_video_search_response(&serde_json::to_vec(&mixed).unwrap(), 1)
+            .expect("unknown card does not need video identity fields");
+        assert_eq!(page.videos.len(), 1);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page_count, 1);
+
+        for malformed in [
+            json!({"type": "video", "title": "missing identity"}),
+            json!({"type": "video_ad_x"}),
+            json!({"type": 42}),
+            Value::Null,
+        ] {
+            mixed["data"]["result"][1] = malformed;
+            let error = parse_video_search_response(&serde_json::to_vec(&mixed).unwrap(), 1)
+                .expect_err("malformed video and envelope data remain errors");
+            assert_eq!(error.code, ErrorCode::UpstreamError);
+        }
+    }
+
+    #[tokio::test]
+    async fn video_search_retries_temporary_failures_but_not_rate_limits_or_bad_data() {
+        let success = json!({"code": 0, "message": "0", "data": {
+            "seid": "1", "page": 1, "pagesize": 20, "numResults": 2, "numPages": 1,
+            "result": [{"type": "future_card"}, {"type": "video", "aid": 1,
+                "bvid": "BV1xx411c7mD", "title": "normal", "author": "author", "mid": 1,
+                "pic": "//i0.hdslb.com/bfs/archive/cover.jpg", "duration": "0:01"}]
+        }})
+        .to_string();
+        for (responses, expected, expected_calls) in [
+            (vec![(503, "{}".to_owned()), (200, success)], None, 2),
+            (
+                vec![(503, "{}".to_owned()); 3],
+                Some(ErrorCode::UpstreamError),
+                3,
+            ),
+            (
+                vec![(429, "{}".to_owned())],
+                Some(ErrorCode::RateLimited),
+                1,
+            ),
+            (
+                vec![(200, "not json".to_owned())],
+                Some(ErrorCode::UpstreamError),
+                1,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let mut calls = 0;
+                for (status, body) in responses {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 8192];
+                    assert!(socket.read(&mut request).unwrap() > 0);
+                    write!(socket, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    calls += 1;
+                }
+                calls
+            });
+            let mut client = BilibiliClient::new(&BilibiliConfig::default()).unwrap();
+            client.http = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = client
+                .video_search_response(
+                    "video_search",
+                    "/search",
+                    format!("http://{address}/search"),
+                    None,
+                    1,
+                    0,
+                    false,
+                )
+                .await;
+            if let Some(code) = expected {
+                assert_eq!(result.unwrap_err().code, code);
+            } else {
+                let page = result.unwrap();
+                assert_eq!(page.videos.len(), 1);
+                assert_eq!(page.videos[0].title, "normal");
+            }
+            assert_eq!(server.join().unwrap(), expected_calls);
+        }
     }
 
     #[test]
