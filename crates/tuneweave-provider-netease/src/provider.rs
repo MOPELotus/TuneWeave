@@ -573,8 +573,9 @@ impl NeteaseProvider {
                     }
                     let identity =
                         serde_json::from_str::<StoredAnonymousIdentity>(credential.secret())
-                            .map_err(|_| {
+                            .map_err(|error| {
                                 anonymous_identity_error("stored credential is invalid JSON")
+                                    .with_source(&error)
                             })?;
                     validate_anonymous_identity(&identity)?;
                     *self

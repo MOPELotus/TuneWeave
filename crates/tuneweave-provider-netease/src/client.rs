@@ -802,9 +802,10 @@ impl NeteaseClient {
             serde_json::from_slice(&bytes).map_err(|error| {
                 TuneWeaveError::new(
                     ErrorCode::UpstreamError,
-                    format!("NetEase voice lyric asset returned invalid JSON: {error}"),
+                    "NetEase voice lyric asset returned invalid JSON",
                 )
                 .with_platform(Platform::Netease)
+                .with_json_source(&error)
             })
         }
         .await;
@@ -1778,12 +1779,10 @@ async fn parse_response_with_encryption(
         })?;
     }
     let body = serde_json::from_slice(&bytes).map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            format!("NetEase returned invalid JSON: {error}"),
-        )
-        .with_platform(Platform::Netease)
-        .with_details(json!({ "response_bytes": bytes.len() }))
+        TuneWeaveError::new(ErrorCode::UpstreamError, "NetEase returned invalid JSON")
+            .with_platform(Platform::Netease)
+            .with_json_source(&error)
+            .with_details(json!({ "response_bytes": bytes.len() }))
     })?;
     Ok(NeteaseResponse {
         status,
@@ -2357,6 +2356,7 @@ fn request_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, message)
         .with_platform(Platform::Netease)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn configured_upstream_host(value: &str, official_host: &'static str) -> &'static str {
