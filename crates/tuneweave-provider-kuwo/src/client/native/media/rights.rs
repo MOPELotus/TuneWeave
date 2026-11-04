@@ -221,7 +221,10 @@ fn parse(
     choices: &[Spec],
     action: Action,
 ) -> Result<Decision> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.result != "ok"
         || body.errorcode.as_deref().is_some_and(|v| v != "0")
         || body.uid.as_deref().is_some_and(|v| v != input.user_id())

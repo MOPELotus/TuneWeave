@@ -905,7 +905,10 @@ fn parse_web_login_ack(bytes: &[u8]) -> Result<()> {
         status: i64,
         msg: String,
     }
-    let ack: Ack = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let ack: Ack = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if ack.status == 200 && ack.msg == "成功" {
         Ok(())
     } else {
@@ -922,7 +925,10 @@ fn parse_web_session_ack(bytes: &[u8]) -> Result<()> {
     struct Ack {
         status: i64,
     }
-    let ack: Ack = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let ack: Ack = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if ack.status == 200 {
         Ok(())
     } else {
@@ -950,7 +956,10 @@ fn parse_pc_sms_send_ack(bytes: &[u8], fallback_tm: &str) -> Result<String> {
         #[serde(default)]
         tm: Option<serde_json::Value>,
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.meta.code != 200 || envelope.data.status != 200 {
         return Err(TuneWeaveError::new(
             ErrorCode::AuthenticationRequired,
@@ -994,7 +1003,10 @@ fn parse_pc_sms_login_ack(bytes: &[u8]) -> Result<KuwoWebFormSession> {
         #[serde(default)]
         sid: Option<String>,
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.meta.code != 200 || envelope.data.result != "succ" {
         return Err(TuneWeaveError::new(
             ErrorCode::AuthenticationRequired,
@@ -1109,7 +1121,10 @@ fn parse_captcha(bytes: &[u8]) -> Result<Captcha> {
         img: String,
         token: String,
     }
-    let value: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let value: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if value.code != 200 {
         return Err(invalid().with_details(json!({"platform_code":value.code})));
     }

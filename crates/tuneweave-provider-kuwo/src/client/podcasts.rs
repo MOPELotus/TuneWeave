@@ -82,7 +82,10 @@ struct Detail {
 }
 
 fn parse(bytes: &[u8], requested: &str) -> Result<Podcast> {
-    let raw: Detail = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let raw: Detail = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if raw.albumid.id()? != requested || raw.isstar.value()? != 1 || raw.content_type.value()? != 0
     {
         return Err(invalid());

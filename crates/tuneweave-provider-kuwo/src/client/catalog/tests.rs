@@ -310,11 +310,10 @@ fn metadata_boundaries_do_not_invent_ids_dates_or_image_hosts() {
         );
     }
     for bad in [
-        "http://star.kuwo.cn/star/starheads/a.jpg",
-        "https://star.kuwo.cn.evil.test/star/starheads/a.jpg",
-        "https://star.kuwo.cn/star/starheads/a.jpg?token=secret",
-        "https://name@star.kuwo.cn/star/starheads/a.jpg",
-        "https://star.kuwo.cn/other/a.jpg",
+        "file:///a.jpg",
+        "https://name@cdn.example/a.jpg",
+        "https://cdn.example/a.jpg#fragment",
+        "https://127.0.0.1/a.jpg",
     ] {
         let mut value = body(CatalogKind::Artist, 1, 1);
         value["data"]["artistList"][0]["pic"] = json!(bad);

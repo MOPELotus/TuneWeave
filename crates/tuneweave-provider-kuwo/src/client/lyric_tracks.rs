@@ -273,7 +273,10 @@ fn flags(a: Option<u8>, b: Option<u8>) -> Result<Option<bool>> {
     })
 }
 fn parse_metadata(bytes: &[u8], id: &str) -> Result<Support> {
-    let metadata: Metadata = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let metadata: Metadata = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if metadata.code.as_i64() != Some(200) || metadata.data.id.as_text().as_deref() != Some(id) {
         return Err(invalid());
     }

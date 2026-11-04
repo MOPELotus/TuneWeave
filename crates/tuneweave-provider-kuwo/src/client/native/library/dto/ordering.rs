@@ -29,7 +29,10 @@ pub(in crate::client::native) fn parse(
     // validation. Excluded system rows still participate in the comparison below.
     super::parse(bytes, input, Section::Owned)?;
     all_owned_ids(bytes)?;
-    let directory: Directory = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let directory: Directory = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let mut positions = BTreeMap::new();
     let mut stable_rows = BTreeMap::new();
     for mut row in directory.plist {

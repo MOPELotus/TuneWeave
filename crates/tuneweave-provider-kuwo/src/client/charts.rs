@@ -112,7 +112,10 @@ struct Envelope {
     data: Option<serde_json::Value>,
 }
 fn data(bytes: &[u8], tracks: bool) -> Result<serde_json::Value> {
-    let value: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let value: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if tracks && value.code == -1 && value.data.is_none() {
         return Err(
             TuneWeaveError::new(ErrorCode::ResourceNotFound, "Kuwo chart was not found")
@@ -145,7 +148,10 @@ struct Entry {
     publication: Option<String>,
 }
 fn parse_catalogue(bytes: &[u8], view: ChartCatalogView) -> Result<ChartCatalog> {
-    let rows: Vec<Group> = serde_json::from_value(data(bytes, false)?).map_err(|_| invalid())?;
+    let rows: Vec<Group> = serde_json::from_value(data(bytes, false)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if rows.len() > 64 {
         return Err(invalid());
     }
@@ -274,7 +280,10 @@ struct Song {
     is_new: Option<Unsigned>,
 }
 fn parse_tracks(bytes: &[u8], id: &str, page: u32, tags: bool) -> Result<ChartPage> {
-    let body: Songs = serde_json::from_value(data(bytes, true)?).map_err(|_| invalid())?;
+    let body: Songs = serde_json::from_value(data(bytes, true)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = body.num.value()?;
     if page == 0 || total > u64::from(u32::MAX) {
         return Err(invalid());

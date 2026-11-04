@@ -76,7 +76,10 @@ fn app_uid<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String
     }
 }
 fn parse_registration(bytes: &[u8]) -> Result<String> {
-    let body: RegistrationEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: RegistrationEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.code != 200 || !body.success {
         return Err(invalid());
     }

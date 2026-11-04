@@ -269,7 +269,10 @@ struct HifiAlbum {
 }
 
 fn parse(bytes: &[u8], sort: Sort, page: u32) -> Result<HifiPage> {
-    let body: HifiEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid_hifi())?;
+    let body: HifiEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid_hifi();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.code != 200 || !body.success {
         return Err(invalid_hifi());
     }

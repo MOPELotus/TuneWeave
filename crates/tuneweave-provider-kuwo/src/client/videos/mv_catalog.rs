@@ -208,7 +208,10 @@ struct GroupData {
 }
 
 fn parse_group(bytes: &[u8], id: &str, page: u32) -> Result<GroupPage> {
-    let body: GroupEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: GroupEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.code != 200 {
         return Err(invalid().with_details(json!({"upstream_code": body.code})));
     }

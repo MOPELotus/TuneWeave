@@ -131,7 +131,10 @@ impl KuwoClient {
                 Some(dispatched),
             )
             .await?;
-        let ack: SaveAck = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        let ack: SaveAck = serde_json::from_slice(&bytes).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         if !ack.opret.eq_ignore_ascii_case("ok") {
             return Err(invalid());
         }
@@ -199,7 +202,10 @@ struct AuthorFields {
     name: Option<String>,
 }
 fn parse_author(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<Author> {
-    let envelope: AuthorEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: AuthorEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status.as_deref() != Some("200") || envelope.info.len() != 1 {
         return Err(invalid());
     }
@@ -230,7 +236,10 @@ struct KeywordField {
     issensitive: bool,
 }
 fn parse_keyword(bytes: &[u8], id: &str, fields: &[(&str, &str)]) -> Result<()> {
-    let ack: KeywordAck = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let ack: KeywordAck = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if !ack.result.eq_ignore_ascii_case("ok")
         || ack.playlistid.as_deref() != Some(id)
         || ack.list.len() != fields.len()

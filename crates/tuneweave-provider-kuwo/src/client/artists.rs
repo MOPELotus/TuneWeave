@@ -200,7 +200,10 @@ struct Envelope {
     data: Option<serde_json::Value>,
 }
 fn data(bytes: &[u8], detail: bool) -> Result<serde_json::Value> {
-    let response: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if detail && response.code == -1 && response.data.is_none() {
         return Err(
             TuneWeaveError::new(ErrorCode::ResourceNotFound, "Kuwo artist was not found")
@@ -236,7 +239,10 @@ struct Detail {
     language: Option<String>,
 }
 fn parse_artist(bytes: &[u8], id: &str) -> Result<Artist> {
-    let detail: Detail = serde_json::from_value(data(bytes, true)?).map_err(|_| invalid())?;
+    let detail: Detail = serde_json::from_value(data(bytes, true)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let SearchItem::Artist(mut artist) = catalog::map_artist(detail.artist)? else {
         unreachable!("artist mapper")
     };
@@ -281,7 +287,10 @@ struct Songs {
     list: Vec<KuwoTrackDetail>,
 }
 fn parse_tracks(bytes: &[u8], artist: &Artist, page: u32) -> Result<ArtistPage<Track>> {
-    let body: Songs = serde_json::from_value(data(bytes, false)?).map_err(|_| invalid())?;
+    let body: Songs = serde_json::from_value(data(bytes, false)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = body.total.value()?;
     check_count(total, page, body.list.len())?;
     let mut items = Vec::with_capacity(body.list.len());
@@ -388,7 +397,10 @@ struct Albums {
     items: Vec<AlbumDto>,
 }
 fn parse_albums(bytes: &[u8], artist: &Artist, page: u32) -> Result<ArtistPage<Album>> {
-    let body: Albums = serde_json::from_value(data(bytes, false)?).map_err(|_| invalid())?;
+    let body: Albums = serde_json::from_value(data(bytes, false)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = body.total.value()?;
     check_count(total, page, body.items.len())?;
     let mut items = Vec::with_capacity(body.items.len());
@@ -427,7 +439,10 @@ pub(super) struct Mv {
     pic: Option<String>,
 }
 fn parse_mvs(bytes: &[u8], artist: &Artist, page: u32) -> Result<ArtistPage<Video>> {
-    let body: Mvs = serde_json::from_value(data(bytes, false)?).map_err(|_| invalid())?;
+    let body: Mvs = serde_json::from_value(data(bytes, false)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = body.total.value()?;
     check_count(total, page, body.mvlist.len())?;
     let items = body

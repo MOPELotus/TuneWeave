@@ -159,7 +159,7 @@ fn singer_list_explicit_empty_differs_from_missing_null_and_short_pages() {
 fn singer_list_absent_metadata_remains_unknown() {
     let result = parse(
         &serde_json::to_vec(&json!({"code":200,"data":{"total":1,"artistList":[
-            {"id":"42","name":"Minimal","pic":"https://untrusted.example/a.jpg"}
+            {"id":"42","name":"Minimal","pic":"file:///a.jpg"}
         ]}}))
         .unwrap(),
         1,

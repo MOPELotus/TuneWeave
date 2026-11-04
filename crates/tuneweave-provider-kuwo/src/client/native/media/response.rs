@@ -113,7 +113,10 @@ fn parse_inner_impl(
     spec: Spec,
     sing_along: bool,
 ) -> Result<Outcome> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body
         .login_sid
         .as_deref()
@@ -156,7 +159,10 @@ fn parse_inner_impl(
         struct SidecarParent {
             bc_data: Media,
         }
-        let extra: SidecarEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        let extra: SidecarEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         let companion = extra.data.bc_data;
         if companion.quality.as_deref() != Some(BCMS.tag) {
             return Err(invalid());

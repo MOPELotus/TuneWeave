@@ -402,7 +402,10 @@ struct Ack {
     pid: Option<String>,
 }
 fn parse_ack(bytes: &[u8], input: &KuwoNativeSessionInput, create: bool) -> Result<Ack> {
-    let ack: Ack = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let ack: Ack = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if ack.errcode.as_deref() != Some("0")
         || ack.result.as_deref().is_some_and(|v| v != "ok")
         || ack.uid.as_deref().is_some_and(|v| v != input.user_id())

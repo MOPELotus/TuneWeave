@@ -114,7 +114,10 @@ pub(in crate::client::native) fn parse_metadata(
     input: &KuwoNativeSessionInput,
     id: &str,
 ) -> Result<Metadata> {
-    let response: MetadataResponse = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: MetadataResponse = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.code.as_deref().is_some_and(|v| v != "0")
         || response.errcode.as_deref().is_some_and(|v| v != "0")
         || response.result.as_deref().is_some_and(|v| v != "ok")

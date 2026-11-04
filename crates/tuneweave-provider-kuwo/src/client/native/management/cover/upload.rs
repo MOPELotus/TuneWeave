@@ -101,7 +101,10 @@ struct Pictures {
     thumbnail: Option<String>,
 }
 fn parse(bytes: &[u8], input: &KuwoNativeSessionInput, key: &[u8; 8]) -> Result<Uploaded> {
-    let response: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.status.as_deref() != Some("200") {
         return Err(invalid());
     }
@@ -116,7 +119,10 @@ fn parse(bytes: &[u8], input: &KuwoNativeSessionInput, key: &[u8; 8]) -> Result<
             thumbnail: None,
         }
     } else {
-        serde_json::from_slice::<Pictures>(&plain).map_err(|_| invalid())?
+        serde_json::from_slice::<Pictures>(&plain).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?
     };
     Ok(Uploaded {
         url: library::dto::picture(Some(picture.url), input)?.ok_or_else(invalid)?,

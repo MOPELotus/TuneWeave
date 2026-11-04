@@ -150,7 +150,10 @@ enum Outcome {
     Denied(i64),
 }
 fn parse(bytes: &[u8]) -> Result<Outcome> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     match body.code {
         200 => Ok(Outcome::Allowed(validate_url(
             &body.data.ok_or_else(invalid)?.url,
@@ -162,54 +165,14 @@ fn parse(bytes: &[u8]) -> Result<Outcome> {
 }
 
 fn validate_url(value: &str) -> Result<String> {
-    if value.len() > 4096
-        || !value.is_ascii()
-        || value
-            .bytes()
-            .any(|c| c.is_ascii_whitespace() || c.is_ascii_control() || b"%\\?#@".contains(&c))
-    {
-        return Err(invalid());
-    }
-    let url = Url::parse(value).map_err(|_| invalid())?;
-    if url.scheme() != "https"
-        || url.host_str() != Some("kw-bj.kuwo.cn")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.as_str() != value
-    {
-        return Err(invalid());
-    }
-    let parts: Vec<_> = url
-        .path()
-        .strip_prefix('/')
-        .ok_or_else(invalid)?
-        .split('/')
-        .collect();
-    if parts.len() != 8
-        || !hex(parts[0], 32)
-        || !hex(parts[1], 8)
-        || !matches!(parts[2], "ll" | "rc")
-        || parts[3] != "resource"
-        || !parts[4].strip_prefix('m').is_some_and(|v| decimal(v, 2))
-        || !decimal(parts[5], 2)
-        || !decimal(parts[6], 2)
-        || !parts[7]
-            .strip_suffix(".mp4")
-            .is_some_and(|v| decimal(v, 32))
-    {
+    let url = tuneweave_core::validate_upstream_media_url(value)
+        .map_err(|error| invalid().with_source(&error))?;
+    if !url.path().to_ascii_lowercase().ends_with(".mp4") {
         return Err(invalid());
     }
     Ok(value.to_owned())
 }
-fn hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|c| c.is_ascii_hexdigit())
-}
-fn decimal(value: &str, limit: usize) -> bool {
-    !value.is_empty() && value.len() <= limit && value.bytes().all(|c| c.is_ascii_digit())
-}
+
 fn invalid() -> TuneWeaveError {
     kuwo_upstream_error("Kuwo MV playback returned an invalid or untrusted response")
 }

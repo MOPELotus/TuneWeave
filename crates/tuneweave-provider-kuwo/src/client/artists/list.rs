@@ -201,7 +201,10 @@ struct Singer {
 }
 
 fn parse(bytes: &[u8], page: u32) -> Result<ArtistPage<Artist>> {
-    let body: SingerList = serde_json::from_value(data(bytes, false)?).map_err(|_| invalid())?;
+    let body: SingerList = serde_json::from_value(data(bytes, false)?).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = body.total.value()?;
     let start = u64::from(page - 1) * u64::from(LIST_PAGE_SIZE);
     if body.artists.len() as u64 != total.saturating_sub(start).min(u64::from(LIST_PAGE_SIZE)) {

@@ -354,7 +354,10 @@ fn read_state(path: &Path) -> Result<Option<State>> {
     if data.len() as u64 > MAX_STATE_BYTES {
         return Err(state_error());
     }
-    let state: State = serde_json::from_slice(&data).map_err(|_| state_error())?;
+    let state: State = serde_json::from_slice(&data).map_err(|json_cause| {
+        let mapped = state_error();
+        mapped.with_json_source(&json_cause)
+    })?;
     state.validate()?;
     Ok(Some(state))
 }

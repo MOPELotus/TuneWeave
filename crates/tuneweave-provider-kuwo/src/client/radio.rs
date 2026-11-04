@@ -276,7 +276,10 @@ impl KuwoClient {
             }
             let bytes =
                 read_bounded_response_with_limit(response, "Kuwo FM", RESPONSE_LIMIT).await?;
-            let body: Envelope<T> = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let body: Envelope<T> = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             if body.code != 200 || body.success == Some(false) {
                 return Err(invalid());
             }

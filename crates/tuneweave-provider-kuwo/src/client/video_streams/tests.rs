@@ -18,30 +18,23 @@ fn request() -> VideoStreamRequest {
 }
 
 #[test]
-fn mv_urls_are_confined_to_the_observed_https_host_and_resource_paths() {
+fn mv_urls_accept_producer_cdn_changes_without_guessing_a_fixed_path_layout() {
     assert_eq!(validate_url(URL).unwrap(), URL);
-    assert!(validate_url(&URL.replace("/ll/", "/rc/").replace("/m3/", "/m2/")).is_ok());
-    for bad in [
-        URL.replace("https:", "http:"),
-        URL.replace("kw-bj.kuwo.cn", "kw-bj.kuwo.cn.evil.test"),
-        URL.replace("kw-bj.kuwo.cn", "other.kuwo.cn"),
-        URL.replace("kw-bj.kuwo.cn", "user@kw-bj.kuwo.cn"),
-        URL.replace("kw-bj.kuwo.cn", "kw-bj.kuwo.cn:444"),
-        URL.replace("/ll/", "/unknown/"),
-        URL.replace("/resource/", "/private/"),
-        URL.replace("/m3/", "/m../"),
-        URL.replace("/24/", "/%32%34/"),
-        URL.replace("/24/", "/99/../24/"),
-        URL.replace(".mp4", ".mp3"),
-        URL.replace(".mp4", ".mp4/extra"),
-        URL.replace("/54/", "//"),
-        format!("{URL}?token=never-export"),
-        format!("{URL}#fragment"),
-        format!(" {URL}"),
-        URL.replace("/ll/", "\\ll/"),
-        URL.replace("1234abcd", "short"),
+    for valid in [
+        "https://new-cdn.example:8443/new/video.mp4?signature=opaque",
+        "http://cdn.example/movie.mp4",
     ] {
-        assert!(validate_url(&bad).is_err(), "unexpected URL acceptance");
+        assert!(validate_url(valid).is_ok());
+    }
+    for bad in [
+        "https://user:secret@cdn.example/a.mp4",
+        "file:///video.mp4",
+        "https://cdn.example/a.mp4#fragment",
+        "https://127.0.0.1/a.mp4",
+        "https://cdn.example/a.mp3",
+        " https://cdn.example/a.mp4",
+    ] {
+        assert!(validate_url(bad).is_err());
     }
 }
 
@@ -306,7 +299,7 @@ async fn endpoint_denials_are_explicit_but_transport_and_untrusted_urls_remain_e
         );
         requests(&mut fixture, 3).await;
     }
-    for bad in [response(429,"application/json","Retry-After: 2\r\n",b"{}"),response(302,"application/json","Location: https://example.test/\r\n",b"{}"),response(200,"text/html","",b"{}"),json_response(&json!({"code":200,"data":{"url":"https://example.test/never-export.mp4"}})),b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2097153\r\nConnection: close\r\n\r\n".to_vec()] {
+    for bad in [response(429,"application/json","Retry-After: 2\r\n",b"{}"),response(302,"application/json","Location: https://example.test/\r\n",b"{}"),response(200,"text/html","",b"{}"),json_response(&json!({"code":200,"data":{"url":"file:///never-export.mp4"}})),b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2097153\r\nConnection: close\r\n\r\n".to_vec()] {
         let mut fixture=setup(vec![home(),json_response(&metadata(215252,json!(0))),bad]).await;
         let error=fixture.provider.video_stream("215252",&request()).await.unwrap_err();assert!(!format!("{error:?}").contains("never-export"));requests(&mut fixture,3).await;
     }

@@ -125,7 +125,10 @@ struct Song {
 }
 
 fn parse(bytes: &[u8], requested: &str) -> Result<AlbumDetail> {
-    let raw: Detail = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let raw: Detail = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let id = raw.id.id()?;
     let total = raw.songnum.value()?;
     if id != requested

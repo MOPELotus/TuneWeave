@@ -65,7 +65,10 @@ struct Detail {
 }
 
 fn parse(bytes: &[u8], id: &str) -> Result<VideoDetail> {
-    let root: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let root: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if root.code == -1 && root.data.is_none() {
         return Err(missing());
     }

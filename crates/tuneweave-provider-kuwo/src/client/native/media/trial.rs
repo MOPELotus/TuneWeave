@@ -76,7 +76,10 @@ fn denied() -> Outcome {
     }
 }
 fn parse(bytes: &[u8], input: &KuwoNativeSessionInput, id: &str) -> Result<Outcome> {
-    let body: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     // 407 is the native audition service's location restriction. Unknown
     // business failures are not evidence of an expired account session.
     if body.code == 407 {

@@ -61,7 +61,10 @@ pub(super) async fn read(client: &KuwoClient) -> Result<Vec<Artist>> {
 
 fn parse(bytes: &[u8]) -> Result<Vec<Artist>> {
     let invalid = || kuwo_upstream_error("Kuwo anchor catalogue returned invalid metadata");
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != 200 {
         return Err(invalid());
     }

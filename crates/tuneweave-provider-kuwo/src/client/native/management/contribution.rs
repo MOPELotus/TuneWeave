@@ -413,7 +413,10 @@ struct SubmissionAck {
     result: String,
 }
 fn parse_submission_ack(bytes: &[u8]) -> Result<()> {
-    let ack: SubmissionAck = serde_json::from_slice(bytes).map_err(|_| invalid_ack())?;
+    let ack: SubmissionAck = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid_ack();
+        mapped.with_json_source(&json_cause)
+    })?;
     if !ack.result.eq_ignore_ascii_case("success") {
         return Err(invalid_ack());
     }

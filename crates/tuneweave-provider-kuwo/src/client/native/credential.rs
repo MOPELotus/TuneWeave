@@ -86,8 +86,10 @@ impl NativeCredential {
         {
             return Err(invalid_credential());
         }
-        let value: Self =
-            serde_json::from_str(caller.secret()).map_err(|_| invalid_credential())?;
+        let value: Self = serde_json::from_str(caller.secret()).map_err(|json_cause| {
+            let mapped = invalid_credential();
+            mapped.with_json_source(&json_cause)
+        })?;
         value.input()?;
         Ok(value)
     }

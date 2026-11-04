@@ -119,7 +119,10 @@ fn reject<T>(_name: &'static str) -> Result<T> {
 fn parse_inner(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<UserProfile> {
     let body: Envelope = stage(
         "envelope",
-        serde_json::from_slice(bytes).map_err(|_| invalid()),
+        serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        }),
     )?;
     if body.status.as_deref() != Some("200") {
         // Profile business codes are not proof that the native session expired.

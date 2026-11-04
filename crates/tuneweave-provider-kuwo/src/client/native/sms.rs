@@ -294,7 +294,10 @@ fn deserialize_tm<'de, D: serde::Deserializer<'de>>(
     Ok(Some(value))
 }
 fn parse_send(bytes: &[u8]) -> Result<String> {
-    let body: SendBody = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: SendBody = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.status.as_deref() != Some("200")
         || body.ret.as_deref().is_some_and(|s| s != "succ")
         || body.result.as_deref().is_some_and(|s| s != "succ")
@@ -308,7 +311,10 @@ fn parse_login(
     receipt: &KuwoNativeSmsChallenge,
     code: &str,
 ) -> Result<KuwoNativeSessionExchange> {
-    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let (user, sid) = parse_session_body(body)?;
     let reflected = |v: &str| {
         echoes_secret(v, code)

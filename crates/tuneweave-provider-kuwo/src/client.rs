@@ -1597,8 +1597,9 @@ fn decode_word_lyrics(bytes: &[u8]) -> Result<String> {
 }
 
 fn parse_mobile_lyrics(bytes: &[u8], requested_music_id: &str) -> Result<(String, usize)> {
-    let envelope: KuwoMobileLyricEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kuwo_upstream_error("Kuwo mobile lyrics returned malformed JSON"))?;
+    let envelope: KuwoMobileLyricEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kuwo_upstream_error("Kuwo mobile lyrics returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status.as_i64() != Some(200) {
         return Err(
             kuwo_upstream_error("Kuwo mobile lyrics rejected the request").with_details(json!({
@@ -1757,8 +1758,9 @@ fn validate_lyric_text(value: &str) -> Result<()> {
 }
 
 fn parse_playback_response(bytes: &[u8]) -> Result<KuwoPublicMediaOutcome> {
-    let envelope: KuwoPlaybackEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kuwo_upstream_error("Kuwo public playback returned malformed JSON"))?;
+    let envelope: KuwoPlaybackEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kuwo_upstream_error("Kuwo public playback returned malformed JSON").with_source(&error)
+    })?;
     let platform_code = envelope
         .code
         .as_i64()
@@ -1798,44 +1800,23 @@ fn validate_public_audio_url(value: &str) -> Result<String> {
             "Kuwo public playback returned an invalid media URL",
         ));
     }
-    let url = Url::parse(value)
-        .map_err(|_| kuwo_upstream_error("Kuwo public playback returned an invalid media URL"))?;
-    let host = url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted a media host"))?;
-    let trusted_host = host == "kw-bj.kuwo.cn"
-        || host.strip_suffix(".kuwo.cn").is_some_and(|prefix| {
-            !prefix.is_empty()
-                && prefix.len() <= 63
-                && !prefix.contains('.')
-                && prefix.ends_with("-sycdn")
-                && prefix
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        });
-    // kw-bj is the exact host returned by the official public playback producer
-    // for native anchor programmes. Do not generalize to arbitrary kw-* hosts.
-    if !trusted_host
-        || url.scheme() != "https"
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.query().is_some()
-        || !url.path().starts_with('/')
-        || !url.path().to_ascii_lowercase().ends_with(".mp3")
-    {
+    let url = tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
+        kuwo_upstream_error("Kuwo public playback returned an invalid media URL")
+            .with_source(&error)
+    })?;
+    // This producer is explicitly requested in MP3 format; keep that format contract.
+    if !url.path().to_ascii_lowercase().ends_with(".mp3") {
         return Err(kuwo_upstream_error(
-            "Kuwo public playback returned an untrusted media URL",
+            "Kuwo public playback returned a non-MP3 media resource",
         ));
     }
     Ok(url.to_string())
 }
 
 fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result<Track> {
-    let envelope: KuwoTrackDetailEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kuwo_upstream_error("Kuwo track detail returned malformed JSON"))?;
+    let envelope: KuwoTrackDetailEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kuwo_upstream_error("Kuwo track detail returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code.as_i64() != Some(200) {
         if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
             return Err(TuneWeaveError::new(
@@ -1984,8 +1965,9 @@ fn parse_playlist_response(
             "Kuwo playlist pages are one-based with a size between 1 and 100",
         ));
     }
-    let envelope: KuwoPlaylistEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kuwo_upstream_error("Kuwo public playlist returned malformed JSON"))?;
+    let envelope: KuwoPlaylistEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kuwo_upstream_error("Kuwo public playlist returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code.as_i64() != Some(200) {
         if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
             return Err(TuneWeaveError::new(
@@ -2197,8 +2179,9 @@ fn parse_search_response(
     requested_page: u32,
     requested_size: u32,
 ) -> Result<KuwoSearchPage> {
-    let envelope: KuwoSearchEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kuwo_upstream_error("Kuwo search returned malformed JSON"))?;
+    let envelope: KuwoSearchEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kuwo_upstream_error("Kuwo search returned malformed JSON").with_source(&error)
+    })?;
     let page = envelope
         .page
         .as_u64()
@@ -2754,6 +2737,7 @@ fn kuwo_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "Kuwo API request failed")
         .with_platform(Platform::Kuwo)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn kuwo_http_error(status: StatusCode) -> TuneWeaveError {
@@ -3311,28 +3295,20 @@ mod tests {
     }
 
     #[test]
-    fn playback_urls_accept_only_the_current_https_mp3_cdn_shape() {
-        assert!(validate_public_audio_url("https://kw-bj.kuwo.cn/anchor/file.mp3").is_ok());
-        assert!(
-            validate_public_audio_url(
-                "https://er-sycdn.kuwo.cn/token/time/resource/trackmedia/file.mp3"
-            )
-            .is_ok()
-        );
+    fn playback_urls_allow_new_cdn_hosts_ports_and_signed_queries() {
+        for valid in [
+            "https://kw-bj.kuwo.cn/anchor/file.mp3",
+            "https://new-cdn.example:4483/new/file.mp3?signature=opaque",
+            "http://new-cdn.example/media.mp3",
+        ] {
+            assert!(validate_public_audio_url(valid).is_ok());
+        }
         for invalid in [
-            "https://kw-bj.kuwo.cn.evil.example/anchor/file.mp3",
-            "https://nested.kw-bj.kuwo.cn/anchor/file.mp3",
-            "https://kw-other.kuwo.cn/anchor/file.mp3",
-            "http://kw-bj.kuwo.cn/anchor/file.mp3",
-            "https://kw-bj.kuwo.cn/anchor/file.mp3?sid=secret",
-            "http://er-sycdn.kuwo.cn/token/file.mp3",
-            "https://user@er-sycdn.kuwo.cn/token/file.mp3",
-            "https://er-sycdn.kuwo.cn:444/token/file.mp3",
-            "https://er-sycdn.kuwo.cn.evil.example/token/file.mp3",
-            "https://nested.er-sycdn.kuwo.cn/token/file.mp3",
-            "https://er-sycdn.kuwo.cn/token/file.flac",
-            "https://er-sycdn.kuwo.cn/token/file.mp3?secret=value",
-            "https://er-sycdn.kuwo.cn/token/file.mp3#fragment",
+            "https://user@cdn.example/file.mp3",
+            "https://cdn.example/file.mp3#fragment",
+            "https://cdn.example/file.flac",
+            "file:///file.mp3",
+            "http://127.0.0.1/file.mp3",
         ] {
             assert!(validate_public_audio_url(invalid).is_err());
         }

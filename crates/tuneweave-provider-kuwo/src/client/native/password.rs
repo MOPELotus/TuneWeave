@@ -155,7 +155,10 @@ fn parse_password(
     request: &PasswordLoginRequest,
     device: &KuwoNativeDevice,
 ) -> Result<KuwoNativeSessionExchange> {
-    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let (user, sid) = parse_session_body(body)?;
     let encoded_password = BASE64_STANDARD.encode(request.password.as_bytes());
     let reflects_password = |value: &str| {

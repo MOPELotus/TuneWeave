@@ -210,7 +210,10 @@ struct PlaylistDto {
 }
 
 pub(super) fn parse_page(kind: CatalogKind, page: u32, bytes: &[u8]) -> Result<CatalogPage> {
-    let root: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let root: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if root.code != 200 {
         return Err(
             kuwo_upstream_error("Kuwo catalogue returned an unsuccessful business code")
@@ -220,7 +223,10 @@ pub(super) fn parse_page(kind: CatalogKind, page: u32, bytes: &[u8]) -> Result<C
     let data = root.data.ok_or_else(invalid)?;
     let (total, items) = match kind {
         CatalogKind::Mv => {
-            let data: Mvs = serde_json::from_value(data).map_err(|_| invalid())?;
+            let data: Mvs = serde_json::from_value(data).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             (
                 data.total.value()?,
                 data.mvlist
@@ -230,7 +236,10 @@ pub(super) fn parse_page(kind: CatalogKind, page: u32, bytes: &[u8]) -> Result<C
             )
         }
         CatalogKind::Album => {
-            let data: Albums = serde_json::from_value(data).map_err(|_| invalid())?;
+            let data: Albums = serde_json::from_value(data).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             (
                 data.total.value()?,
                 data.items
@@ -240,7 +249,10 @@ pub(super) fn parse_page(kind: CatalogKind, page: u32, bytes: &[u8]) -> Result<C
             )
         }
         CatalogKind::Artist => {
-            let data: Artists = serde_json::from_value(data).map_err(|_| invalid())?;
+            let data: Artists = serde_json::from_value(data).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             if data.pn.value()?.checked_add(1) != Some(u64::from(page))
                 || data.rn.value()? != u64::from(kind.page_size())
             {
@@ -255,7 +267,10 @@ pub(super) fn parse_page(kind: CatalogKind, page: u32, bytes: &[u8]) -> Result<C
             )
         }
         CatalogKind::Playlist => {
-            let data: Playlists = serde_json::from_value(data).map_err(|_| invalid())?;
+            let data: Playlists = serde_json::from_value(data).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             (
                 data.total.value()?,
                 data.list
@@ -463,16 +478,9 @@ pub(super) fn artist_image(value: &str) -> Option<String> {
     if let Some(value) = normalize_official_image_url(value) {
         return Some(value);
     }
-    let url = Url::parse(value).ok()?;
-    (url.scheme() == "https"
-        && url.host_str() == Some("star.kuwo.cn")
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.path().starts_with("/star/starheads/"))
-    .then(|| url.into())
+    tuneweave_core::validate_upstream_media_url(value)
+        .ok()
+        .map(Into::into)
 }
 fn invalid() -> TuneWeaveError {
     kuwo_upstream_error("Kuwo catalogue returned an invalid typed response")

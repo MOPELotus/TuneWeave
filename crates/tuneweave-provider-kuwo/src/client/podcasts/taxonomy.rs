@@ -330,7 +330,10 @@ impl KuwoClient {
 }
 
 fn parse_categories(bytes: &[u8]) -> Result<PodcastTaxonomy> {
-    let envelope: CategoryEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: CategoryEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != 200 {
         return Err(invalid());
     }
@@ -422,7 +425,10 @@ fn parse_category_album_page(
     if category.id != requested_category || requested_page == 0 || requested_page_size == 0 {
         return Err(invalid());
     }
-    let envelope: CategoryPageEnvelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: CategoryPageEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != 200 {
         return Err(invalid());
     }

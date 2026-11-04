@@ -152,7 +152,10 @@ pub(super) fn parse(
     id: &str,
     pn: u64,
 ) -> Result<Contents> {
-    let response: Response = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: Response = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.code != Some(0) || response.msg.as_deref().is_some_and(|v| v != "ok") {
         return Err(invalid());
     }

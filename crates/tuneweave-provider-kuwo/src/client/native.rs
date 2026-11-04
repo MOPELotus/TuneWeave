@@ -656,7 +656,10 @@ fn parse_exchange(
     expected_uid: &str,
     input: &KuwoNativeSessionInput,
 ) -> Result<KuwoNativeSessionExchange> {
-    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: ExchangeBody = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let (user, sid) = parse_session_body(body)?;
     if user.uid != expected_uid {
         return Err(invalid());
@@ -728,7 +731,10 @@ fn parse_validation(bytes: &[u8]) -> Result<()> {
     }
 }
 fn parse_validation_state(bytes: &[u8]) -> Result<bool> {
-    let body: ValidationBody = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let body: ValidationBody = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.result == "ok" && body.reason.as_deref().is_none_or(str::is_empty) {
         return Ok(true);
     }

@@ -69,7 +69,7 @@ fn catalogue_accepts_an_explicit_empty_list_but_rejects_missing_or_ambiguous_row
 
     let mut untrusted_image =
         json!({"code":200,"data":{"list":[entry("3003400", "主播", "0", "1")]}});
-    untrusted_image["data"]["list"][0]["headPic"] = json!("https://example.test/avatar.jpg");
+    untrusted_image["data"]["list"][0]["headPic"] = json!("file:///avatar.jpg");
     let artists = parse(&untrusted_image).unwrap();
     assert!(artists[0].avatar_url.is_none());
 

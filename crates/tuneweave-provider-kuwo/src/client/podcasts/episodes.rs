@@ -144,7 +144,10 @@ fn parse_page(
     album: &str,
     request: &PodcastEpisodeListRequest,
 ) -> Result<Page<PodcastEpisode>> {
-    let raw: EpisodePage = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let raw: EpisodePage = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = raw.total.value()?;
     if raw.albumid.id()? != album
         || raw.kind != "music"

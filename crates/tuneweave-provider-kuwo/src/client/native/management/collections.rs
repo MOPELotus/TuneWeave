@@ -134,7 +134,10 @@ fn parse_collection_ack(
     id: &str,
     subscribed: bool,
 ) -> Result<()> {
-    let ack: CollectionAck = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let ack: CollectionAck = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if ![
         "ok",
         if subscribed {

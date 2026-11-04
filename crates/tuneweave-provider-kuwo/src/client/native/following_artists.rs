@@ -202,7 +202,10 @@ struct Entry {
 }
 
 fn parse(bytes: &[u8], input: &KuwoNativeSessionInput) -> Result<Vec<Artist>> {
-    let response: Response = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let response: Response = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.result != "ok"
         || response.errcode.as_deref().is_some_and(|code| code != "0")
         || response
