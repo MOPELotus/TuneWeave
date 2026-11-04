@@ -177,8 +177,10 @@ impl MiguClient {
 }
 
 fn parse_catalog_response(kind: CatalogKind, bytes: &[u8]) -> Result<CatalogPage> {
-    let envelope: CatalogEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu catalogue returned malformed data"))?;
+    let envelope: CatalogEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu catalogue returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000" {
         return Err(migu_upstream_error("Migu catalogue rejected the request")
             .with_details(json!({"platform_code":bounded_text(&envelope.code,64)})));

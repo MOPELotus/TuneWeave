@@ -122,8 +122,10 @@ struct Envelope {
     fields: serde_json::Map<String, serde_json::Value>,
 }
 fn parse_envelope(operation: Operation<'_>, body: &[u8]) -> Result<Envelope> {
-    let envelope: Envelope = serde_json::from_slice(body)
-        .map_err(|_| migu_upstream_error("Migu session response is invalid"))?;
+    let envelope: Envelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu session response is invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000" {
         let auth = match operation {
             Operation::Profile
@@ -675,8 +677,10 @@ impl MiguClient {
     ) -> Result<AccountData<bool>> {
         let operation = Operation::CollectionState(kind, id);
         self.raw_session_request(operation, token, |body, headers| {
-            let value: serde_json::Value = serde_json::from_slice(body)
-                .map_err(|_| migu_upstream_error("Migu collection state response is invalid"))?;
+            let value: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu collection state response is invalid");
+                mapped.with_json_source(&json_cause)
+            })?;
             let rows = match value {
                 serde_json::Value::Array(rows) => rows,
                 _ => {
@@ -882,8 +886,10 @@ impl MiguClient {
                 .filter(|value| validate_token(value).is_ok())
                 .map(str::to_owned);
             let profile = (|| {
-                let data: Profile = serde_json::from_value(data)
-                    .map_err(|_| migu_upstream_error("Migu profile fields are invalid"))?;
+                let data: Profile = serde_json::from_value(data).map_err(|json_cause| {
+                    let mapped = migu_upstream_error("Migu profile fields are invalid");
+                    mapped.with_json_source(&json_cause)
+                })?;
                 let nickname = data.nick_name.filter(|v| !v.trim().is_empty());
                 if nickname
                     .as_ref()

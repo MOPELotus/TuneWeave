@@ -91,8 +91,10 @@ impl MiguClient {
                 .map_err(migu_network_error)?;
             status = Some(response.status());
             let bytes = read_bounded_response(response, "Migu song identifier lookup").await?;
-            let body: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| migu_upstream_error("Migu song identifier response is invalid"))?;
+            let body: Value = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu song identifier response is invalid");
+                mapped.with_json_source(&json_cause)
+            })?;
             if body["code"] != "000000" {
                 return Err(migu_upstream_error(
                     "Migu song identifier request was rejected",
@@ -141,8 +143,10 @@ fn parse_tracks(ids: &[String], body: Value) -> Result<Vec<Track>> {
     let expected = ids.iter().collect::<std::collections::BTreeSet<_>>();
     let mut mapped = BTreeMap::new();
     for row in rows {
-        let song: MiguSong = serde_json::from_value(row.clone())
-            .map_err(|_| migu_upstream_error("Migu songId track is invalid"))?;
+        let song: MiguSong = serde_json::from_value(row.clone()).map_err(|json_cause| {
+            let mapped = migu_upstream_error("Migu songId track is invalid");
+            mapped.with_json_source(&json_cause)
+        })?;
         if !expected.contains(&song.song_id) || mapped.contains_key(&song.song_id) {
             return Err(migu_upstream_error(
                 "Migu songId response contains duplicate or unrelated tracks",

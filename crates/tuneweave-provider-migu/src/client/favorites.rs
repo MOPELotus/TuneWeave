@@ -15,7 +15,10 @@ struct State {
 
 pub(super) fn state(fields: serde_json::Map<String, serde_json::Value>, id: &str) -> Result<bool> {
     let response: StateResponse = serde_json::from_value(serde_json::Value::Object(fields))
-        .map_err(|_| migu_upstream_error("Migu favorite state response is invalid"))?;
+        .map_err(|json_cause| {
+            let mapped = migu_upstream_error("Migu favorite state response is invalid");
+            mapped.with_json_source(&json_cause)
+        })?;
     let [item] = response.is_infavors.as_slice() else {
         return Err(migu_upstream_error(
             "Migu favorite state is not uniquely identified",

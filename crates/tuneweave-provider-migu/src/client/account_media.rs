@@ -249,8 +249,10 @@ fn decode_envelope(
     } else {
         bytes
     };
-    let envelope: Envelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu account media returned an invalid JSON envelope"))?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu account media returned an invalid JSON envelope")
+            .with_source(&error)
+    })?;
     if envelope.code != "000000" {
         // Media business failures do not prove that this account's PACM is invalid.
         return Err(migu_upstream_error(
@@ -263,8 +265,10 @@ fn decode_envelope(
 }
 
 fn parse_rights(value: serde_json::Value, id: &str) -> Result<Rights> {
-    let mut data: RightsData = serde_json::from_value(value)
-        .map_err(|_| migu_upstream_error("Migu account media returned invalid rights"))?;
+    let mut data: RightsData = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu account media returned invalid rights");
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.can_listen_resp_item_list.len() != 1 {
         return Err(migu_upstream_error(
             "Migu account media returned ambiguous rights",
@@ -315,8 +319,10 @@ fn parse_playback(
     requested_tone: &str,
     token: &str,
 ) -> Result<MediaStream> {
-    let playback: Playback = serde_json::from_value(value)
-        .map_err(|_| migu_upstream_error("Migu account media returned invalid playback data"))?;
+    let playback: Playback = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu account media returned invalid playback data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if !playback.cannot_code.is_empty() || (!rights.can_listen && !rights.limit_length) {
         return Err(error(
             ErrorCode::PermissionDenied,
@@ -374,20 +380,8 @@ fn parse_playback(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| migu_upstream_error("Migu account media omitted its authorized URL"))?;
     let url = validate_public_audio_url(raw_url)?;
-    let parsed_url =
-        Url::parse(&url).map_err(|_| migu_upstream_error("Migu account media URL is invalid"))?;
-    for key in ["Tim", "Key", "playSessionId"] {
-        if parsed_url
-            .query_pairs()
-            .filter(|(name, _)| name == key)
-            .count()
-            != 1
-        {
-            return Err(migu_upstream_error(
-                "Migu account media URL contains ambiguous authorization",
-            ));
-        }
-    }
+    // The authorized producer owns URL signing fields. Local credential echo
+    // protection below is independent of those opaque CDN parameter names.
     if playback
         .auditions_start_time
         .as_ref()

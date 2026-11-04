@@ -163,11 +163,14 @@ impl MiguClient {
             }
             let headers = response.headers().clone();
             let body = super::account::read_session_body(response).await?;
-            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-                error(
-                    ErrorCode::UpstreamError,
-                    "Migu authentication response is invalid",
-                )
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|json_cause| {
+                let mapped = {
+                    error(
+                        ErrorCode::UpstreamError,
+                        "Migu authentication response is invalid",
+                    )
+                };
+                mapped.with_json_source(&json_cause)
             })?;
             if matches!(operation, Operation::Exchange) {
                 if value.get("code").and_then(serde_json::Value::as_str) != Some("000000") {

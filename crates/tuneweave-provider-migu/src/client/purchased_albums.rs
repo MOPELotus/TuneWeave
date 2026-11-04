@@ -61,7 +61,10 @@ fn identity(value: &str) -> Result<()> {
     Ok(())
 }
 pub(crate) fn parse_page(value: serde_json::Value, uid: &str, bytes: usize) -> Result<AlbumPage> {
-    let data: Fields = serde_json::from_value(value).map_err(|_| invalid())?;
+    let data: Fields = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.resources.len() > PAGE_SIZE || (data.resources.is_empty() && data.has_next_page) {
         return Err(invalid());
     }

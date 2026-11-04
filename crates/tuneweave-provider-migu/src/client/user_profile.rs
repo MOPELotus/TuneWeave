@@ -44,8 +44,11 @@ impl MiguClient {
         // The shared reader requires the official ACK and same-UID root
         // userInfoItem before any display data can leave the client.
         let mut value = self.native_profile_response(auth).await?;
-        let profile: Profile = serde_json::from_value(value["userInfoItem"].take())
-            .map_err(|_| migu_upstream_error("Migu native user profile is invalid"))?;
+        let profile: Profile =
+            serde_json::from_value(value["userInfoItem"].take()).map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu native user profile is invalid");
+                mapped.with_json_source(&json_cause)
+            })?;
         let avatar = [
             profile.middle_icon,
             profile.small_icon,

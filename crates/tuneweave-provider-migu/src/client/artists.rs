@@ -320,9 +320,13 @@ pub(crate) fn songs(data: Data, uid: &str, page: u32) -> Result<ArtistPage<Track
         }
         let resource_id = id(string(item, "resId")?)?;
         action(string(item, "action")?, "song-player", resource_id)?;
-        let song: MiguSong =
-            serde_json::from_value(item.get("songItem").cloned().ok_or_else(invalid)?)
-                .map_err(|_| invalid())?;
+        let song: MiguSong = serde_json::from_value(
+            item.get("songItem").cloned().ok_or_else(invalid)?,
+        )
+        .map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         if song.content_id != resource_id
             || song.singer_list.is_empty()
             || song.singer_list.len() > 32
@@ -480,7 +484,10 @@ impl MiguClient {
                 return Err(invalid());
             }
             let bytes = read_bounded_response(response, "Migu artist").await?;
-            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             if envelope.code != "000000" {
                 return Err(migu_upstream_error("Migu artist request was rejected"));
             }

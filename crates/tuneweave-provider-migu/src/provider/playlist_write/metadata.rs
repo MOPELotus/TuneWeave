@@ -63,8 +63,10 @@ fn read_tags(playlist: &Playlist) -> Result<Vec<PlaylistTag>> {
             "Migu playlist omitted tag identities required for safe tag updates",
         ));
     };
-    let tags: Vec<PlaylistTag> = serde_json::from_value(value.clone())
-        .map_err(|_| migu_upstream_error("Migu playlist tag identities are invalid"))?;
+    let tags: Vec<PlaylistTag> = serde_json::from_value(value.clone()).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu playlist tag identities are invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if tags.len() != playlist.tags.len() || tags.len() > 128 {
         return Err(migu_upstream_error(
             "Migu playlist tag identities do not match its tag names",

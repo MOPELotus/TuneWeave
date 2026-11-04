@@ -253,7 +253,10 @@ fn expiry(raw: Option<&str>, pay: Option<&str>) -> Result<Option<String>> {
 }
 
 pub(super) fn parse_membership(value: serde_json::Value, uid: &str) -> Result<MembershipSummary> {
-    let center: Center = serde_json::from_value(value).map_err(|_| invalid())?;
+    let center: Center = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if center.member_cards.is_empty() || center.member_cards.len() > 16 {
         return Err(invalid());
     }
@@ -404,7 +407,10 @@ pub(super) fn parse_membership(value: serde_json::Value, uid: &str) -> Result<Me
 }
 
 pub(super) fn parse_icons(value: serde_json::Value) -> Result<Vec<MemberIcon>> {
-    let icons: Vec<Icon> = serde_json::from_value(value).map_err(|_| invalid())?;
+    let icons: Vec<Icon> = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if icons.len() > 32 {
         return Err(invalid());
     }
@@ -425,7 +431,10 @@ pub(super) fn parse_icons(value: serde_json::Value) -> Result<Vec<MemberIcon>> {
 }
 
 pub(super) fn parse_media_identities(value: serde_json::Value) -> Result<Vec<MediaIdentity>> {
-    let data: MediaIdentityList = serde_json::from_value(value).map_err(|_| invalid())?;
+    let data: MediaIdentityList = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.media_member_identities.len() > 64 {
         return Err(invalid());
     }

@@ -61,7 +61,10 @@ fn parse_catalogue(bytes: &[u8]) -> Result<Vec<PlaylistTag>> {
         texts: Vec<String>,
     }
     let invalid = || migu_upstream_error("Migu playlist tag catalogue is invalid or ambiguous");
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000"
         || envelope.data.is_empty()
         || envelope.data.len() > 32

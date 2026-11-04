@@ -19,7 +19,10 @@ fn data(bytes: &[u8]) -> Result<Value> {
         code: String,
         data: Value,
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000" || !envelope.data.is_object() {
         return Err(invalid());
     }
@@ -40,7 +43,10 @@ fn module_allowed(data: Value, uid: &str) -> Result<bool> {
     struct Modules {
         resource_module_query_list: Vec<Module>,
     }
-    let data: Modules = serde_json::from_value(data).map_err(|_| invalid())?;
+    let data: Modules = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let [row] = data.resource_module_query_list.as_slice() else {
         return Err(invalid());
     };
@@ -89,7 +95,10 @@ fn catalogue(data: Value, source: &str) -> Result<Vec<Artist>> {
         header: Header,
         contents: Vec<Value>,
     }
-    let data: Index = serde_json::from_value(data).map_err(|_| invalid())?;
+    let data: Index = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.contents.len() > 64
         || data
             .header
@@ -159,33 +168,8 @@ fn catalogue(data: Value, source: &str) -> Result<Vec<Artist>> {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if s.is_empty() => None,
             Some(Value::String(s)) => {
-                let url = Url::parse(s).map_err(|_| invalid())?;
-                if s.len() > 8192
-                    || s.chars().any(char::is_control)
-                    || url.scheme() != "https"
-                    || url.host_str() != Some(MEDIA_HOST)
-                    || !url.username().is_empty()
-                    || url.password().is_some()
-                    || url.port().is_some()
-                    || url.query().is_some()
-                    || url.fragment().is_some()
-                    || !url
-                        .path()
-                        .strip_prefix("/data/oss/resource/")
-                        .is_some_and(|tail| {
-                            !tail.is_empty()
-                                && tail.split('/').all(|p| {
-                                    !p.is_empty()
-                                        && !matches!(p, "." | "..")
-                                        && p.bytes().all(|b| {
-                                            b.is_ascii_alphanumeric()
-                                                || matches!(b, b'.' | b'_' | b'-')
-                                        })
-                                })
-                        })
-                {
-                    return Err(invalid());
-                }
+                tuneweave_core::validate_upstream_media_url(s)
+                    .map_err(|error| invalid().with_source(&error))?;
                 Some(s.clone())
             }
             _ => return Err(invalid()),

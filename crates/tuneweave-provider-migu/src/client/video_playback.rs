@@ -11,7 +11,6 @@ const HOST: &str = "app.c.nf.migu.cn";
 const PATH: &str = "/MIGUM2.0/v1.0/content/mvplayinfo.do";
 const MAX_RESPONSE: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 256 * 1024;
-const NATIVE_MV_HOST: &str = "freevod.nf.migu.cn";
 
 pub(crate) struct Source {
     pub id: String,
@@ -120,16 +119,14 @@ fn media_url(value: &str, id: &str) -> Result<Url> {
     if value.len() > 16384 || value.chars().any(char::is_control) {
         return Err(invalid());
     }
-    let u = Url::parse(value).map_err(|_| invalid())?;
-    if u.scheme() != "https"
-        || u.host_str() != Some("freevod.nf.migu.cn")
-        || u.port().is_some()
-        || !u.username().is_empty()
-        || u.password().is_some()
-        || u.fragment().is_some()
-        || !u.path().ends_with("/index.m3u8")
-        || u.path().contains("%2f")
-        || u.path().contains("%2F")
+    let u = tuneweave_core::validate_upstream_media_url(value)
+        .map_err(|error| invalid().with_source(&error))?;
+    // These playlists are fetched by the service; keep the official network family,
+    // but do not assume one CDN node, port or opaque manifest directory layout.
+    if !u
+        .host_str()
+        .is_some_and(|host| host == "migu.cn" || host.ends_with(".migu.cn"))
+        || !u.path().ends_with(".m3u8")
     {
         return Err(invalid());
     }
@@ -174,20 +171,12 @@ fn native_media_url(value: &str, id: &str) -> Result<Url> {
     if value.len() > 16384 || value.chars().any(char::is_control) {
         return Err(invalid());
     }
-    let url = Url::parse(value).map_err(|_| invalid())?;
-    if url.scheme() != "http"
-        || url.host_str() != Some(NATIVE_MV_HOST)
-        || url.port() != Some(8080)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.path_segments().is_none_or(|mut segments| {
-            segments.next() != Some("hls")
-                || segments.next() != Some("v2")
-                || segments.next().is_none_or(str::is_empty)
-                || segments.next() != Some("index.m3u8")
-                || segments.next().is_some()
-        })
+    let url = tuneweave_core::validate_upstream_media_url(value)
+        .map_err(|error| invalid().with_source(&error))?;
+    if !url
+        .host_str()
+        .is_some_and(|host| host == "migu.cn" || host.ends_with(".migu.cn"))
+        || !url.path().ends_with(".m3u8")
     {
         return Err(invalid());
     }
@@ -496,7 +485,10 @@ impl MiguClient {
             }
             let headers = response.headers().clone();
             let body = read_session_body_limited(response, MAX_RESPONSE).await?;
-            let root = serde_json::from_slice(&body).map_err(|_| invalid())?;
+            let root = serde_json::from_slice(&body).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             let next = if let Some(token) = token {
                 rotated_token_for_host(&headers, HOST, PATH)?.unwrap_or_else(|| token.into())
             } else {

@@ -113,9 +113,9 @@ fn account_media_exact_identity_actual_format_and_trial_bounds_are_required() {
 #[test]
 fn account_media_signed_urls_cannot_export_tokens_or_untrusted_destinations() {
     for url in [
-        "https://attacker.example/file.mp3?Tim=1&Key=a&playSessionId=b",
-        "http://freetyst.nf.migu.cn/public/product9th/product1/a.mp3?Tim=1&Key=a&playSessionId=b",
-        "https://freetyst.nf.migu.cn/public/product9th/product1/a.mp3?Tim=1&Tim=2&Key=a&playSessionId=b",
+        "https://user:secret@cdn.example/file.mp3?Tim=1&Key=a&playSessionId=b",
+        "ftp://freetyst.nf.migu.cn/public/product9th/product1/a.mp3?Tim=1&Key=a&playSessionId=b",
+        "https://freetyst.nf.migu.cn/public/product9th/product1/a.mp3#fragment",
         "https://freetyst.nf.migu.cn/public/product9th/product1/a.mp3?Tim=1&Key=secret-pacm-token&playSessionId=b",
         "https://freetyst.nf.migu.cn/public/product9th/product1/a.mp3?Tim=1&Key=%73ecret-pacm-token&playSessionId=b",
         "https://freetyst.nf.migu.cn/public/product9th/product1/%73ecret-pacm-token.mp3?Tim=1&Key=a&playSessionId=b",
@@ -174,12 +174,7 @@ fn account_media_pc_envelope_codec_requires_consistent_signature_magic_and_json(
 
 #[test]
 fn account_media_incomplete_grants_are_errors_and_not_quality_fallback_denials() {
-    for kind in [
-        "missing-url",
-        "empty-url",
-        "invalid-timing",
-        "duplicate-empty-signature",
-    ] {
+    for kind in ["missing-url", "empty-url", "invalid-timing", "url-fragment"] {
         let mut value = playback();
         match kind {
             "missing-url" => {
@@ -190,7 +185,7 @@ fn account_media_incomplete_grants_are_errors_and_not_quality_fallback_denials()
                 value["auditionsStartTime"] = json!("bad");
                 value["auditionsLength"] = json!("bad");
             }
-            _ => value["url"] = json!(format!("{}&Key=", value["url"].as_str().unwrap())),
+            _ => value["url"] = json!(format!("{}#fragment", value["url"].as_str().unwrap())),
         }
         assert_eq!(
             parse(value, false).unwrap_err().code,
@@ -204,5 +199,18 @@ fn account_media_incomplete_grants_are_errors_and_not_quality_fallback_denials()
         json!({"canListenRespItemList":[{"contentId":"123","canListen":"true","limitLength":false}]}),
     ] {
         assert!(parse_rights(value, "123").is_err());
+    }
+}
+
+#[test]
+fn authorized_media_preserves_opaque_cdn_signature_field_names() {
+    for url in [
+        "http://new-cdn.example:8080/audio.mp3?NewSignature=opaque&Expires=123",
+        "https://new-cdn.example/audio.mp3?Key=opaque&Key=&Tim=123&Tim=456",
+    ] {
+        let mut value = playback();
+        value["url"] = json!(url);
+        let media = parse(value, false).unwrap();
+        assert_eq!(media.url, url);
     }
 }

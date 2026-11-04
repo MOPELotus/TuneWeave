@@ -242,8 +242,10 @@ impl MiguClient {
                 ));
             }
             let body = read_session_body_limited(response, 1024 * 1024).await?;
-            serde_json::from_slice(&body)
-                .map_err(|_| migu_upstream_error("Migu native MV grant returned invalid JSON"))
+            serde_json::from_slice(&body).map_err(|error| {
+                migu_upstream_error("Migu native MV grant returned invalid JSON")
+                    .with_source(&error)
+            })
         }
         .await;
         let log = result
@@ -490,8 +492,10 @@ impl MiguClient {
             } else {
                 bytes
             };
-            serde_json::from_slice(&bytes)
-                .map_err(|_| migu_upstream_error("Migu native response is invalid"))
+            serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu native response is invalid");
+                mapped.with_json_source(&json_cause)
+            })
         }
         .await;
         self.log_upstream_request(operation, host, path, status, started, &result);

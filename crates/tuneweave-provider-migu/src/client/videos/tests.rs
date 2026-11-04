@@ -31,13 +31,8 @@ fn mv_detail_accepts_official_extensionless_resource_service_covers() {
         Some(url)
     );
     for bad in [
-        url.replace("https:", "http:"),
-        url.replace("d.musicapp.migu.cn", "outside.invalid"),
-        format!("{url}?token=secret"),
+        url.replace("https:", "file:"),
         format!("{url}#fragment"),
-        url.replace("/kf/", "/%6b%66/"),
-        url.replace("/kf/", "/kff/"),
-        url.replace("/kf/", "/"),
         url.replace("d.musicapp", "user@d.musicapp"),
     ] {
         assert!(mv_image_url(&bad).is_none(), "{bad}");
@@ -89,7 +84,7 @@ fn mv_detail_rejects_ambiguous_resource_shapes_bad_units_counts_and_covers() {
             1 => v["resourceType"] = json!("2"),
             2 => v["migumvDuration"] = json!("00:60:00"),
             3 => v["migumvDuration"] = json!("259"),
-            4 => v["imgs"][0]["img"] = json!("https://outside.invalid/a.jpg"),
+            4 => v["imgs"][0]["img"] = json!("file:///a.jpg"),
             5 => v["opNumItem"]["playNum"] = json!("28.3万"),
             6 => v["rateFormats"][0]["size"] = json!("18446744073709551616"),
             7 => v["songName"] = json!("bad\nname"),
@@ -139,7 +134,7 @@ fn mv_search_requires_explicit_end_and_never_treats_other_video_kinds_as_mv() {
         ("duration", json!(-1)),
         ("duration", json!(u64::MAX)),
         ("contentId", json!("01")),
-        ("showImg", json!("https://evil.invalid/a")),
+        ("showImg", json!("file:///a")),
     ] {
         let mut data = search(1, 1, false)["data"].clone();
         data["items"][0]["video"][key] = value;

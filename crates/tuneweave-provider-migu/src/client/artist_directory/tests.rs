@@ -192,16 +192,10 @@ fn artist_directory_artist_identity_and_action_are_checked_for_every_row() {
         ("action", "mgmusic://user-info?id=30"),
         ("action", "mgmusic://singer-info?id=30&id=30"),
         ("action", "https://outside.invalid/?secret=credential"),
-        ("img", "https://outside.invalid/data/oss/resource/30.webp"),
-        ("img", "http://d.musicapp.migu.cn/data/oss/resource/30.webp"),
-        (
-            "img",
-            "https://d.musicapp.migu.cn/data/oss/resource/30.webp?secret=credential",
-        ),
-        (
-            "img",
-            "https://d.musicapp.migu.cn/data/oss/resource/%2e%2e/30.webp",
-        ),
+        ("img", "file:///30.webp"),
+        ("img", "http://127.0.0.1/30.webp"),
+        ("img", "https://user:secret@cdn.example/30.webp"),
+        ("img", "https://cdn.example/30.webp#fragment"),
     ] {
         let mut v = directory();
         v["data"]["contents"][3][field] = json!(bad);
@@ -282,7 +276,7 @@ fn artist_directory_optional_fields_do_not_become_invented_profile_values() {
 }
 
 #[test]
-fn artist_directory_avatar_locations_keep_only_observed_https_metadata_forms() {
+fn artist_directory_avatar_locations_accept_opaque_producer_metadata_paths() {
     for path in [
         "/data/oss/resource/00/ab/cd/avatar.webp".to_owned(),
         "/data/resource-service/file-down/00/ab/cd/ef".to_owned(),
@@ -309,6 +303,6 @@ fn artist_directory_avatar_locations_keep_only_observed_https_metadata_forms() {
     ] {
         let mut v = envelope(vec![singer("10", "A")]);
         v["data"]["contents"][0]["img"] = json!(format!("https://d.musicapp.migu.cn{path}"));
-        assert!(parse(v).is_err());
+        assert!(parse(v).is_ok());
     }
 }

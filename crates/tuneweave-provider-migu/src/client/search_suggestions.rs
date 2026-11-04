@@ -48,7 +48,10 @@ fn invalid() -> TuneWeaveError {
 }
 
 fn parse(bytes: &[u8], query: &str) -> Result<SearchSuggestionList> {
-    let reply: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let reply: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if reply.code != "000000" {
         return Err(migu_upstream_error(
             "Migu PC search suggestion request was rejected",

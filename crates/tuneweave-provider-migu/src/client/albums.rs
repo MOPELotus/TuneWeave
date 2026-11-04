@@ -168,8 +168,10 @@ impl MiguClient {
                 ));
             }
             let body = read_bounded_response(response, "Migu album").await?;
-            let envelope: Envelope<T> = serde_json::from_slice(&body)
-                .map_err(|_| migu_upstream_error("Migu album returned malformed data"))?;
+            let envelope: Envelope<T> = serde_json::from_slice(&body).map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu album returned malformed data");
+                mapped.with_json_source(&json_cause)
+            })?;
             if envelope.code != "000000" {
                 return Err(migu_upstream_error("Migu album request was rejected")
                     .with_details(json!({"platform_code":bounded_text(&envelope.code,64)})));
@@ -435,35 +437,13 @@ pub(super) fn album_image_url(value: &str) -> Option<String> {
     if let Some(url) = normalize_media_url(value) {
         return Some(url);
     }
-    if value.len() > 8192 {
-        return None;
+    let mut url = tuneweave_core::validate_upstream_media_url(value).ok()?;
+    if url.host_str() == Some(MEDIA_HOST) && url.scheme() == "http" {
+        url.set_scheme("https").ok()?;
     }
-    let mut url = Url::parse(value).ok()?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str() != Some(MEDIA_HOST)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    let tail = url
-        .path()
-        .strip_prefix("/prod/file-service/file-down01/")
-        .or_else(|| url.path().strip_prefix("/prod/file-service/file-down/"))?;
-    let parts: Vec<_> = tail.split('/').collect();
-    if parts.len() != 3
-        || !parts
-            .iter()
-            .all(|part| part.len() == 32 && part.bytes().all(|b| b.is_ascii_hexdigit()))
-    {
-        return None;
-    }
-    // The official file-service path was verified to serve the same image via HTTPS.
-    url.set_scheme("https").ok()?;
     Some(url.into())
 }
+
 fn publication_date(value: Option<&str>) -> Result<Option<String>> {
     let Some(value) = value.filter(|v| !v.is_empty()) else {
         return Ok(None);

@@ -115,7 +115,10 @@ pub(crate) fn parse_page(
         .filter(|v| !v.is_null())
         .map(|v| {
             serde_json::from_value::<Count>(v)
-                .map_err(|_| invalid())?
+                .map_err(|json_cause| {
+                    let mapped = invalid();
+                    mapped.with_json_source(&json_cause)
+                })?
                 .value()
         })
         .transpose()?;
@@ -129,7 +132,10 @@ pub(crate) fn parse_page(
         .transpose()?;
     let mut items = Vec::with_capacity(values.len());
     for value in values {
-        let e: Entry = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+        let e: Entry = serde_json::from_value(value.clone()).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         let id = canonical_platform_id(&e.music_list_id).ok_or_else(invalid)?;
         if e.resource_type.as_deref().is_some_and(|v| v != "2021") {
             return Err(invalid());

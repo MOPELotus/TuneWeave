@@ -162,7 +162,7 @@ fn charts_reject_incomplete_counts_duplicate_ids_and_unbound_periods() {
             8 => v["data"]["totalCount"] = json!("3"),
             9 => v["data"]["hasNextPage"] = json!("false"),
             10 => v["data"]["contents"] = Value::Null,
-            _ => v["data"]["titlePic"] = json!("https://elsewhere.invalid/cover"),
+            _ => v["data"]["titlePic"] = json!("file:///cover"),
         }
         assert!(parse_tracks(&bytes(&v), "20", true).is_err(), "case {case}");
     }
@@ -215,10 +215,7 @@ fn charts_reject_partial_catalogues_wrong_shapes_and_duplicate_fields() {
             2 => v["data"]["contents"][1]["contents"][0]["rankId"] = json!("10"),
             3 => v["data"]["contents"][0]["contents"][0]["view"] = json!("unknown"),
             4 => v["data"]["contents"][0]["contents"][0]["rankId"] = json!("01"),
-            5 => {
-                v["data"]["contents"][0]["contents"][0]["imageUrl"] =
-                    json!("https://evil.invalid/a")
-            }
+            5 => v["data"]["contents"][0]["contents"][0]["imageUrl"] = json!("file:///a"),
             6 => v["data"]["contents"][1]["contents"][0]["contents"][1]["resId"] = json!("600001"),
             7 => v["data"]["contents"][1]["view"] = json!("ZJ-RANK-SPECIAL"),
             _ => v["data"]["contents"][1]["contents"][0]["contents"][0]["songId"] = json!("999"),

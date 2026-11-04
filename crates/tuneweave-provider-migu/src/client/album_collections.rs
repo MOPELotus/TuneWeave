@@ -132,7 +132,10 @@ pub(crate) fn parse_page(
     uid: &str,
 ) -> Result<CollectionPage> {
     let raw: Fields =
-        serde_json::from_value(serde_json::Value::Object(fields)).map_err(|_| invalid())?;
+        serde_json::from_value(serde_json::Value::Object(fields)).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
     if raw.collections.len() > PAGE_SIZE {
         return Err(invalid());
     }

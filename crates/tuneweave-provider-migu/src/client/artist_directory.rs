@@ -101,7 +101,10 @@ fn array<'a>(value: &'a Value, key: &str) -> Result<&'a [Value]> {
 }
 
 fn decode(bytes: &[u8]) -> Result<Data> {
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000" {
         return Err(migu_upstream_error(
             "Migu artist directory request was rejected",
@@ -256,21 +259,8 @@ fn row(value: &Value) -> Result<Artist> {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if s.is_empty() => None,
         Some(Value::String(s)) => {
-            let url = Url::parse(s).map_err(|_| invalid())?;
-            if s.len() > 8192
-                || s.chars().any(char::is_control)
-                || url.scheme() != "https"
-                || url.host_str() != Some(MEDIA_HOST)
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.port().is_some()
-                || !image_path(url.path())
-                || url.path().contains('%')
-                || url.query().is_some()
-                || url.fragment().is_some()
-            {
-                return Err(invalid());
-            }
+            tuneweave_core::validate_upstream_media_url(s)
+                .map_err(|error| invalid().with_source(&error))?;
             Some(s.clone())
         }
         _ => return Err(invalid()),
@@ -304,36 +294,6 @@ fn row(value: &Value) -> Result<Artist> {
         identities: Vec::new(),
         extensions,
     })
-}
-
-fn image_path(path: &str) -> bool {
-    if let Some(tail) = path.strip_prefix("/data/oss/resource/") {
-        return !tail.is_empty()
-            && tail.split('/').all(|part| {
-                !part.is_empty()
-                    && !matches!(part, "." | "..")
-                    && part
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
-            });
-    }
-    // Both legacy forms are explicit HTTPS avatar locations in the same
-    // successful directory response. They are metadata only, never fetched here.
-    if let Some(tail) = path.strip_prefix("/data/resource-service/file-down/") {
-        let parts: Vec<_> = tail.split('/').collect();
-        return parts.len() == 4
-            && parts
-                .iter()
-                .all(|part| part.len() == 2 && part.bytes().all(|c| c.is_ascii_alphanumeric()));
-    }
-    if let Some(tail) = path.strip_prefix("/prod/file-service/file-down/") {
-        let parts: Vec<_> = tail.split('/').collect();
-        return parts.len() == 3
-            && parts
-                .iter()
-                .all(|part| part.len() == 32 && part.bytes().all(|c| c.is_ascii_hexdigit()));
-    }
-    false
 }
 
 fn catalog(

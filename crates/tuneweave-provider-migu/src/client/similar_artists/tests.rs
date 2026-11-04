@@ -70,15 +70,9 @@ fn similar_artists_invalid_tail_or_changed_layout_never_becomes_partial_success(
         ("action", json!("mgmusic://singer-info?id=270&id=270")),
         ("action", json!("https://outside.invalid/270")),
         ("txt", json!("\nname")),
-        (
-            "img",
-            json!("http://d.musicapp.migu.cn/data/oss/resource/a.webp"),
-        ),
-        ("img", json!("https://outside.invalid/a.webp")),
-        (
-            "img",
-            json!("https://d.musicapp.migu.cn/data/oss/resource/a.webp?private=1"),
-        ),
+        ("img", json!("file:///a.webp")),
+        ("img", json!("https://127.0.0.1/a.webp")),
+        ("img", json!("https://cdn.example/a.webp#fragment")),
     ] {
         let mut body = index();
         body["contents"][2]["contents"][2][key] = value;

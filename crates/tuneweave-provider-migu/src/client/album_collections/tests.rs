@@ -63,7 +63,7 @@ fn collection_parser_rejects_unknown_types_missing_id_pairs_invalid_images_and_u
         ("singerId", json!("11|bad")),
         ("singer", json!(null)),
         ("singer", json!("A||B")),
-        ("imgItems", json!([{"img":"https://outside.invalid/cover"}])),
+        ("imgItems", json!([{"img":"file:///cover"}])),
         ("imgItems", json!([{"img":17}])),
     ] {
         let mut item = entry(AlbumKind::Ordinary, "77");

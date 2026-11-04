@@ -41,7 +41,10 @@ fn invalid() -> TuneWeaveError {
 }
 
 fn parse(value: serde_json::Value) -> Result<Vec<Artist>> {
-    let response: Envelope = serde_json::from_value(value).map_err(|_| invalid())?;
+    let response: Envelope = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.code != "000000" {
         return Err(migu_upstream_error(
             "Migu following artist request was not acknowledged",
@@ -129,7 +132,10 @@ impl MiguClient {
                 false,
             )
             .await?;
-        let ack: Acknowledgment = serde_json::from_value(value).map_err(|_| invalid())?;
+        let ack: Acknowledgment = serde_json::from_value(value).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         // The official UI treats both 1 and 2 as followed. Its missing-value
         // default of 0 is not sufficient proof of a successful remote removal.
         if ack.code != "000000"

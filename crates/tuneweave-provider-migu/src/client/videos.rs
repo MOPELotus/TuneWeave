@@ -442,7 +442,10 @@ impl MiguClient {
                 read_bounded_response_with_limit(response, "Migu MV", MAX_RESPONSE.min(*remaining))
                     .await?;
             *remaining -= bytes.len() as u64;
-            let root: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let root: Value = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             if root.get("code").and_then(Value::as_str) != Some("000000") {
                 return Err(migu_upstream_error("Migu MV request was rejected"));
             }
@@ -498,8 +501,12 @@ impl MiguClient {
                 budget,
             )
             .await?;
-        let data = serde_json::from_value(root.get("data").cloned().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        let data = serde_json::from_value(root.get("data").cloned().ok_or_else(invalid)?).map_err(
+            |json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            },
+        )?;
         super::artists::metadata(data, id).map(|_| ())
     }
     pub(crate) async fn mv_artist_page(

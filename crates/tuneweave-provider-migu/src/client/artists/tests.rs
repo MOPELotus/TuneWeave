@@ -100,7 +100,7 @@ fn artist_identity_counts_and_biography_do_not_use_similar_artists_or_invent_mv_
                 v["contents"][0]["contents"][0]["action"] =
                     json!("mgmusic://singer-detail-self-revealing-wall?id=113")
             }
-            1 => v["contents"][0]["contents"][0]["img2"] = json!("https://outside.invalid/avatar"),
+            1 => v["contents"][0]["contents"][0]["img2"] = json!("file:///avatar"),
             2 => v["contents"][1]["contents"][0]["txt2"] = json!("3 songs"),
             3 => {
                 let duplicate = v["contents"][0].clone();

@@ -139,8 +139,10 @@ fn success_data(value: serde_json::Value) -> Result<serde_json::Value> {
         code: String,
         data: Option<serde_json::Value>,
     }
-    let body: Envelope = serde_json::from_value(value)
-        .map_err(|_| migu_upstream_error("Migu native authorization envelope is invalid"))?;
+    let body: Envelope = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu native authorization envelope is invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if body.code != "000000" {
         let code = if matches!(
             body.code.as_str(),
@@ -207,8 +209,10 @@ fn parse_grant(
         auditions_length: Option<FlexibleU64>,
         auditions_start_time: Option<FlexibleU64>,
     }
-    let data: Download = serde_json::from_value(value)
-        .map_err(|_| migu_upstream_error("Migu download authorization data is invalid"))?;
+    let data: Download = serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = migu_upstream_error("Migu download authorization data is invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.content_id != track.id
         || Some(data.copyright_id.as_str())
             != track
@@ -261,8 +265,11 @@ fn parse_grant(
     let mut actual = None;
     for field in ["rate_formats", "new_rate_formats"] {
         if let Some(value) = track.extensions.get(field) {
-            let formats: Vec<MiguRateFormat> = serde_json::from_value(value.clone())
-                .map_err(|_| migu_upstream_error("Migu download metadata formats are invalid"))?;
+            let formats: Vec<MiguRateFormat> =
+                serde_json::from_value(value.clone()).map_err(|json_cause| {
+                    let mapped = migu_upstream_error("Migu download metadata formats are invalid");
+                    mapped.with_json_source(&json_cause)
+                })?;
             for format in formats {
                 if !data.format_id.is_empty()
                     && [&format.format, &format.android_format, &format.ios_format]

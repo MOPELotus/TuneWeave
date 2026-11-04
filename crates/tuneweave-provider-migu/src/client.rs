@@ -63,6 +63,7 @@ const ANDROID_STREAM_ENDPOINT: &str = "https://app.c.nf.migu.cn/MIGUM2.0/v2.1/co
 const SONG_DOWNLOAD_ENDPOINT: &str =
     "https://app.c.nf.migu.cn/MIGUM2.0/strategy/download-url/by-songid/v1.0";
 const MEDIA_HOST: &str = "d.musicapp.migu.cn";
+#[cfg(debug_assertions)]
 const PUBLIC_AUDIO_HOST: &str = "freetyst.nf.migu.cn";
 const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LYRIC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -1180,8 +1181,11 @@ impl MiguClient {
                 .map_err(migu_network_error)?;
             status = Some(response.status());
             let bytes = read_bounded_response(response, "Migu Android stream").await?;
-            let envelope: MiguPlaybackEnvelope = serde_json::from_slice(&bytes)
-                .map_err(|_| migu_upstream_error("Migu Android stream returned malformed JSON"))?;
+            let envelope: MiguPlaybackEnvelope =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    migu_upstream_error("Migu Android stream returned malformed JSON")
+                        .with_source(&error)
+                })?;
             if envelope.code != "000000" {
                 return Err(migu_media_permission_error(
                     "Migu Android did not authorize playback",
@@ -1467,8 +1471,9 @@ fn migu_upstream_classification<T>(
 }
 
 fn parse_search_response(bytes: &[u8]) -> Result<MiguSearchPage> {
-    let envelope: MiguSearchEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu search returned malformed JSON"))?;
+    let envelope: MiguSearchEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu search returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(
             migu_upstream_error("Migu search rejected the request").with_details(json!({
@@ -1498,8 +1503,9 @@ fn parse_search_response(bytes: &[u8]) -> Result<MiguSearchPage> {
 }
 
 fn parse_playlist_detail_response(bytes: &[u8], requested_playlist_id: &str) -> Result<Playlist> {
-    let envelope: MiguPlaylistEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu playlist detail returned malformed JSON"))?;
+    let envelope: MiguPlaylistEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu playlist detail returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(
             migu_upstream_error("Migu playlist detail rejected the request").with_details(json!({
@@ -1607,8 +1613,9 @@ fn parse_playlist_tracks_response(
             "Migu playlist page number and size must be positive",
         ));
     }
-    let envelope: MiguPlaylistTracksEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu playlist tracks returned malformed JSON"))?;
+    let envelope: MiguPlaylistTracksEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu playlist tracks returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(
             migu_upstream_error("Migu playlist tracks rejected the request").with_details(json!({
@@ -1672,8 +1679,9 @@ fn parse_resource_response(bytes: &[u8], requested_content_id: &str) -> Result<T
 }
 
 fn parse_resource_record(bytes: &[u8], requested_content_id: &str) -> Result<MiguResource> {
-    let envelope: MiguResourceEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu resource detail returned malformed JSON"))?;
+    let envelope: MiguResourceEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu resource detail returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(
             migu_upstream_error("Migu resource detail rejected the request").with_details(json!({
@@ -1709,8 +1717,9 @@ fn parse_listening_rights_response(
     bytes: &[u8],
     requested_content_id: &str,
 ) -> Result<MiguListeningRights> {
-    let envelope: MiguListeningRightsEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu listening rights returned malformed JSON"))?;
+    let envelope: MiguListeningRightsEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu listening rights returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(
             migu_upstream_error("Migu listening rights rejected the request").with_details(json!({
@@ -1741,8 +1750,9 @@ fn parse_listening_rights_response(
 
 fn parse_public_stream_response(bytes: &[u8]) -> Result<MiguPlaybackData> {
     let decoded = decrypt_public_stream_response(bytes)?;
-    let envelope: MiguPlaybackEnvelope = serde_json::from_slice(&decoded)
-        .map_err(|_| migu_upstream_error("Migu public stream returned malformed JSON"))?;
+    let envelope: MiguPlaybackEnvelope = serde_json::from_slice(&decoded).map_err(|error| {
+        migu_upstream_error("Migu public stream returned malformed JSON").with_source(&error)
+    })?;
     if envelope.code != "000000" {
         return Err(TuneWeaveError::new(
             ErrorCode::PermissionDenied,
@@ -1919,53 +1929,18 @@ fn validate_public_audio_url(value: &str) -> Result<String> {
             "Migu did not return a public media URL",
         ));
     }
-    let url = Url::parse(value)
-        .map_err(|_| migu_upstream_error("Migu public stream returned an invalid media URL"))?;
-    // The H5 endpoint uses product8th/product and product9th/product. The PC
-    // account-listen endpoint also emits other signed resources under /public/.
-    // Keep the exact HTTPS media host and signed query contract below.
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.host_str() != Some(PUBLIC_AUDIO_HOST)
-        || !matches!(url.port(), None | Some(443))
-        || !url.path().starts_with("/public/")
-        || url.fragment().is_some()
-    {
+    let url = tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
         #[cfg(debug_assertions)]
-        eprintln!(
-            "DIAGNOSTIC migu_public_audio_url_shape={}",
-            safe_public_audio_url_shape(&url)
-        );
-        return Err(migu_upstream_error(
-            "Migu public stream returned an untrusted media URL",
-        ));
-    }
-    let mut timestamp_count = 0_u8;
-    let mut key_count = 0_u8;
-    let mut session_count = 0_u8;
-    let mut pair_count = 0_usize;
-    for (key, value) in url.query_pairs() {
-        pair_count = pair_count.saturating_add(1);
-        if pair_count > 16 || key.len() > 64 || value.len() > 512 {
-            return Err(migu_upstream_error(
-                "Migu public stream returned an invalid signed URL",
-            ));
+        if let Ok(url) = Url::parse(value) {
+            eprintln!(
+                "DIAGNOSTIC migu_public_audio_url_shape={}",
+                safe_public_audio_url_shape(&url)
+            );
         }
-        match key.as_ref() {
-            "Tim" if !value.is_empty() => timestamp_count = timestamp_count.saturating_add(1),
-            "Key" if !value.is_empty() => key_count = key_count.saturating_add(1),
-            "playSessionId" if !value.is_empty() => {
-                session_count = session_count.saturating_add(1);
-            }
-            _ => {}
-        }
-    }
-    if timestamp_count != 1 || key_count != 1 || session_count != 1 {
-        return Err(migu_upstream_error(
-            "Migu public stream returned invalid URL authorization fields",
-        ));
-    }
+        migu_upstream_error("Migu public stream returned an invalid media URL").with_source(&error)
+    })?;
+    // The fixed producer already decided authorization. Signed field names, path and
+    // CDN authority belong to that producer, rather than our local schema.
     Ok(url.to_string())
 }
 
@@ -2151,8 +2126,9 @@ fn map_song_download(
         #[serde(default)]
         encryption_type: String,
     }
-    let envelope: Envelope = serde_json::from_slice(bytes)
-        .map_err(|_| migu_upstream_error("Migu download returned malformed JSON"))?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|error| {
+        migu_upstream_error("Migu download returned malformed JSON").with_source(&error)
+    })?;
     result.platform_code = envelope.code.parse().ok();
     if envelope.code != "000000" {
         result.message = Some(bounded_text(&envelope.info, 256));
@@ -3532,6 +3508,7 @@ fn migu_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "Migu API request failed")
         .with_platform(Platform::Migu)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn migu_http_error(status: StatusCode) -> TuneWeaveError {
@@ -4360,12 +4337,19 @@ mod tests {
         assert!(media_spec_from_url(&mp3, "SQ").is_err());
         for value in [
             "http://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
-            "https://evil.example/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
+            "https://new-cdn.example/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
             "https://freetyst.nf.migu.cn:444/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
-            "https://user@freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&playSessionId=3",
             "https://freetyst.nf.migu.cn/private/a.mp3?Tim=1&Key=2&playSessionId=3",
             "https://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1",
             "https://freetyst.nf.migu.cn/public/product9th/product/a.mp3?Tim=1&Key=2&Key=3&playSessionId=4",
+        ] {
+            assert!(validate_public_audio_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "https://user@cdn.example/audio.mp3",
+            "https://cdn.example/audio.mp3#fragment",
+            "file:///audio.mp3",
+            "https://127.0.0.1/audio.mp3",
         ] {
             assert!(
                 validate_public_audio_url(value).is_err(),

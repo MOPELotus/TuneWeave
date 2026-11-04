@@ -50,7 +50,7 @@ fn mv_play_source_uses_official_default_format_order_without_inventing_pixel_dim
 fn mv_play_grants_require_real_https_and_bound_resources_and_never_upgrade_or_ignore_denial() {
     let source = parse_source(resource(), "7", &request(0)).unwrap();
     assert!(parse_grant(grant(), &source).is_ok());
-    for case in 0..10 {
+    for case in (0..10).filter(|case| *case != 4) {
         let mut g = grant();
         match case {
             0 => g["code"] = json!("000001"),
@@ -194,13 +194,6 @@ fn native_mv_grants_reject_refusals_missing_policies_and_unbound_urls() {
         {
             let mut value = native_grant("PQ", json!(3000), json!(0));
             value["data"]["playUrl"] = json!(
-                "https://freevod.nf.migu.cn/opaque/index.m3u8?playSessionId=session&resourceId=7&resourceType=D"
-            );
-            value
-        },
-        {
-            let mut value = native_grant("PQ", json!(3000), json!(0));
-            value["data"]["playUrl"] = json!(
                 "http://evil.invalid:8080/hls/v2/opaque/index.m3u8?playSessionId=session&resourceId=7&resourceType=D"
             );
             value
@@ -219,4 +212,13 @@ fn native_mv_grants_reject_refusals_missing_policies_and_unbound_urls() {
             "case {index}"
         );
     }
+}
+
+#[test]
+fn playlist_urls_allow_new_official_nodes_ports_and_paths_but_still_bind_the_resource() {
+    let value = "https://new-cdn.migu.cn:9443/new/path/master.m3u8?playSessionId=session&resourceId=7&resourceType=D";
+    assert!(media_url(value, "7").is_ok());
+    assert!(native_media_url(value, "7").is_ok());
+    assert!(media_url(value, "8").is_err());
+    assert!(native_media_url(value, "8").is_err());
 }

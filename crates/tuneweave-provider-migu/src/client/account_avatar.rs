@@ -141,7 +141,10 @@ impl MiguClient {
             serde_json::from_value(value.pointer("/data/types").cloned().ok_or_else(|| {
                 migu_upstream_error("Migu avatar audit response omitted its field types")
             })?)
-            .map_err(|_| migu_upstream_error("Migu avatar audit field types are invalid"))?;
+            .map_err(|json_cause| {
+                let mapped = migu_upstream_error("Migu avatar audit field types are invalid");
+                mapped.with_json_source(&json_cause)
+            })?;
         Ok(types.iter().any(|kind| kind == "4"))
     }
 

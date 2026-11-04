@@ -99,10 +99,7 @@ fn purchased_albums_reject_malformed_paging_types_identities_and_unsafe_metadata
         ("totalCount", json!(-1)),
         ("totalCount", json!("unknown")),
         ("totalCount", json!("18446744073709551616")),
-        (
-            "imgItems",
-            json!([{"img":"https://attacker.example/a.jpg"}]),
-        ),
+        ("imgItems", json!([{"img":"file:///a.jpg"}])),
         ("imgItems", json!(vec![json!({}); 65])),
     ] {
         let mut r = row("5");

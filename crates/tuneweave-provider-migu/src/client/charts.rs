@@ -147,7 +147,10 @@ fn row(row: Row, index: usize) -> Result<(Track, ChartTrackPreview)> {
     {
         return Err(invalid());
     }
-    let song: MiguSong = serde_json::from_str(&row.song_data).map_err(|_| invalid())?;
+    let song: MiguSong = serde_json::from_str(&row.song_data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     // These are distinct upstream identities. Embedded metadata must bind all three.
     if song.content_id != row.res_id
         || song.song_id != row.song_id
@@ -184,7 +187,10 @@ fn row(row: Row, index: usize) -> Result<(Track, ChartTrackPreview)> {
     Ok((track, preview))
 }
 fn parse_catalogue(bytes: &[u8], view: ChartCatalogView) -> Result<ChartCatalog> {
-    let envelope: Envelope<Index> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope<Index> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code != "000000" {
         return Err(migu_upstream_error(
             "Migu chart catalogue request was rejected",
@@ -269,7 +275,10 @@ fn parse_period_tracks(
     include_tags: bool,
     period: &ChartPeriod,
 ) -> Result<ChartTracks> {
-    let envelope: Envelope<Detail> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope<Detail> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.code == "200000" && envelope.data.is_none() {
         return Err(TuneWeaveError::new(
             ErrorCode::ResourceNotFound,

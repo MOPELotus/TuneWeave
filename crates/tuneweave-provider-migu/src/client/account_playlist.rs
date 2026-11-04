@@ -224,7 +224,10 @@ pub(crate) fn favorite_id(data: serde_json::Value) -> Result<String> {
 }
 
 fn favorite_id_inner(data: &serde_json::Value) -> Result<String> {
-    let home: Home = serde_json::from_value(data.clone()).map_err(|_| invalid())?;
+    let home: Home = serde_json::from_value(data.clone()).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if home.user_private_items.len() > 128 {
         return Err(invalid());
     }
@@ -266,7 +269,10 @@ pub(crate) fn favorite_id_for_write(data: serde_json::Value) -> Result<Option<St
 }
 
 fn favorite_id_for_write_inner(data: &serde_json::Value) -> Result<Option<String>> {
-    let home: Home = serde_json::from_value(data.clone()).map_err(|_| invalid())?;
+    let home: Home = serde_json::from_value(data.clone()).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if home.user_private_items.len() > 128 {
         return Err(invalid());
     }
@@ -317,7 +323,10 @@ fn favorite_id_from_action(action: &str) -> Result<String> {
 }
 
 pub(crate) fn detail(data: serde_json::Value, requested: &str) -> Result<Playlist> {
-    let raw: MiguPlaylistInfo = serde_json::from_value(data.clone()).map_err(|_| invalid())?;
+    let raw: MiguPlaylistInfo = serde_json::from_value(data.clone()).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = raw
         .music_num
         .as_ref()

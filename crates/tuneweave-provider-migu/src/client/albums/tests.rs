@@ -63,7 +63,7 @@ fn album_count_and_publication_fields_reject_malformed_values() {
 }
 
 #[test]
-fn album_images_allow_only_verified_official_paths_and_upgrade_file_service_https() {
+fn album_images_allow_new_cdn_paths_and_upgrade_known_file_service_https() {
     let suffix = format!("{}/{}/{}", "a".repeat(32), "b".repeat(32), "c".repeat(32));
     for prefix in ["file-down01", "file-down"] {
         let path = format!("/prod/file-service/{prefix}/{suffix}");
@@ -73,15 +73,18 @@ fn album_images_allow_only_verified_official_paths_and_upgrade_file_service_http
             url.replacen("http:", "https:", 1)
         );
         for url in [
-            format!("http://evil.example{path}"),
+            format!("file:///{path}"),
             format!("http://user:pass@d.musicapp.migu.cn{path}"),
-            format!("http://d.musicapp.migu.cn:1234{path}"),
             format!("http://d.musicapp.migu.cn{path}#fragment"),
-            "http://d.musicapp.migu.cn/arbitrary".to_owned(),
-            format!("https://d.musicapp.migu.cn/prod/file-service/{prefix}/short"),
         ] {
             assert!(album_image_url(&url).is_none(), "{url}");
         }
     }
     assert!(album_image_url("https://d.musicapp.migu.cn/data/oss/resource/cover.webp").is_some());
+}
+
+#[test]
+fn album_images_preserve_new_cdn_ports_paths_and_signatures() {
+    let url = "https://new-cdn.example:8443/cover?signature=opaque";
+    assert_eq!(album_image_url(url).as_deref(), Some(url));
 }
