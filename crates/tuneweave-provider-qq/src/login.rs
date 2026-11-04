@@ -1090,8 +1090,11 @@ fn parse_mobile_publish(topic: &str, publish: &Publish) -> Result<Option<MobileQ
         Some("timeout") => Ok(Some(MobileQrEvent::Expired)),
         Some("loginFailed") => Ok(Some(MobileQrEvent::LoginFailed)),
         Some("cookies") => {
-            let payload: serde_json::Value = serde_json::from_slice(&publish.payload)
-                .map_err(|_| mobile_mqtt_error("QQ mobile MQTT cookie payload is invalid JSON"))?;
+            let payload: serde_json::Value =
+                serde_json::from_slice(&publish.payload).map_err(|error| {
+                    mobile_mqtt_error("QQ mobile MQTT cookie payload is invalid JSON")
+                        .with_source(&error)
+                })?;
             let cookies = payload
                 .get("cookies")
                 .and_then(serde_json::Value::as_object)
@@ -1920,6 +1923,7 @@ fn login_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, message)
         .with_platform(Platform::Qq)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn login_http_error(status: StatusCode, context: &str) -> TuneWeaveError {

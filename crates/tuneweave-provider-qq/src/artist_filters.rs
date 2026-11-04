@@ -219,13 +219,15 @@ fn parse_video_tags(data: &Value) -> Result<Vec<ArtistVideoTag>> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
                 .ok_or_else(|| qq_data_error("QQ singer MV tag name is invalid"))?;
-            if !ids.insert(id) {
-                return Err(qq_data_error("QQ singer MV tags repeat an identity"));
-            }
             Ok(ArtistVideoTag {
                 id,
                 name: name.to_owned(),
             })
+        })
+        .filter_map(|result| match result {
+            Ok(tag) if ids.insert(tag.id) => Some(Ok(tag)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
         })
         .collect()
 }
@@ -317,7 +319,7 @@ mod tests {
         assert!(configure_tab(&mut wire, ArtistHomepageTabKind::Video, &filter).is_err());
         assert!(
             parse_video_tags(&json!({"list":[{"id":0,"name":"全部"},{"id":0,"name":"重复"}]}))
-                .is_err()
+                .is_ok()
         );
         assert_eq!(
             parse_video_tags(&json!({"list":[{"id":0,"name":"全部"}]})).unwrap()[0].id,

@@ -1223,7 +1223,14 @@ fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
         TuneWeaveError::new(error_code, format!("{context} failed with code {code}"))
             .with_platform(Platform::Qq)
             .retryable(matches!(code, 100_001 | 104_604 | 2001))
-            .with_details(json!({ "platform_code": code })),
+            .with_details(json!({ "platform_code": code }))
+            .with_upstream_message(
+                value
+                    .get("message")
+                    .or_else(|| value.get("msg"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
     )
 }
 
@@ -1319,10 +1326,11 @@ fn qq_api_body_kind(body: &[u8]) -> &'static str {
 fn invalid_qq_json_error(body: &[u8], error: serde_json::Error) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::UpstreamError, "QQ API returned invalid JSON")
         .with_platform(Platform::Qq)
+        .with_json_source(&error)
         .with_details(json!({
             "body_bytes": body.len(),
             "body_kind": qq_api_body_kind(body),
-            "parse_error": error.to_string(),
+            "parse_error": format!("{:?} JSON error at line {} column {}", error.classify(), error.line(), error.column()),
             "parse_error_category": match error.classify() {
                 serde_json::error::Category::Io => "io",
                 serde_json::error::Category::Syntax => "syntax",
@@ -1483,6 +1491,7 @@ fn network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, message)
         .with_platform(Platform::Qq)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn http_error(status: StatusCode) -> TuneWeaveError {

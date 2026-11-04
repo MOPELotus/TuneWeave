@@ -344,6 +344,7 @@ fn network_error(error: reqwest::Error) -> TuneWeaveError {
     )
     .with_platform(Platform::Qq)
     .retryable(true)
+    .with_source(&error.without_url())
 }
 
 fn qimei_data_error(message: impl Into<String>) -> TuneWeaveError {

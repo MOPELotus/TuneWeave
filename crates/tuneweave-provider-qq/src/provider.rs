@@ -14273,18 +14273,8 @@ fn qq_singer_image_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
     let Some(url) = first_qq_display_url(candidates)? else {
         return Ok(None);
     };
-    let parsed =
-        reqwest::Url::parse(&url).map_err(|_| qq_data_error("QQ singer image URL is malformed"))?;
-    let host = parsed
-        .host_str()
-        .expect("display URL validation requires a host")
-        .to_ascii_lowercase();
-    let trusted = ["qq.com", "gtimg.cn", "qpic.cn"]
-        .into_iter()
-        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")));
-    if !trusted {
-        return Err(qq_data_error("QQ singer image URL uses an untrusted host"));
-    }
+    tuneweave_core::validate_upstream_media_url(&url)
+        .map_err(|error| qq_data_error("QQ singer image URL is malformed").with_source(&error))?;
     Ok(Some(if url.starts_with("http://") {
         url.replacen("http://", "https://", 1)
     } else {
@@ -15584,21 +15574,9 @@ fn qq_mv_item_urls(item: &QqMvUrlItem) -> Result<(Vec<String>, &'static str)> {
 
 fn validate_qq_mv_url(value: &str) -> Result<String> {
     let value = value.trim();
-    let url = reqwest::Url::parse(value)
-        .map_err(|_| qq_data_error("QQ MV service returned an invalid media URL"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| qq_data_error("QQ MV service returned a media URL without a host"))?;
-    let trusted_host = ["qq.com", "tencentmusic.com", "gtimg.cn", "qpic.cn"]
-        .into_iter()
-        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")));
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !trusted_host
-    {
-        return Err(qq_data_error("QQ MV service returned an unsafe media URL"));
-    }
+    tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
+        qq_data_error("QQ MV service returned an invalid media URL").with_source(&error)
+    })?;
     Ok(value.to_owned())
 }
 
@@ -23891,6 +23869,13 @@ mod tests {
     }
 
     #[test]
+    fn mv_urls_accept_new_producer_cdn_hosts_ports_and_signed_paths() {
+        let value = "https://new-cdn.example:4483/new/video.mp4?signature=opaque";
+        assert_eq!(validate_qq_mv_url(value).unwrap(), value);
+        assert!(validate_qq_mv_url("https://127.0.0.1/video.mp4").is_err());
+    }
+
+    #[test]
     fn mv_url_mapping_rejects_missing_items_malformed_fields_and_unsafe_urls() {
         let vid = "013xscuH0xlbie".to_owned();
         let request = VideoStreamRequest::new(VideoResourceKind::Mv, 1080);
@@ -23919,7 +23904,7 @@ mod tests {
             response(json!({
                 "013xscuH0xlbie": {
                     "mp4": [{
-                        "url": ["https://attacker.example/video.mp4"],
+                        "url": ["https://user:secret@cdn.example/video.mp4"],
                         "freeflow_url": [],
                         "comm_url": [],
                         "cn": "M500.mp4",
