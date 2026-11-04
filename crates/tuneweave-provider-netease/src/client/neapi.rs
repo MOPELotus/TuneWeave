@@ -41,7 +41,10 @@ impl NeteaseClient {
                 .map_err(request_error)?;
             status = Some(response.status());
             let bytes = bounded_bytes(response).await?;
-            let body: Value = serde_json::from_slice(&bytes).map_err(|_| neapi_error())?;
+            let body: Value = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = neapi_error();
+                mapped.with_json_source(&json_cause)
+            })?;
             if body["code"] != 200 {
                 return Err(neapi_error());
             }

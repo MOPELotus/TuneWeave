@@ -2160,8 +2160,10 @@ fn parse_anti_cheat_token_v2(body: &str) -> Result<String> {
         registered: bool,
         token: String,
     }
-    let response: SdkToken =
-        serde_json::from_str(body).map_err(|_| anti_cheat_registration_error())?;
+    let response: SdkToken = serde_json::from_str(body).map_err(|json_cause| {
+        let mapped = anti_cheat_registration_error();
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.code != 200
         || !response.registered
         || response.token.is_empty()
@@ -2186,8 +2188,10 @@ fn parse_anti_cheat_token_v3(body: &str) -> Result<String> {
     if end <= start {
         return Err(anti_cheat_registration_error());
     }
-    let response = serde_json::from_str::<Value>(&body[start..=end])
-        .map_err(|_| anti_cheat_registration_error())?;
+    let response = serde_json::from_str::<Value>(&body[start..=end]).map_err(|json_cause| {
+        let mapped = anti_cheat_registration_error();
+        mapped.with_json_source(&json_cause)
+    })?;
     let values = response
         .as_array()
         .filter(|values| values.len() >= 3)

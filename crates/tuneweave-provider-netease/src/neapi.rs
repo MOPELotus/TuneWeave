@@ -102,7 +102,10 @@ pub(crate) fn decrypt(data: &[u8], config: &Configuration) -> Result<Value> {
         .map_err(|_| invalid())?;
     let decoded = inflate(&complete_streaming_frame(compressed.to_vec())?)?;
     // Require exactly one JSON document; never silently discard trailing data.
-    serde_json::from_slice(&decoded).map_err(|_| invalid())
+    serde_json::from_slice(&decoded).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })
 }
 
 pub(crate) fn decode_configuration(raw: &[u8]) -> Result<Configuration> {

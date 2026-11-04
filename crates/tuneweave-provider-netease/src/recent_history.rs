@@ -188,7 +188,10 @@ fn record(raw: Value, kind: Kind) -> Result<Record> {
 
 fn track(raw: Value) -> Result<RecentTrackHistoryEntry> {
     let record = record(raw, Kind::Track)?;
-    let song = serde_json::from_value(record.data).map_err(|_| malformed("track"))?;
+    let song = serde_json::from_value(record.data).map_err(|json_cause| {
+        let mapped = malformed("track");
+        mapped.with_json_source(&json_cause)
+    })?;
     Ok(RecentTrackHistoryEntry {
         track: map_song(song, None)?,
         played_at: record.played_at,
@@ -199,7 +202,10 @@ fn track(raw: Value) -> Result<RecentTrackHistoryEntry> {
 
 fn album(raw: Value) -> Result<RecentAlbumHistoryEntry> {
     let record = record(raw, Kind::Album)?;
-    let album = serde_json::from_value(record.data).map_err(|_| malformed("album"))?;
+    let album = serde_json::from_value(record.data).map_err(|json_cause| {
+        let mapped = malformed("album");
+        mapped.with_json_source(&json_cause)
+    })?;
     Ok(RecentAlbumHistoryEntry {
         album: map_album(album)?,
         played_at: record.played_at,
@@ -212,7 +218,10 @@ fn playlist(raw: Value) -> Result<RecentPlaylistHistoryEntry> {
     let record = record(raw, Kind::Playlist)?;
     let known_track_count = record.data.get("trackCount").is_some_and(|v| !v.is_null())
         || record.data.get("trackIds").is_some_and(Value::is_array);
-    let playlist = serde_json::from_value(record.data).map_err(|_| malformed("playlist"))?;
+    let playlist = serde_json::from_value(record.data).map_err(|json_cause| {
+        let mapped = malformed("playlist");
+        mapped.with_json_source(&json_cause)
+    })?;
     let mut playlist = map_playlist(playlist)?;
     if !known_track_count {
         playlist.track_count = None;

@@ -342,7 +342,10 @@ fn acknowledgement(response: &CloudUploadStepResponse) -> Result<Ack> {
         err_code: Option<Value>,
         code: Option<Value>,
     }
-    let body: Body = serde_json::from_str(&response.body).map_err(|_| malformed())?;
+    let body: Body = serde_json::from_str(&response.body).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if [body.err_code, body.code]
         .into_iter()
         .flatten()

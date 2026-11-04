@@ -75,7 +75,10 @@ impl Identities {
                     continue;
                 }
                 let identity: Identity =
-                    serde_json::from_str(record.secret()).map_err(|_| state_error())?;
+                    serde_json::from_str(record.secret()).map_err(|json_cause| {
+                        let mapped = state_error();
+                        mapped.with_json_source(&json_cause)
+                    })?;
                 if !record.account.starts_with(ACCOUNT_PREFIX)
                     || identity.binding.len() != 43
                     || identity.value.as_deref().is_none_or(|value| !valid(value))
