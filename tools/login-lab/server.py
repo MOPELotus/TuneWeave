@@ -63,7 +63,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.command == "GET" and path.path in ["/", "/app.js", "/flow.js", "/style.css", "/qrcode.js", "/info"]:
             if path.path == "/info":
-                self.reply(200, json.dumps({"version": "1.0.0-beta.2", "isolated": True}).encode())
+                self.reply(200, json.dumps({"version": "1.0.0-beta.3", "isolated": True}).encode())
                 return
             name = {"/": "index.html", "/app.js": "app.js", "/flow.js": "flow.js", "/style.css": "style.css", "/qrcode.js": "node_modules/qrcode-generator/dist/qrcode.js"}[path.path]
             p = ROOT / name
