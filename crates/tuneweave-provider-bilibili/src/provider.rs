@@ -1363,12 +1363,15 @@ impl BilibiliProvider {
             .with_platform(Platform::Bilibili));
         }
         serde_json::from_str::<BilibiliCredential>(stored.secret())
-            .map_err(|_| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    "stored Bilibili credential is malformed",
-                )
-                .with_platform(Platform::Bilibili)
+            .map_err(|json_cause| {
+                let mapped = {
+                    TuneWeaveError::new(
+                        ErrorCode::InternalError,
+                        "stored Bilibili credential is malformed",
+                    )
+                    .with_platform(Platform::Bilibili)
+                };
+                mapped.with_json_source(&json_cause)
             })?
             .normalize()
             .map_err(|_| {
@@ -1643,9 +1646,12 @@ fn parse_bilibili_caller_credential(credential: &ProviderCredential) -> Result<B
         .with_platform(Platform::Bilibili));
     }
     serde_json::from_str::<BilibiliCredential>(credential.secret())
-        .map_err(|_| {
-            TuneWeaveError::invalid_request("caller Bilibili credential payload is malformed")
-                .with_platform(Platform::Bilibili)
+        .map_err(|json_cause| {
+            let mapped = {
+                TuneWeaveError::invalid_request("caller Bilibili credential payload is malformed")
+                    .with_platform(Platform::Bilibili)
+            };
+            mapped.with_json_source(&json_cause)
         })?
         .normalize()
         .map_err(|_| {

@@ -4371,8 +4371,10 @@ fn parse_video_search_response(
             continue;
         }
         let result_type = parse_video_search_result_type(item_type)?;
-        let item: VideoSearchItem = serde_json::from_value(raw_item).map_err(|_| {
-            bilibili_upstream_error("Bilibili video search returned an invalid video item")
+        let item: VideoSearchItem = serde_json::from_value(raw_item).map_err(|json_cause| {
+            let mapped =
+                { bilibili_upstream_error("Bilibili video search returned an invalid video item") };
+            mapped.with_json_source(&json_cause)
         })?;
         if matches!(
             result_type,
