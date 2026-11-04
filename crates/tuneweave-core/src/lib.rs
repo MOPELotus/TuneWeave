@@ -178,3 +178,6 @@ pub use cloud_transfer::{
     CloudUploadPublishMetadata, CloudUploadStep, CloudUploadStepKind, CloudUploadStepResponse,
     CloudUploadStrategy, CloudUploadTransfer, CloudUploadTransferRequest, CloudUploadTransferState,
 };
+
+mod media_url;
+pub use media_url::validate_upstream_media_url;

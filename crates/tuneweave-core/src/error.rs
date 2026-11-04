@@ -83,9 +83,74 @@ impl TuneWeaveError {
     }
 
     #[must_use]
-    pub fn with_details(mut self, details: Value) -> Self {
+    pub fn with_details(mut self, mut details: Value) -> Self {
+        if let Some(object) = details.as_object_mut() {
+            for key in ["source_chain", "json_line", "json_column", "json_category"] {
+                if let Some(value) = self.details.get(key) {
+                    object.entry(key).or_insert_with(|| value.clone());
+                }
+            }
+        }
         self.details = details;
         self
+    }
+
+    /// Preserve the underlying cause chain without returning request URLs or payload values.
+    /// The short chain is also added to message for clients that do not display details.
+    #[must_use]
+    pub fn with_source(mut self, error: &(dyn std::error::Error + 'static)) -> Self {
+        let mut chain = Vec::new();
+        let mut current = Some(error);
+        for _ in 0..8 {
+            let Some(source) = current else { break };
+            let message = safe_error_cause(&source.to_string());
+            if !message.is_empty() && !chain.contains(&message) {
+                chain.push(message);
+            }
+            current = source.source();
+        }
+        if !chain.is_empty() {
+            let summary = chain.join(": ");
+            self.message.push_str(": ");
+            self.message.extend(summary.chars().take(1024));
+            if !self.details.is_object() {
+                self.details = json!({});
+            }
+            self.details["source_chain"] = json!(chain);
+        }
+        if let Some(error) = error.downcast_ref::<serde_json::Error>() {
+            self.details["json_line"] = json!(error.line());
+            self.details["json_column"] = json!(error.column());
+            self.details["json_category"] =
+                json!(format!("{:?}", error.classify()).to_ascii_lowercase());
+        }
+        self
+    }
+
+    /// Include a producer's human-readable business failure without echoing its payload.
+    #[must_use]
+    pub fn with_upstream_message(mut self, message: &str) -> Self {
+        let message = safe_error_cause(message);
+        if !message.is_empty() {
+            self.message.push_str(": ");
+            self.message.push_str(&message);
+            if !self.details.is_object() {
+                self.details = json!({});
+            }
+            self.details["upstream_message"] = json!(message);
+        }
+        self
+    }
+
+    /// JSON diagnostics include location/category; actual payload values are redacted.
+    #[must_use]
+    pub fn with_json_source(self, error: &serde_json::Error) -> Self {
+        let mut error_result = self.with_source(error);
+        error_result.details["json_line"] = json!(error.line());
+        error_result.details["json_column"] = json!(error.column());
+        error_result.details["json_category"] =
+            json!(format!("{:?}", error.classify()).to_ascii_lowercase());
+        error_result
     }
 
     /// Marks a failed verification whose transaction must not be submitted again,
@@ -161,11 +226,124 @@ impl TuneWeaveError {
     }
 }
 
+// Third-party errors sometimes embed complete URLs or the rejected JSON value.
+// Preserve transport/parser wording, but remove those untrusted data fragments.
+fn safe_error_cause(value: &str) -> String {
+    let bounded: String = value.chars().take(4096).collect();
+    let mut input = bounded.as_str();
+    let mut result = String::new();
+    while !input.is_empty() {
+        if input.starts_with("http://") || input.starts_with("https://") {
+            let end = input.find(char::is_whitespace).unwrap_or(input.len());
+            result.push_str("[URL redacted]");
+            input = &input[end..];
+            continue;
+        }
+        let character = input.chars().next().unwrap();
+        input = &input[character.len_utf8()..];
+        if matches!(character, '\"' | '\'' | '`') {
+            let mut escaped = false;
+            while let Some(next) = input.chars().next() {
+                input = &input[next.len_utf8()..];
+                if next == character && !escaped {
+                    break;
+                }
+                escaped = next == '\\' && !escaped;
+            }
+            result.push_str("[value redacted]");
+        } else {
+            result.push(if character.is_control() {
+                ' '
+            } else {
+                character
+            });
+        }
+    }
+    let mut words = result.split_whitespace().peekable();
+    let mut output = Vec::new();
+    while let Some(word) = words.next() {
+        let key = word
+            .split(['=', ':'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if word.contains(['=', ':'])
+            && [
+                "token",
+                "password",
+                "cookie",
+                "credential",
+                "secret",
+                "signature",
+                "authorization",
+                "musickey",
+            ]
+            .iter()
+            .any(|name| key.contains(name))
+        {
+            if word.ends_with(['=', ':'])
+                && let Some(next) = words.next()
+                && next.eq_ignore_ascii_case("bearer")
+            {
+                words.next();
+            }
+            output.push("[credential redacted]".to_owned());
+        } else if (word.len() >= 32
+            && word
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')))
+            || (word.len() >= 4 && word.bytes().all(|c| c.is_ascii_digit()))
+        {
+            output.push("[opaque value redacted]".to_owned());
+        } else {
+            output.push(word.to_owned());
+        }
+    }
+    output.join(" ").chars().take(512).collect()
+}
+
 pub type Result<T> = std::result::Result<T, TuneWeaveError>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_causes_are_readable_without_urls_or_payload_values() {
+        let source = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused (os error 111) https://user:private@example.test/?token=secret token=private-value",
+        );
+        let error = TuneWeaveError::new(ErrorCode::UpstreamError, "QQ API request failed")
+            .with_source(&source);
+        assert!(error.message.contains("Connection refused (os error 111)"));
+        assert!(error.details["source_chain"].is_array());
+        let public = format!("{error:?}");
+        for secret in ["private", "example.test", "secret"] {
+            assert!(!public.contains(secret));
+        }
+    }
+
+    #[test]
+    fn upstream_business_messages_redact_bearer_and_separate_header_values() {
+        let error = TuneWeaveError::new(ErrorCode::UpstreamError, "Request rejected")
+            .with_upstream_message("account restricted; cookie: private-cookie authorization: Bearer private-token token=private-value");
+        assert!(error.message.contains("account restricted"));
+        for secret in ["private-cookie", "private-token", "private-value"] {
+            assert!(!format!("{error:?}").contains(secret));
+        }
+    }
+
+    #[test]
+    fn json_errors_keep_the_underlying_reason_and_location_but_not_rejected_values() {
+        let source = serde_json::from_str::<Vec<u64>>(r#"["private-cookie"]"#).unwrap_err();
+        let error = TuneWeaveError::new(ErrorCode::UpstreamError, "Invalid search JSON")
+            .with_json_source(&source);
+        assert!(error.message.contains("invalid type"));
+        assert!(!format!("{error:?}").contains("private-cookie"));
+        assert_eq!(error.details["json_category"], "data");
+        assert_eq!(error.details["json_line"], 1);
+    }
 
     #[test]
     fn challenge_consumption_is_typed_and_prevents_retry_without_changing_the_failure_code() {
