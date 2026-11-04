@@ -3926,8 +3926,9 @@ async fn read_bounded_video_detail_response(response: reqwest::Response) -> Resu
 
 fn parse_device_identity_response(bytes: &[u8]) -> Result<BilibiliWebDevice> {
     let response: PassportResponse<DeviceIdentityData> =
-        serde_json::from_slice(bytes).map_err(|_| {
+        serde_json::from_slice(bytes).map_err(|error| {
             bilibili_upstream_error("Bilibili device identity endpoint returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -3950,8 +3951,9 @@ fn parse_device_identity_response(bytes: &[u8]) -> Result<BilibiliWebDevice> {
 
 fn parse_web_ticket_response(bytes: &[u8]) -> Result<(CachedWebTicket, WbiKeys)> {
     let response: PassportResponse<WebTicketData> =
-        serde_json::from_slice(bytes).map_err(|_| {
+        serde_json::from_slice(bytes).map_err(|error| {
             bilibili_upstream_error("Bilibili web ticket endpoint returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -3991,8 +3993,10 @@ fn parse_web_ticket_response(bytes: &[u8]) -> Result<(CachedWebTicket, WbiKeys)>
 }
 
 fn parse_search_suggestion_response(bytes: &[u8]) -> Result<BilibiliSearchSuggestionSet> {
-    let response: SearchSuggestionResponse = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili search suggestion returned invalid JSON"))?;
+    let response: SearchSuggestionResponse = serde_json::from_slice(bytes).map_err(|error| {
+        bilibili_upstream_error("Bilibili search suggestion returned invalid JSON")
+            .with_source(&error)
+    })?;
     if !matches!(response.code, 0 | 3) {
         return Err(platform_business_error(
             "Bilibili search suggestion",
@@ -4052,8 +4056,11 @@ fn parse_search_suggestion_response(bytes: &[u8]) -> Result<BilibiliSearchSugges
 }
 
 fn parse_search_trending_response(bytes: &[u8]) -> Result<BilibiliSearchTrending> {
-    let response: PassportResponse<SearchTrendingData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili trending search returned invalid JSON"))?;
+    let response: PassportResponse<SearchTrendingData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili trending search returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili trending search",
@@ -4300,8 +4307,11 @@ fn parse_video_search_response(
     bytes: &[u8],
     requested_page: u32,
 ) -> Result<BilibiliVideoSearchPage> {
-    let response: PassportResponse<VideoSearchPayload> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili video search returned invalid JSON"))?;
+    let response: PassportResponse<VideoSearchPayload> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili video search returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili video search",
@@ -4387,8 +4397,11 @@ fn parse_video_view_response(
     bytes: &[u8],
     requested_identity: &crate::BilibiliVideoIdentity,
 ) -> Result<BilibiliVideoView> {
-    let response: PassportResponse<VideoViewData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili video detail returned invalid JSON"))?;
+    let response: PassportResponse<VideoViewData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili video detail returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili video detail",
@@ -4517,8 +4530,9 @@ fn parse_video_view_response(
 }
 
 fn parse_video_recent_like_state_response(bytes: &[u8]) -> Result<bool> {
-    let response: PassportResponse<u64> = serde_json::from_slice(bytes).map_err(|_| {
+    let response: PassportResponse<u64> = serde_json::from_slice(bytes).map_err(|error| {
         bilibili_upstream_error("Bilibili recent video like state returned invalid JSON")
+            .with_source(&error)
     })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -4537,8 +4551,11 @@ fn parse_video_recent_like_state_response(bytes: &[u8]) -> Result<bool> {
 }
 
 fn parse_video_coin_state_response(bytes: &[u8]) -> Result<u64> {
-    let response: PassportResponse<VideoCoinStateData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili video coin state returned invalid JSON"))?;
+    let response: PassportResponse<VideoCoinStateData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili video coin state returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili video coin state",
@@ -4562,8 +4579,9 @@ fn parse_video_coin_state_response(bytes: &[u8]) -> Result<u64> {
 
 fn parse_video_favorite_state_response(bytes: &[u8]) -> Result<(bool, u64)> {
     let response: PassportResponse<VideoFavoriteStateData> = serde_json::from_slice(bytes)
-        .map_err(|_| {
+        .map_err(|error| {
             bilibili_upstream_error("Bilibili video favorite state returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -4584,8 +4602,11 @@ fn parse_video_subtitle_catalog(
     requested_bvid: &str,
     requested_cid: u64,
 ) -> Result<BilibiliSubtitleCatalog> {
-    let response: PassportResponse<VideoPlayerData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili subtitle catalog returned invalid JSON"))?;
+    let response: PassportResponse<VideoPlayerData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili subtitle catalog returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili subtitle catalog",
@@ -4659,8 +4680,9 @@ fn parse_video_subtitle_catalog(
 }
 
 fn parse_subtitle_body(bytes: &[u8]) -> Result<BilibiliSubtitleBody> {
-    let data: SubtitleBodyData = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili subtitle body returned invalid JSON"))?;
+    let data: SubtitleBodyData = serde_json::from_slice(bytes).map_err(|error| {
+        bilibili_upstream_error("Bilibili subtitle body returned invalid JSON").with_source(&error)
+    })?;
     if data.body.len() > 100_000 {
         return Err(bilibili_upstream_error(
             "Bilibili subtitle body exceeded the cue limit",
@@ -4728,8 +4750,11 @@ fn parse_playback_manifest(
     requested_bvid: &str,
     requested_cid: u64,
 ) -> Result<BilibiliPlaybackManifest> {
-    let response: PassportResponse<PlaybackData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili playback manifest returned invalid JSON"))?;
+    let response: PassportResponse<PlaybackData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili playback manifest returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili playback manifest",
@@ -4762,8 +4787,9 @@ fn parse_playback_manifest(
     };
     let format = validated_bilibili_text(&data.format, "playback format", 128)?;
     let accepted_formats = validated_playback_formats(&data.accept_format)?;
+    let descriptions =
+        playback_quality_descriptions(&data.accept_quality, data.accept_description)?;
     let accepted_qualities = validated_playback_qualities(data.accept_quality)?;
-    let descriptions = playback_quality_descriptions(&accepted_qualities, data.accept_description)?;
     let formats = map_playback_formats(data.support_formats, &descriptions)?;
     let seek_parameter = optional_bounded_text(&data.seek_param, "playback seek parameter", 64)?;
     let seek_type = optional_bounded_text(&data.seek_type, "playback seek type", 64)?;
@@ -4883,113 +4909,101 @@ fn validated_playback_formats(value: &str) -> Result<Vec<String>> {
     }
     let formats = value
         .split(',')
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
         .map(|format| validated_bilibili_text(format, "accepted playback format", 128))
         .collect::<Result<Vec<_>>>()?;
-    if formats.len() > 64 {
+    if formats.len() > 256 {
         return Err(bilibili_upstream_error(
             "Bilibili playback manifest exceeded the accepted format limit",
         ));
     }
     let mut unique = std::collections::BTreeSet::new();
-    if formats.iter().any(|format| !unique.insert(format.clone())) {
-        return Err(bilibili_upstream_error(
-            "Bilibili playback manifest returned duplicate accepted formats",
-        ));
-    }
-    Ok(formats)
+    Ok(formats
+        .into_iter()
+        .filter(|format| unique.insert(format.clone()))
+        .collect())
 }
 
 fn validated_playback_qualities(qualities: Vec<u32>) -> Result<Vec<u32>> {
-    if qualities.len() > 64 {
-        return Err(bilibili_upstream_error(
-            "Bilibili playback manifest exceeded the accepted quality limit",
-        ));
-    }
-    let mut unique = std::collections::BTreeSet::new();
-    if qualities
-        .iter()
-        .any(|quality| *quality == 0 || !unique.insert(*quality))
-    {
+    if qualities.len() > 256 {
         return Err(bilibili_upstream_error(
             "Bilibili playback manifest returned invalid accepted qualities",
         ));
     }
-    Ok(qualities)
+    let mut unique = std::collections::BTreeSet::new();
+    Ok(qualities
+        .into_iter()
+        .filter(|quality| *quality > 0 && unique.insert(*quality))
+        .collect())
 }
 
 fn playback_quality_descriptions(
     qualities: &[u32],
     descriptions: Vec<String>,
 ) -> Result<BTreeMap<u32, String>> {
-    if !descriptions.is_empty() && descriptions.len() != qualities.len() {
-        return Err(bilibili_upstream_error(
-            "Bilibili playback quality descriptions were inconsistent",
-        ));
+    let mut mapped = BTreeMap::new();
+    // Descriptions are optional display metadata. Pair before deduplication so repeated
+    // quality IDs cannot shift the labels of following qualities.
+    for (quality, description) in qualities.iter().copied().zip(descriptions) {
+        if let Some(description) =
+            optional_bounded_text(&description, "playback quality description", 256)?
+        {
+            mapped.entry(quality).or_insert(description);
+        }
     }
-    qualities
-        .iter()
-        .copied()
-        .zip(descriptions)
-        .map(|(quality, description)| {
-            validated_bilibili_text(&description, "playback quality description", 256)
-                .map(|description| (quality, description))
-        })
-        .collect()
+    Ok(mapped)
 }
 
 fn map_playback_formats(
     formats: Vec<PlaybackFormatData>,
     descriptions: &BTreeMap<u32, String>,
 ) -> Result<Vec<BilibiliPlaybackFormat>> {
-    if formats.len() > 64 {
+    if formats.len() > 256 {
         return Err(bilibili_upstream_error(
             "Bilibili playback manifest exceeded the format detail limit",
         ));
     }
-    let mut identities = std::collections::BTreeSet::new();
-    formats
-        .into_iter()
-        .map(|format| {
-            if format.quality == 0 || !identities.insert(format.quality) {
-                return Err(bilibili_upstream_error(
-                    "Bilibili playback manifest returned duplicate format details",
-                ));
-            }
-            let name = validated_bilibili_text(&format.format, "playback format detail", 128)?;
-            let description =
-                optional_bounded_text(&format.new_description, "playback format description", 256)?
-                    .or_else(|| descriptions.get(&format.quality).cloned())
-                    .ok_or_else(|| {
-                        bilibili_upstream_error(
-                            "Bilibili playback format detail omitted its description",
-                        )
-                    })?;
-            let display_description =
-                optional_bounded_text(&format.display_desc, "playback display description", 256)?
-                    .unwrap_or_else(|| description.clone());
-            let superscript =
-                optional_bounded_text(&format.superscript, "playback superscript", 128)?;
-            let codecs = format
-                .codecs
-                .unwrap_or_default()
-                .into_iter()
-                .map(|codec| validated_bilibili_text(&codec, "playback format codec", 256))
-                .collect::<Result<Vec<_>>>()?;
-            if codecs.len() > 16 {
-                return Err(bilibili_upstream_error(
-                    "Bilibili playback format detail exceeded the codec limit",
-                ));
-            }
-            Ok(BilibiliPlaybackFormat {
-                quality: format.quality,
-                format: name,
-                description,
-                display_description,
-                superscript,
-                codecs,
-            })
-        })
-        .collect()
+    let mut mapped = Vec::new();
+    for format in formats {
+        if format.quality == 0 {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback manifest returned duplicate format details",
+            ));
+        }
+        let name = validated_bilibili_text(&format.format, "playback format detail", 128)?;
+        let description =
+            optional_bounded_text(&format.new_description, "playback format description", 256)?
+                .or_else(|| descriptions.get(&format.quality).cloned())
+                .unwrap_or_else(|| name.clone());
+        let display_description =
+            optional_bounded_text(&format.display_desc, "playback display description", 256)?
+                .unwrap_or_else(|| description.clone());
+        let superscript = optional_bounded_text(&format.superscript, "playback superscript", 128)?;
+        let codecs = format
+            .codecs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|codec| validated_bilibili_text(&codec, "playback format codec", 256))
+            .collect::<Result<Vec<_>>>()?;
+        if codecs.len() > 16 {
+            return Err(bilibili_upstream_error(
+                "Bilibili playback format detail exceeded the codec limit",
+            ));
+        }
+        let item = BilibiliPlaybackFormat {
+            quality: format.quality,
+            format: name,
+            description,
+            display_description,
+            superscript,
+            codecs,
+        };
+        if !mapped.contains(&item) {
+            mapped.push(item);
+        }
+    }
+    Ok(mapped)
 }
 
 fn map_playback_tracks(
@@ -5001,24 +5015,14 @@ fn map_playback_tracks(
             "Bilibili playback manifest exceeded the track limit",
         ));
     }
-    let mut identities = std::collections::BTreeSet::new();
-    tracks
-        .into_iter()
-        .map(|track| {
-            let track = map_playback_track(track, video)?;
-            if !identities.insert((
-                track.id,
-                track.codecs.clone(),
-                track.bandwidth,
-                track.url.clone(),
-            )) {
-                return Err(bilibili_upstream_error(
-                    "Bilibili playback manifest returned duplicate tracks",
-                ));
-            }
-            Ok(track)
-        })
-        .collect()
+    let mut mapped = Vec::new();
+    for track in tracks {
+        let track = map_playback_track(track, video)?;
+        if !mapped.contains(&track) {
+            mapped.push(track);
+        }
+    }
+    Ok(mapped)
 }
 
 fn map_playback_track(track: PlaybackTrackData, video: bool) -> Result<BilibiliPlaybackTrack> {
@@ -5181,17 +5185,11 @@ fn map_playback_language_catalog(
             "Bilibili playback language catalog exceeded its limit",
         ));
     }
-    let mut identities = std::collections::BTreeSet::new();
     let items = catalog
         .items
         .into_iter()
         .map(|item| {
             let language = validate_playback_language_parameter(&item.lang)?;
-            if !identities.insert((language.clone(), item.production_type)) {
-                return Err(bilibili_upstream_error(
-                    "Bilibili playback language catalog returned duplicate entries",
-                ));
-            }
             Ok(BilibiliPlaybackLanguage {
                 language,
                 title: validated_bilibili_text(&item.title, "playback language title", 256)?,
@@ -5206,9 +5204,15 @@ fn map_playback_language_catalog(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut unique_items = Vec::new();
+    for item in items {
+        if !unique_items.contains(&item) {
+            unique_items.push(item);
+        }
+    }
     Ok(BilibiliPlaybackLanguageCatalog {
         supported: catalog.support,
-        items,
+        items: unique_items,
         open_message: optional_bounded_text(
             &catalog.open_toast,
             "playback language open message",
@@ -5246,23 +5250,13 @@ fn reconcile_playback_alias<T: PartialEq>(
 }
 
 fn validate_bilibili_media_urls(urls: Vec<String>, primary: &str) -> Result<Vec<String>> {
-    if urls.len() > 16 {
-        return Err(bilibili_upstream_error(
-            "Bilibili playback track exceeded the backup URL limit",
-        ));
-    }
     let mut unique = std::collections::BTreeSet::from([primary.to_owned()]);
-    urls.into_iter()
-        .map(|url| {
-            let url = validate_bilibili_media_url(&url)?;
-            if !unique.insert(url.clone()) {
-                return Err(bilibili_upstream_error(
-                    "Bilibili playback track returned duplicate media URLs",
-                ));
-            }
-            Ok(url)
-        })
-        .collect()
+    Ok(urls
+        .into_iter()
+        .take(256)
+        .filter_map(|url| validate_bilibili_media_url(&url).ok())
+        .filter(|url| unique.insert(url.clone()))
+        .collect())
 }
 
 fn validate_bilibili_media_url(value: &str) -> Result<String> {
@@ -5272,21 +5266,10 @@ fn validate_bilibili_media_url(value: &str) -> Result<String> {
             "Bilibili playback returned an invalid media URL",
         ));
     }
-    let url = Url::parse(value)
-        .map_err(|_| bilibili_upstream_error("Bilibili playback returned an invalid media URL"))?;
-    // These URLs come from the fixed official playback endpoint. CDN hosts,
-    // ports and paths are platform-controlled and change independently of us.
-    // We return them to clients; this function does not fetch their contents.
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(bilibili_upstream_error(
-            "Bilibili playback returned an unsafe media URL",
-        ));
-    }
+    let url = tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
+        bilibili_upstream_error("Bilibili playback returned an invalid media URL")
+            .with_source(&error)
+    })?;
     Ok(url.to_string())
 }
 
@@ -5315,14 +5298,7 @@ fn playback_manifest_expiration(
             let deadline = url
                 .query_pairs()
                 .find_map(|(name, value)| (name == "deadline").then(|| value.into_owned()))
-                .map(|value| {
-                    value.parse::<u64>().map_err(|_| {
-                        bilibili_upstream_error(
-                            "Bilibili playback media URL contained an invalid deadline",
-                        )
-                    })
-                })
-                .transpose()?;
+                .and_then(|value| value.parse::<u64>().ok());
             Ok(match (expiry, deadline) {
                 (Some(current), Some(deadline)) => Some(current.min(deadline)),
                 (None, Some(deadline)) => Some(deadline),
@@ -5336,8 +5312,9 @@ fn parse_created_favorite_folders_response(
     requested_owner_id: u64,
 ) -> Result<BilibiliCreatedFavoriteFolders> {
     let response: PassportResponse<CreatedFavoriteFoldersData> = serde_json::from_slice(bytes)
-        .map_err(|_| {
+        .map_err(|error| {
             bilibili_upstream_error("Bilibili created favorite folders returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -5419,8 +5396,11 @@ fn parse_favorite_folder_response(
     bytes: &[u8],
     requested_media_id: u64,
 ) -> Result<BilibiliFavoriteFolder> {
-    let response: PassportResponse<FavoriteFolderData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili favorite folder returned invalid JSON"))?;
+    let response: PassportResponse<FavoriteFolderData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili favorite folder returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili favorite folder",
@@ -5511,8 +5491,11 @@ fn parse_favorite_media_response(
     requested_page: u32,
     requested_page_size: u32,
 ) -> Result<BilibiliFavoriteMediaPage> {
-    let response: PassportResponse<FavoriteMediaData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili favorite media returned invalid JSON"))?;
+    let response: PassportResponse<FavoriteMediaData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili favorite media returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili favorite media",
@@ -5661,8 +5644,9 @@ fn parse_collected_playlists_response(
     requested_page_size: u32,
 ) -> Result<BilibiliCollectedPlaylistPage> {
     let response: PassportResponse<CollectedPlaylistsData> = serde_json::from_slice(bytes)
-        .map_err(|_| {
+        .map_err(|error| {
             bilibili_upstream_error("Bilibili collected playlists returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -5852,8 +5836,11 @@ fn parse_space_playlists_response(
     requested_page: u32,
     requested_page_size: u32,
 ) -> Result<BilibiliSpacePlaylistPage> {
-    let response: PassportResponse<SpacePlaylistsData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili space playlists returned invalid JSON"))?;
+    let response: PassportResponse<SpacePlaylistsData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili space playlists returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili space playlists",
@@ -6067,8 +6054,11 @@ fn parse_season_archives_response(
     requested_page: u32,
     requested_page_size: u32,
 ) -> Result<BilibiliSeasonArchivePage> {
-    let response: PassportResponse<SeasonArchivesData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili season archives returned invalid JSON"))?;
+    let response: PassportResponse<SeasonArchivesData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili season archives returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili season archives",
@@ -6640,8 +6630,10 @@ fn parse_duration_seconds(value: &str) -> Result<u64> {
 }
 
 fn parse_wbi_keys_response(bytes: &[u8]) -> Result<WbiKeys> {
-    let response: PassportResponse<NavData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili WBI key endpoint returned invalid JSON"))?;
+    let response: PassportResponse<NavData> = serde_json::from_slice(bytes).map_err(|error| {
+        bilibili_upstream_error("Bilibili WBI key endpoint returned invalid JSON")
+            .with_source(&error)
+    })?;
     if !matches!(response.code, 0 | -101) {
         return Err(platform_business_error(
             "Bilibili WBI key request",
@@ -6698,8 +6690,9 @@ fn parse_web_cookie_timestamp_response(status: StatusCode, headers: &HeaderMap) 
 
 fn parse_cookie_info_response(bytes: &[u8]) -> Result<CookieInfoData> {
     let response: PassportResponse<CookieInfoData> =
-        serde_json::from_slice(bytes).map_err(|_| {
+        serde_json::from_slice(bytes).map_err(|error| {
             bilibili_upstream_error("Bilibili cookie status endpoint returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -6869,8 +6862,9 @@ fn parse_cookie_refresh_response(
     expected_user_id: &str,
 ) -> Result<BilibiliCredential> {
     let response: PassportResponse<CookieRefreshData> =
-        serde_json::from_slice(bytes).map_err(|_| {
+        serde_json::from_slice(bytes).map_err(|error| {
             bilibili_upstream_error("Bilibili cookie refresh endpoint returned invalid JSON")
+                .with_source(&error)
         })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -6909,8 +6903,9 @@ fn parse_cookie_refresh_response(
 }
 
 fn parse_cookie_confirm_response(bytes: &[u8]) -> Result<()> {
-    let response: PassportResponse<Value> = serde_json::from_slice(bytes).map_err(|_| {
+    let response: PassportResponse<Value> = serde_json::from_slice(bytes).map_err(|error| {
         bilibili_upstream_error("Bilibili cookie confirmation endpoint returned invalid JSON")
+            .with_source(&error)
     })?;
     if response.code != 0 {
         return Err(platform_business_error(
@@ -6970,8 +6965,11 @@ fn require_authenticated_session(
 }
 
 fn parse_qr_generate_response(bytes: &[u8]) -> Result<BilibiliQrStart> {
-    let response: PassportResponse<QrGenerateData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili QR endpoint returned invalid JSON"))?;
+    let response: PassportResponse<QrGenerateData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili QR endpoint returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         let message = response.message.trim();
         return Err(TuneWeaveError::new(
@@ -6999,8 +6997,11 @@ fn parse_qr_generate_response(bytes: &[u8]) -> Result<BilibiliQrStart> {
 }
 
 fn parse_qr_poll_response(bytes: &[u8], headers: &HeaderMap) -> Result<BilibiliQrPoll> {
-    let response: PassportResponse<QrPollData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili QR poll endpoint returned invalid JSON"))?;
+    let response: PassportResponse<QrPollData> =
+        serde_json::from_slice(bytes).map_err(|error| {
+            bilibili_upstream_error("Bilibili QR poll endpoint returned invalid JSON")
+                .with_source(&error)
+        })?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili QR polling",
@@ -7038,8 +7039,10 @@ fn parse_session_response(
     bytes: &[u8],
     expected_user_id: Option<&str>,
 ) -> Result<BilibiliSessionStatus> {
-    let response: PassportResponse<NavData> = serde_json::from_slice(bytes)
-        .map_err(|_| bilibili_upstream_error("Bilibili session endpoint returned invalid JSON"))?;
+    let response: PassportResponse<NavData> = serde_json::from_slice(bytes).map_err(|error| {
+        bilibili_upstream_error("Bilibili session endpoint returned invalid JSON")
+            .with_source(&error)
+    })?;
     if response.code == -101 {
         return Ok(unauthenticated_session(
             expected_user_id,
@@ -7150,25 +7153,10 @@ fn validated_image_url(value: Option<&str>, context: &str) -> Result<Option<Stri
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    let url = Url::parse(value).map_err(|_| {
+    tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
         bilibili_upstream_error(format!("Bilibili returned an invalid {context} URL"))
+            .with_source(&error)
     })?;
-    let trusted_host = url.host_str().is_some_and(|host| {
-        host == "hdslb.com"
-            || host.ends_with(".hdslb.com")
-            || host == "biliimg.com"
-            || host.ends_with(".biliimg.com")
-    });
-    if url.scheme() != "https"
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !trusted_host
-    {
-        return Err(bilibili_upstream_error(format!(
-            "Bilibili returned an unsafe {context} URL"
-        )));
-    }
     Ok(Some(value.to_owned()))
 }
 
@@ -7314,6 +7302,7 @@ fn passport_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "Bilibili Passport request failed")
         .with_platform(Platform::Bilibili)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn passport_http_error(status: StatusCode) -> TuneWeaveError {
@@ -7334,6 +7323,7 @@ fn bilibili_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "Bilibili API request failed")
         .with_platform(Platform::Bilibili)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
@@ -7467,9 +7457,7 @@ fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeave
 }
 
 fn bilibili_upstream_error(message: impl Into<String>) -> TuneWeaveError {
-    TuneWeaveError::new(ErrorCode::UpstreamError, message)
-        .with_platform(Platform::Bilibili)
-        .retryable(true)
+    TuneWeaveError::new(ErrorCode::UpstreamError, message).with_platform(Platform::Bilibili)
 }
 
 fn bilibili_internal_error(message: impl Into<String>) -> TuneWeaveError {
@@ -8503,7 +8491,12 @@ mod tests {
                 )
                 .await;
             if let Some(code) = expected {
-                assert_eq!(result.unwrap_err().code, code);
+                let error = result.unwrap_err();
+                assert_eq!(error.code, code);
+                if expected_calls == 1 && code == ErrorCode::UpstreamError {
+                    assert!(error.message.contains("invalid JSON"));
+                    assert!(!error.retryable);
+                }
             } else {
                 let page = result.unwrap();
                 assert_eq!(page.videos.len(), 1);
@@ -9026,7 +9019,6 @@ mod tests {
             assert_eq!(validate_bilibili_media_url(allowed).unwrap(), allowed);
         }
         for rejected in [
-            "http://cdn.example/audio.m4s",
             "ftp://cdn.example/audio.m4s",
             "https://user:password@cdn.example/audio.m4s",
             "https://cdn.example/audio.m4s#fragment",
@@ -9195,6 +9187,100 @@ mod tests {
     }
 
     #[test]
+    fn playback_manifest_normalizes_repeated_metadata_without_losing_quality_labels() {
+        let mut fixture = playback_manifest_fixture();
+        fixture["data"]["accept_format"] = json!("flv720,flv720,flv480,mp4,flv720");
+        fixture["data"]["accept_quality"] = json!([64, 64, 32, 16]);
+        fixture["data"]["accept_description"] = json!(["720P", "720P repeated", "480P", "360P"]);
+        for key in ["video", "audio"] {
+            let track = fixture["data"]["dash"][key][0].clone();
+            fixture["data"]["dash"][key]
+                .as_array_mut()
+                .unwrap()
+                .push(track);
+        }
+        let format = fixture["data"]["support_formats"][0].clone();
+        fixture["data"]["support_formats"]
+            .as_array_mut()
+            .unwrap()
+            .push(format);
+        let language = fixture["data"]["language"]["items"][0].clone();
+        fixture["data"]["language"]["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(language);
+        let video = &mut fixture["data"]["dash"]["video"][0];
+        let base = video["baseUrl"].clone();
+        let backup = video["backupUrl"][0].clone();
+        video["backupUrl"] = json!([base, backup, backup]);
+        video["backup_url"] = video["backupUrl"].clone();
+        let manifest = parse_playback_manifest(
+            &serde_json::to_vec(&fixture).unwrap(),
+            60_977_932,
+            "BV1Jt411P77c",
+            106_101_299,
+        )
+        .unwrap();
+        assert_eq!(manifest.accepted_formats, ["flv720", "flv480", "mp4"]);
+        assert_eq!(manifest.accepted_qualities, [64, 32, 16]);
+        assert_eq!(manifest.formats.len(), 3);
+        assert_eq!(manifest.formats[1].description, "480P 清晰");
+        assert_eq!(
+            playback_quality_descriptions(
+                &[64, 64, 32, 16],
+                vec!["720P".into(), "repeat".into(), "480P".into(), "360P".into()]
+            )
+            .unwrap()[&32],
+            "480P"
+        );
+        assert_eq!(manifest.video_tracks[0].backup_urls.len(), 1);
+        assert_eq!(manifest.audio_tracks.len(), 1);
+        assert_eq!(manifest.languages.unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn playback_manifest_ignores_unusable_optional_backups_and_opaque_deadlines() {
+        let mut fixture = playback_manifest_fixture();
+        fixture["data"]["accept_format"] = json!("flv720,,flv480,mp4,");
+        let video = &mut fixture["data"]["dash"]["video"][0];
+        let backups = json!([
+            "file:///not-media",
+            "https://127.0.0.1/private",
+            "https://new-cdn.example:4483/media?deadline=opaque"
+        ]);
+        video["backupUrl"] = backups.clone();
+        video["backup_url"] = backups;
+        let manifest = parse_playback_manifest(
+            &serde_json::to_vec(&fixture).unwrap(),
+            60_977_932,
+            "BV1Jt411P77c",
+            106_101_299,
+        )
+        .unwrap();
+        assert_eq!(manifest.video_tracks[0].backup_urls.len(), 1);
+        assert_eq!(manifest.accepted_formats, ["flv720", "flv480", "mp4"]);
+    }
+
+    #[test]
+    fn playback_manifest_display_metadata_does_not_gate_playable_tracks() {
+        let mut fixture = playback_manifest_fixture();
+        fixture["data"]["accept_description"] = json!([]);
+        for format in fixture["data"]["support_formats"].as_array_mut().unwrap() {
+            format["new_description"] = json!("");
+            format["display_desc"] = json!("");
+        }
+        let manifest = parse_playback_manifest(
+            &serde_json::to_vec(&fixture).unwrap(),
+            60_977_932,
+            "BV1Jt411P77c",
+            106_101_299,
+        )
+        .unwrap();
+        assert!(!manifest.video_tracks.is_empty());
+        assert!(!manifest.formats[0].description.is_empty());
+    }
+
+    #[test]
     fn playback_manifest_rejects_alias_identity_url_and_timing_drift() {
         for (pointer, value) in [
             (
@@ -9210,7 +9296,6 @@ mod tests {
             ("/data/dash/video/0/width", json!(0)),
             ("/data/dash/video/0/mimeType", json!("audio/mp4")),
             ("/data/dash/duration", json!(1)),
-            ("/data/accept_quality/1", json!(64)),
             (
                 "/data/dash/audio/0/SegmentBase/Initialization",
                 json!("995-0"),
