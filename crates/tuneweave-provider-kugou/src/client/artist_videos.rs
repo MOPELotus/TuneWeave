@@ -65,7 +65,10 @@ fn invalid() -> TuneWeaveError {
 }
 fn parse(bytes: &[u8], page: u32) -> Result<VideoPage> {
     check_status(bytes)?;
-    let e: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let start = u64::from(page.checked_sub(1).ok_or_else(invalid)?) * u64::from(PAGE_SIZE);
     if e.data.len() as u64 != e.total.0.saturating_sub(start).min(u64::from(PAGE_SIZE))
         || e.extra

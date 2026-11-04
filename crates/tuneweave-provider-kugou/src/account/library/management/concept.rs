@@ -66,7 +66,10 @@ struct ReceiptInfo {
 fn acknowledge(bytes: &[u8], uid: &str, list_id: u64, edit: &ListEdit) -> Result<ListAck> {
     // n0.c consumes status and data.info.code; error_code is not mandatory in
     // its success response. Explicit gateway failures still take precedence.
-    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.status != 1 || status.error_code.is_some_and(|v| v != 0) {
         let code = if status.status == 0 && status.error_code == Some(20017) {
             ErrorCode::AuthenticationRequired
@@ -77,7 +80,10 @@ fn acknowledge(bytes: &[u8], uid: &str, list_id: u64, edit: &ListEdit) -> Result
             .with_details(json!({"platform_code": status.error_code})));
     }
     let receipt = serde_json::from_slice::<Response<Receipt>>(bytes)
-        .map_err(|_| malformed())?
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?
         .data
         .ok_or_else(malformed)?;
     if receipt.info.code.0 != 1 {

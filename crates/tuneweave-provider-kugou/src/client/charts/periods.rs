@@ -54,7 +54,10 @@ pub(super) fn zone(value: String) -> Result<String> {
 }
 fn parse_periods(bytes: &[u8], snapshot: &Snapshot) -> Result<ChartPeriods> {
     check_ocean_status(bytes)?;
-    let e: Envelope<Periods> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<Periods> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let d = e.data;
     if d.rank_cid.0 != snapshot.period || Some(zone(d.zone)?) != snapshot.zone || d.info.len() > 100
     {

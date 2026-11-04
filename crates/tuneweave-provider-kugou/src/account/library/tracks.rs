@@ -146,7 +146,10 @@ fn parse(bytes: &[u8], uid: &str, list_id: u64, kind: u8, page: u32) -> Result<T
         );
     }
     let envelope: TrackEnvelope<WireTracks> =
-        serde_json::from_slice(bytes).map_err(|_| malformed_at("track_data_schema"))?;
+        serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = malformed_at("track_data_schema");
+            mapped.with_json_source(&json_cause)
+        })?;
     let wire = envelope
         .data
         .ok_or_else(|| malformed_at("track_data_missing"))?;

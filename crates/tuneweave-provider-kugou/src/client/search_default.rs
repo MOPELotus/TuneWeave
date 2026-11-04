@@ -147,14 +147,20 @@ fn parse(bytes: &[u8]) -> Result<SearchDefaultKeyword> {
     if bytes.len() > RESPONSE_LIMIT {
         return Err(malformed());
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou default search keywords were rejected")
                 .with_details(json!({"platform_code":envelope.error_code})),
         );
     }
-    let payload: Payload = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let payload: Payload = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = payload.data.ads.len();
     let row = payload.data.ads.into_iter().next().ok_or_else(|| {
         TuneWeaveError::new(

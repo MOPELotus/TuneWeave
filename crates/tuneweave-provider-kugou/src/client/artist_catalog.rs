@@ -155,7 +155,10 @@ fn filters(rows: Vec<Filter>, selected: u64, area: bool) -> Result<Vec<ArtistCat
 fn parse_catalogue(bytes: &[u8], request: &ArtistCatalogRequest) -> Result<ArtistCatalog> {
     let (area, category) = selection(request)?;
     check_ocean_status(bytes)?;
-    let Envelope { data } = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let Envelope { data } = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.info.len() > 28 {
         return Err(invalid());
     }

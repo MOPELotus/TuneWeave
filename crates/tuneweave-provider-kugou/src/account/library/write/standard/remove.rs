@@ -22,7 +22,10 @@ struct Receipt {
 }
 
 fn acknowledge(bytes: &[u8], uid: &str, list_id: u64, version: u64) -> Result<WriteAck> {
-    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.status != 1 || status.error_code.is_some_and(|v| v != 0) {
         return Err(error(
             if status.status == 0 && status.error_code == Some(20017) {
@@ -37,7 +40,10 @@ fn acknowledge(bytes: &[u8], uid: &str, list_id: u64, version: u64) -> Result<Wr
     // v0.b consumes a playlist receipt, not add_song's per-item codes.
     // The provider must confirm the entire requested delta by full readback.
     let receipt = serde_json::from_slice::<Response<Receipt>>(bytes)
-        .map_err(|_| malformed())?
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?
         .data
         .ok_or_else(malformed)?;
     if receipt.userid.0.to_string() != uid

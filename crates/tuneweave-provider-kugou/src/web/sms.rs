@@ -457,7 +457,10 @@ impl KugouClient {
             if let Some(proof) = proof {
                 proof.reject_reflection(&bytes)?;
             }
-            serde_json::from_slice::<Envelope>(&bytes).map_err(|_| malformed())
+            serde_json::from_slice::<Envelope>(&bytes).map_err(|json_cause| {
+                let mapped = malformed();
+                mapped.with_json_source(&json_cause)
+            })
         }
         .await;
         self.log_upstream_request(operation, host, path, status, started, 0, false, &result);
@@ -608,7 +611,10 @@ fn parse_session(
         path: String,
         value: String,
     }
-    let data: Cookie = serde_json::from_str(data.get()).map_err(|_| malformed())?;
+    let data: Cookie = serde_json::from_str(data.get()).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let cookie = WebCookie::from_sms_fields(
         &data.name,
         &data.domain,
@@ -638,7 +644,10 @@ fn parse_choices(reply: Envelope) -> Result<Vec<AuthAccountChoice>> {
         pic: Option<String>,
     }
     let rows: Choices =
-        serde_json::from_str(reply.data.ok_or_else(malformed)?.get()).map_err(|_| malformed())?;
+        serde_json::from_str(reply.data.ok_or_else(malformed)?.get()).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
     if rows.info_list.is_empty() || rows.info_list.len() > 128 {
         return Err(malformed());
     }

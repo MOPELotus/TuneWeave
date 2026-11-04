@@ -272,7 +272,10 @@ fn parse(
     device: &KugouDeviceIdentity,
     cipher: &ExchangeCipher,
 ) -> Result<NativePasswordOutcome> {
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         if envelope.status == 0 && matches!(envelope.error_code, 30768 | 34216) {
             return Ok(NativePasswordOutcome::Phone {
@@ -303,7 +306,10 @@ pub(super) fn parse_session(
     cipher: &ExchangeCipher,
 ) -> Result<NativeSession> {
     let login: LoggedIn =
-        serde_json::from_value(data.ok_or_else(malformed)?).map_err(|_| malformed())?;
+        serde_json::from_value(data.ok_or_else(malformed)?).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
     let user_id = match login.userid {
         Value::String(value) => value,
         Value::Number(value) => value.as_u64().ok_or_else(malformed)?.to_string(),
@@ -314,7 +320,10 @@ pub(super) fn parse_session(
         token: String,
     }
     let token: Token =
-        serde_json::from_slice(&cipher.decrypt(&login.secu_params)?).map_err(|_| malformed())?;
+        serde_json::from_slice(&cipher.decrypt(&login.secu_params)?).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
     if !valid_uid(&user_id) || !valid_secret(&token.token) {
         return Err(malformed());
     }

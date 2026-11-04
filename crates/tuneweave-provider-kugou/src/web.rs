@@ -218,7 +218,10 @@ impl KugouClient {
                 error_code: i64,
                 data: Option<IgnoredAny>,
             }
-            let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+            let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+                let mapped = malformed();
+                mapped.with_json_source(&json_cause)
+            })?;
             let _ = envelope.data;
             if envelope.status != 1 || envelope.error_code != 0 {
                 return Err(error(

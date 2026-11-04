@@ -38,10 +38,16 @@ impl KugouClient {
         let params = parameters(request, device, crate::account::now_ms()?, &cipher)?;
         self.web_post(Endpoint::Password, params, None, |headers, bytes| {
             let envelope: Envelope<IgnoredAny> =
-                serde_json::from_slice(bytes).map_err(|_| malformed())?;
+                serde_json::from_slice(bytes).map_err(|json_cause| {
+                    let mapped = malformed();
+                    mapped.with_json_source(&json_cause)
+                })?;
             if envelope.status == 0 && matches!(envelope.error_code, 30767 | 30768) {
                 let envelope: Envelope<String> =
-                    serde_json::from_slice(bytes).map_err(|_| malformed())?;
+                    serde_json::from_slice(bytes).map_err(|json_cause| {
+                        let mapped = malformed();
+                        mapped.with_json_source(&json_cause)
+                    })?;
                 let phone = envelope.data.ok_or_else(malformed)?;
                 super::sms::validate_phone(&phone).map_err(|_| malformed())?;
                 return Ok(WebPasswordOutcome::Phone(phone));
@@ -196,7 +202,10 @@ fn parse(
     bytes: &[u8],
     device: &KugouDeviceIdentity,
 ) -> Result<WebSession> {
-    let envelope: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         let code = envelope.error_code;
         let verification = match code {
@@ -219,7 +228,10 @@ fn parse(
         };
         return Err(error(category, "KuGou Web password login was rejected").with_details(details));
     }
-    let envelope: Envelope<Identity> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope<Identity> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let user_id = match envelope.data.ok_or_else(malformed)?.userid {
         Value::String(v) if valid_uid(&v) => v,
         Value::Number(v) => v

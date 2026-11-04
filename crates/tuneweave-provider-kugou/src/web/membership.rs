@@ -132,7 +132,10 @@ fn parse(bytes: &[u8], uid: &str) -> Result<MembershipSummary> {
     if bytes.len() > LIMIT {
         return Err(malformed());
     }
-    let status: Status = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: Status = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.errno.is_some_and(|v| v != 0) || status.error_code.is_some_and(|v| v != 0) {
         return Err(error(
             if status.errno == Some(105) && status.error_code == Some(20017) {
@@ -146,7 +149,10 @@ fn parse(bytes: &[u8], uid: &str) -> Result<MembershipSummary> {
             serde_json::json!({"platform_code":status.error_code,"platform_errno":status.errno}),
         ));
     }
-    let mut role: Role = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let mut role: Role = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     for n in [
         Some(role.role),
         role.producttype,

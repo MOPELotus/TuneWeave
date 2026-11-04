@@ -197,7 +197,10 @@ fn parse(bytes: &[u8], client: KugouLoginClient, uid: &str) -> Result<Membership
     if bytes.len() > LIMIT {
         return Err(malformed());
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let code = match client {
         KugouLoginClient::Standard if envelope.error_code.is_none() => envelope.errcode,
         KugouLoginClient::Concept if envelope.errcode.is_none() => envelope.error_code,
@@ -214,8 +217,11 @@ fn parse(bytes: &[u8], client: KugouLoginClient, uid: &str) -> Result<Membership
         )
         .with_details(json!({"platform_code":code})));
     }
-    let mut wire: Wire = serde_json::from_str(envelope.data.ok_or_else(malformed)?.get())
-        .map_err(|_| malformed())?;
+    let mut wire: Wire =
+        serde_json::from_str(envelope.data.ok_or_else(malformed)?.get()).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
     if wire.userid.0.to_string() != uid {
         return Err(identity_error());
     }

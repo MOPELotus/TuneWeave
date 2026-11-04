@@ -58,7 +58,10 @@ fn acknowledge(bytes: &[u8]) -> Result<()> {
     }
     // The UI accepts status=1 even without data. Neither a returned rank nor
     // a free-form message proves that the selected account now follows this id.
-    let ack: Ack = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let ack: Ack = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if ack.status != 1 || ack.error_code.is_some_and(|v| v != 0) {
         return Err(error(
             if ack.status == 0 && ack.error_code == Some(20017) {

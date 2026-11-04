@@ -202,7 +202,10 @@ impl KugouClient {
 
 fn parse_catalogue(bytes: &[u8], view: ChartCatalogView) -> Result<ChartCatalog> {
     check_ocean_status(bytes)?;
-    let e: Envelope<List> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<List> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if e.data.total.0 != e.data.info.len() as u64 || e.data.info.len() > MAX_NODES {
         return Err(invalid());
     }
@@ -422,7 +425,10 @@ fn parse_info(bytes: &[u8], id: u64) -> Result<Snapshot> {
                 .with_platform(Platform::Kugou),
         );
     }
-    let e: Envelope<Info> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<Info> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let d = e.data;
     if d.rankid.0 != id || id == 0 || d.rank_cid.0 == 0 {
         return Err(invalid());
@@ -500,7 +506,10 @@ fn parse_tracks(
     include_tags: bool,
 ) -> Result<(Vec<Track>, u64)> {
     check_status(bytes)?;
-    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = e.data.total.0;
     let offset = u64::from(page.checked_sub(1).ok_or_else(invalid)?) * u64::from(PAGE_SIZE);
     if page > MAX_PAGES

@@ -40,8 +40,10 @@ struct WireArtist {
 }
 
 fn parse(bytes: &[u8]) -> Result<FollowingSnapshot> {
-    let status: WireEnvelope<IgnoredAny> =
-        serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: WireEnvelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.status != 1 || status.error_code.is_some_and(|c| c != 0) {
         return Err(error(
             if status.status == 0 && status.error_code == Some(20017) {
@@ -61,7 +63,10 @@ fn parse(bytes: &[u8]) -> Result<FollowingSnapshot> {
             "KuGou followed-artist response did not contain a full snapshot",
         ));
     }
-    let wire: WireEnvelope<WireData> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let wire: WireEnvelope<WireData> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let version = wire.version.ok_or_else(malformed)?.0;
     let rows = wire.data.ok_or_else(malformed)?.singerlist;
     if rows.len() > MAX_ARTISTS {

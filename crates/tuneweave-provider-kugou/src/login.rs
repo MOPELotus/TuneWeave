@@ -560,8 +560,10 @@ struct Envelope<T> {
 }
 
 fn data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    let response: Envelope<T> = serde_json::from_slice(bytes)
-        .map_err(|_| malformed("KuGou QR response is not a valid envelope"))?;
+    let response: Envelope<T> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed("KuGou QR response is not a valid envelope");
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.status != 1 || response.error_code != 0 {
         return Err(malformed("KuGou QR request was rejected")
             .with_details(json!({"platform_code": response.error_code})));

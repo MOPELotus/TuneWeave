@@ -16,7 +16,10 @@ fn valid_hash(hash: &str) -> bool {
 }
 
 fn map_metadata(data: Value, hash: &str, uid: &str) -> Result<Option<Track>> {
-    let value: Metadata = serde_json::from_value(data).map_err(|_| invalid())?;
+    let value: Metadata = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if !valid_hash(&value.hash)
         || !value.hash.eq_ignore_ascii_case(hash)
         || value.userid.is_some_and(|v| v.0.to_string() != uid)

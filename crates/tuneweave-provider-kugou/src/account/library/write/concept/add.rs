@@ -63,7 +63,10 @@ fn acknowledge_many(
     version: u64,
     inputs: &[ConceptAlbumTrack],
 ) -> Result<(WriteAck, Vec<ConceptAddedTrack>)> {
-    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: Response<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.status != 1 || status.error_code.is_some_and(|v| v != 0) {
         let code = if status.status == 0 && status.error_code == Some(20017) {
             ErrorCode::AuthenticationRequired
@@ -74,7 +77,10 @@ fn acknowledge_many(
             .with_details(json!({"platform_code":status.error_code})));
     }
     let receipt = serde_json::from_slice::<Response<AddReceipt>>(bytes)
-        .map_err(|_| malformed())?
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?
         .data
         .ok_or_else(malformed)?;
     if receipt.userid.0.to_string() != uid

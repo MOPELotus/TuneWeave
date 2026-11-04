@@ -25,7 +25,10 @@ pub(super) fn ticket(response: &str) -> Result<String> {
     if response.len() > 16 * 1024 {
         return Err(invalid());
     }
-    let callback: Callback = serde_json::from_str(response).map_err(|_| invalid())?;
+    let callback: Callback = serde_json::from_str(response).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if callback.close != 0
         || callback.ticket.trim().is_empty()
         || callback.ticket.len() > 8192

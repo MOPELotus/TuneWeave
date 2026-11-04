@@ -167,7 +167,10 @@ struct Data<T> {
 }
 
 pub(super) fn parse(kind: CatalogKind, bytes: &[u8], page: u32) -> Result<CatalogPage> {
-    let envelope: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         if matches!(kind, CatalogKind::Mv) && envelope.status == 1 && envelope.error_code == 149 {
             return Err(kugou_invalid_media_request(
@@ -191,7 +194,10 @@ fn parse_items<T: DeserializeOwned>(
     map: fn(T) -> Result<SearchItem>,
 ) -> Result<CatalogPage> {
     let data = serde_json::from_slice::<Envelope<Data<T>>>(bytes)
-        .map_err(|_| malformed())?
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?
         .data
         .ok_or_else(malformed)?;
     let from = u64::from(page.checked_sub(1).ok_or_else(malformed)?) * u64::from(PAGE_SIZE);

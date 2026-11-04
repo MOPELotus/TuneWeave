@@ -108,7 +108,10 @@ impl KugouCredential {
         {
             return Err(invalid());
         }
-        let value: Self = serde_json::from_str(credential.secret()).map_err(|_| invalid())?;
+        let value: Self = serde_json::from_str(credential.secret()).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         if value.version != 1
             || value.generation.len() != 64
             || !value
@@ -224,7 +227,10 @@ impl AccountCredential {
         {
             return Err(invalid());
         }
-        let web: WebCredential = serde_json::from_str(value.secret()).map_err(|_| invalid())?;
+        let web: WebCredential = serde_json::from_str(value.secret()).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         if web.version != 1
             || web.generation.len() != 64
             || !web

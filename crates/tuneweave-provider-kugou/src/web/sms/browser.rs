@@ -11,7 +11,10 @@ pub(super) fn challenge(
     receipt: &KugouWebSmsChallenge,
 ) -> Result<AuthBrowserChallenge> {
     let data: String = serde_json::from_str(reply.data.as_ref().ok_or_else(malformed)?.get())
-        .map_err(|_| malformed())?;
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
     if data.len() > 4096 || data.split('&').count() > 64 {
         return Err(malformed());
     }
@@ -109,7 +112,10 @@ impl Proof {
         if response.len() > 16 * 1024 {
             return Err(invalid());
         }
-        let data: Callback = serde_json::from_str(response).map_err(|_| invalid())?;
+        let data: Callback = serde_json::from_str(response).map_err(|json_cause| {
+            let mapped = invalid();
+            mapped.with_json_source(&json_cause)
+        })?;
         if data.status != 1 || data.error_code != 0 {
             return Err(invalid());
         }

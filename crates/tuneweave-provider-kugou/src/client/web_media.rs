@@ -123,7 +123,10 @@ impl KugouClient {
             // Cross-origin browser requests pass the explicit token, not a Cookie
             // header. Only the login exchange may replace our persisted cookie.
             let bytes = crate::account::read_response_with_limit(response, 1024 * 1024).await?;
-            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|json_cause| {
+                let mapped = invalid();
+                mapped.with_json_source(&json_cause)
+            })?;
             if envelope.error_code.is_some_and(|v| v != envelope.err_code)
                 || envelope.errcode.is_some_and(|v| v != envelope.err_code)
             {
@@ -188,7 +191,10 @@ fn identity(
     album: u64,
     uid: &str,
 ) -> Result<Identity> {
-    let value: Identity = serde_json::from_value(data.clone()).map_err(|_| invalid())?;
+    let value: Identity = serde_json::from_value(data.clone()).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if !value.hash.eq_ignore_ascii_case(&spec.hash)
         || value
             .album_audio_id
@@ -247,7 +253,10 @@ fn map(
     requested_quality: Quality,
     token: &str,
 ) -> Result<MediaStream> {
-    let value: Song = serde_json::from_value(data).map_err(|_| invalid())?;
+    let value: Song = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     if value.play_url.is_empty() && value.play_backup_url.as_ref().is_none_or(String::is_empty) {
         return Err(denied("KuGou did not authorize Web playback"));
     }
@@ -360,7 +369,10 @@ fn map_lyrics(data: Value, track: Track, token: &str) -> Result<Lyrics> {
         is_free_part: Number,
         store_type: Option<String>,
     }
-    let value: WebLyrics = serde_json::from_value(data).map_err(|_| invalid())?;
+    let value: WebLyrics = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     match value.is_free_part.0 {
         0 => {}
         1 => match value.store_type.as_deref() {

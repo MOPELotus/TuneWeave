@@ -250,8 +250,10 @@ struct Status {
     errcode: Option<i64>,
 }
 pub(super) fn check_status(bytes: &[u8]) -> Result<()> {
-    let e: Status = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou catalogue returned an invalid envelope"))?;
+    let e: Status = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = kugou_upstream_error("KuGou catalogue returned an invalid envelope");
+        mapped.with_json_source(&json_cause)
+    })?;
     if e.status != 1 || e.error_code != 0 || e.errcode.is_some_and(|v| v != 0) {
         let code = if e.error_code != 0 {
             e.error_code
@@ -272,8 +274,10 @@ struct OceanStatus {
     errcode: i64,
 }
 pub(super) fn check_ocean_status(bytes: &[u8]) -> Result<()> {
-    let e: OceanStatus = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou chart returned an invalid envelope"))?;
+    let e: OceanStatus = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = kugou_upstream_error("KuGou chart returned an invalid envelope");
+        mapped.with_json_source(&json_cause)
+    })?;
     if e.status != 1 || e.errcode != 0 {
         return Err(kugou_upstream_error("KuGou chart request was rejected")
             .with_details(json!({"platform_code":e.errcode})));

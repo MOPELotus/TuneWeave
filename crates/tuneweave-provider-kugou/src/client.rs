@@ -3447,14 +3447,19 @@ fn map_tracker_urls(tracker: &TrackerEnvelope) -> Result<(Option<String>, Vec<St
 fn normalize_media_url(value: &str) -> Result<String> {
     let value = nonempty(value)
         .ok_or_else(|| kugou_upstream_error("KuGou media tracker returned an empty URL"))?;
-    let value = if let Some(rest) = value.strip_prefix("http://") {
-        format!("https://{rest}")
+    let parsed = tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
+        kugou_upstream_error("KuGou media tracker returned an invalid URL").with_source(&error)
+    })?;
+    // Preserve known legacy normalization, but never rewrite a new producer CDN's
+    // protocol: it may be part of the signature or only support the returned transport.
+    let legacy = parsed
+        .host_str()
+        .is_some_and(|host| host == "kugou.com" || host.ends_with(".kugou.com"));
+    let value = if parsed.scheme() == "http" && legacy {
+        format!("https{}", &value[4..])
     } else {
         value.to_owned()
     };
-    tuneweave_core::validate_upstream_media_url(&value).map_err(|error| {
-        kugou_upstream_error("KuGou media tracker returned an invalid URL").with_source(&error)
-    })?;
     Ok(value)
 }
 
@@ -3869,8 +3874,10 @@ fn parse_krc_languages(text: &str) -> Result<EmbeddedLyricLanguages> {
     let bytes = BASE64.decode(encoded).map_err(|_| {
         kugou_upstream_error("KuGou embedded lyric languages were not valid base64")
     })?;
-    let payload: KrcLanguagePayload = serde_json::from_slice(&bytes)
-        .map_err(|_| kugou_upstream_error("KuGou embedded lyric languages were malformed"))?;
+    let payload: KrcLanguagePayload = serde_json::from_slice(&bytes).map_err(|json_cause| {
+        let mapped = kugou_upstream_error("KuGou embedded lyric languages were malformed");
+        mapped.with_json_source(&json_cause)
+    })?;
     if payload.content.len() > 16 {
         return Err(kugou_upstream_error(
             "KuGou embedded lyric languages returned too many sections",
@@ -4320,10 +4327,17 @@ pub(crate) fn normalize_image_url(value: &str) -> Option<String> {
     let mut value = value.replace("{size}", "400");
     if let Some(rest) = value.strip_prefix("//") {
         value = format!("https://{rest}");
-    } else if let Some(rest) = value.strip_prefix("http://") {
-        value = format!("https://{rest}");
     }
-    tuneweave_core::validate_upstream_media_url(&value).ok()?;
+    let parsed = tuneweave_core::validate_upstream_media_url(&value).ok()?;
+    if parsed.scheme() == "http"
+        && parsed.host_str().is_some_and(|host| {
+            ["kugou.com", "kgimg.com"]
+                .iter()
+                .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+        })
+    {
+        value = format!("https{}", &value[4..]);
+    }
     Some(value)
 }
 
@@ -5210,6 +5224,13 @@ mod tests {
         assert!(map_tracker_urls(&untrusted).is_ok());
         untrusted.url = vec!["https://user:password@new-cdn.example/audio.mp3".to_owned()];
         assert!(map_tracker_urls(&untrusted).is_err());
+    }
+
+    #[test]
+    fn new_producer_cdn_protocol_and_query_are_not_rewritten() {
+        let media = "http://new-cdn.example:8080/audio.mp3?signature=opaque";
+        assert_eq!(normalize_media_url(media).unwrap(), media);
+        assert_eq!(normalize_image_url(media).as_deref(), Some(media));
     }
 
     #[test]

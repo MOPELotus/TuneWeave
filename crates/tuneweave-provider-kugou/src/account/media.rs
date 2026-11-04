@@ -71,7 +71,10 @@ pub(crate) struct Status {
 }
 impl Status {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        let value: Self = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+        let value: Self = serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
         if matches!((value.error_code, value.errcode), (Some(a), Some(b)) if a != b) {
             return Err(malformed());
         }
@@ -114,7 +117,10 @@ fn auth_data_inner(bytes: &[u8], session: &NativeSession) -> Result<AuthData> {
     struct Envelope {
         data: AuthData,
     }
-    let wire: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let wire: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let data = wire.data;
     if !valid_secret(&data.auth) {
         return Err(malformed());

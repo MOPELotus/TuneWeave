@@ -128,8 +128,11 @@ impl KugouClient {
                 errcode: Option<i64>,
                 error_code: Option<i64>,
             }
-            let business: BusinessStatus = serde_json::from_slice(&bytes)
-                .map_err(|_| kugou_upstream_error("KuGou account lyric status is invalid"))?;
+            let business: BusinessStatus =
+                serde_json::from_slice(&bytes).map_err(|json_cause| {
+                    let mapped = kugou_upstream_error("KuGou account lyric status is invalid");
+                    mapped.with_json_source(&json_cause)
+                })?;
             let code = if path == "/v1/search" {
                 business.errcode
             } else {

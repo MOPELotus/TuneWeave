@@ -480,7 +480,10 @@ struct Envelope<T> {
 
 fn data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     // Read the business status independently of the success payload's schema.
-    let status: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let status: Envelope<IgnoredAny> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if status.status != 1 || status.error_code != 0 {
         let code = if status.status == 0 && status.error_code == 20017 {
             ErrorCode::AuthenticationRequired
@@ -490,7 +493,10 @@ fn data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         return Err(error(code, "KuGou native account request was rejected")
             .with_details(json!({"platform_code": status.error_code})));
     }
-    let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     envelope.data.ok_or_else(malformed)
 }
 
@@ -560,14 +566,20 @@ fn parse_exchange(
             let plain = cipher.decrypt(encrypted)?;
             let text = std::str::from_utf8(&plain).map_err(|_| malformed())?;
             if text.trim_start().starts_with('{') {
-                let fields: TokenFields = serde_json::from_str(text).map_err(|_| malformed())?;
+                let fields: TokenFields = serde_json::from_str(text).map_err(|json_cause| {
+                    let mapped = malformed();
+                    mapped.with_json_source(&json_cause)
+                })?;
                 if fields.secu_params.is_some() {
                     return Err(malformed());
                 }
                 fields
             } else {
                 let token = if text.trim_start().starts_with('"') {
-                    serde_json::from_str::<String>(text).map_err(|_| malformed())?
+                    serde_json::from_str::<String>(text).map_err(|json_cause| {
+                        let mapped = malformed();
+                        mapped.with_json_source(&json_cause)
+                    })?
                 } else {
                     // The reference also returns raw token text, without JSON quoting.
                     if !valid_secret(text) || text.bytes().any(|b| b"{}[]\"".contains(&b)) {

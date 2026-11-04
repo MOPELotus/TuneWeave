@@ -568,7 +568,10 @@ fn parse_details(
     kind: VideoResourceKind,
 ) -> Result<Vec<VideoDetail>> {
     super::openapi::check_status(bytes)?;
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.data.len() != ids.len() {
         return Err(malformed());
     }

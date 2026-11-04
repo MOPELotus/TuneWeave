@@ -205,7 +205,10 @@ pub(super) struct AlbumDto {
 }
 fn parse_album(bytes: &[u8], id: u64) -> Result<Album> {
     check_status(bytes)?;
-    let e: Envelope<Vec<AlbumDto>> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<Vec<AlbumDto>> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let [v]: [AlbumDto; 1] = e
         .data
         .ok_or_else(invalid)?
@@ -285,7 +288,10 @@ struct Position {
 }
 fn parse_tracks(bytes: &[u8], album: &Album, page: u32) -> Result<PhysicalPage> {
     check_status(bytes)?;
-    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let data = e.data.ok_or_else(invalid)?;
     if e.total != Some(data.total) || data.total > MAX_ITEMS {
         return Err(invalid());

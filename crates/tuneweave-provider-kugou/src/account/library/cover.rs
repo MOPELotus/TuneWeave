@@ -171,7 +171,10 @@ fn uploaded(bytes: &[u8]) -> Result<UploadedCover> {
         #[serde(rename = "FileName")]
         filename: Option<String>,
     }
-    let wire: Wire = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let wire: Wire = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if !wire.success {
         return Err(error(
             ErrorCode::UpstreamError,

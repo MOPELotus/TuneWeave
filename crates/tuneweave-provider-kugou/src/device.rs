@@ -329,12 +329,15 @@ fn read_device(path: &Path) -> Result<KugouDevice> {
             "stored KuGou device state exceeds its size limit",
         ));
     }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        TuneWeaveError::new(
-            ErrorCode::InternalError,
-            "failed to decode KuGou device state",
-        )
-        .with_platform(Platform::Kugou)
+    serde_json::from_slice(&bytes).map_err(|json_cause| {
+        let mapped = {
+            TuneWeaveError::new(
+                ErrorCode::InternalError,
+                "failed to decode KuGou device state",
+            )
+            .with_platform(Platform::Kugou)
+        };
+        mapped.with_json_source(&json_cause)
     })
 }
 

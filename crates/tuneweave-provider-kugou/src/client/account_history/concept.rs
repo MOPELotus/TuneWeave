@@ -239,7 +239,10 @@ fn parameters(
     query
 }
 fn parse(bytes: &[u8], uid: &str) -> Result<Data> {
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if matches!(envelope.error_code, 20017 | 20018) {
         return Err(TuneWeaveError::new(
             ErrorCode::AuthenticationRequired,

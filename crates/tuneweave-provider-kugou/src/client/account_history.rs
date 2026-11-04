@@ -333,7 +333,10 @@ fn history_request(
 }
 
 fn parse_page(bytes: &[u8], expected_uid: &str) -> Result<HistoryData> {
-    let envelope: HistoryEnvelope = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: HistoryEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.error_code == 20017 || envelope.error_code == 20018 {
         return Err(TuneWeaveError::new(
             ErrorCode::AuthenticationRequired,

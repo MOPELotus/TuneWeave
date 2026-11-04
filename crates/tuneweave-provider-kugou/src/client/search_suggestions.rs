@@ -151,7 +151,10 @@ fn parse(bytes: &[u8], query: &str) -> Result<SearchSuggestionList> {
         .and_then(|s| s.strip_suffix(')'))
         .ok_or_else(malformed)?;
     // Parse data only after the business envelope, without evaluating JSONP code.
-    let envelope: Envelope<IgnoredAny> = serde_json::from_str(json).map_err(|_| malformed())?;
+    let envelope: Envelope<IgnoredAny> = serde_json::from_str(json).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status != 1
         || envelope.error_code != 0
         || envelope.legacy_error_code.is_some_and(|code| code != 0)
@@ -161,7 +164,10 @@ fn parse(bytes: &[u8], query: &str) -> Result<SearchSuggestionList> {
                 .with_details(json!({"platform_code":envelope.error_code})),
         );
     }
-    let envelope: Envelope<[Group; 3]> = serde_json::from_str(json).map_err(|_| malformed())?;
+    let envelope: Envelope<[Group; 3]> = serde_json::from_str(json).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     let mut suggestions = Vec::new();
     for (group, (label, limit, kind)) in envelope.data.into_iter().zip([
         ("", 5, Some(SearchKind::Track)),

@@ -213,7 +213,10 @@ impl KugouClient {
                 .await
                 .map_err(network_error)?;
             status = Some(response.status());
-            serde_json::from_slice(&read_response(response).await?).map_err(|_| malformed())
+            serde_json::from_slice(&read_response(response).await?).map_err(|json_cause| {
+                let mapped = malformed();
+                mapped.with_json_source(&json_cause)
+            })
         }
         .await;
         self.log_upstream_request(
@@ -331,11 +334,17 @@ fn parse_accounts(data: Option<Value>, target: &Target) -> Result<Vec<AuthAccoun
         pic: Option<String>,
     }
     let data = match data {
-        Some(Value::String(s)) => serde_json::from_str(&s).map_err(|_| malformed())?,
+        Some(Value::String(s)) => serde_json::from_str(&s).map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?,
         Some(data) => data,
         None => return Err(malformed()),
     };
-    let data: Accounts = serde_json::from_value(data).map_err(|_| malformed())?;
+    let data: Accounts = serde_json::from_value(data).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if data.isreg != 1 || data.info_list.is_empty() || data.info_list.len() > 100 {
         return Err(malformed());
     }

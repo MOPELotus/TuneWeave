@@ -186,7 +186,10 @@ impl KugouClient {
                 .cloned()
                 .ok_or_else(malformed)?,
         )
-        .map_err(|_| malformed())?;
+        .map_err(|json_cause| {
+            let mapped = malformed();
+            mapped.with_json_source(&json_cause)
+        })?;
         if resolution == 0 || !super::videos::canonical_id(&detail.video.id) || assets.len() > 11 {
             return Err(malformed());
         }
@@ -441,7 +444,10 @@ impl KugouClient {
 
 fn parse_privileges(bytes: &[u8], id: &str, assets: &[Asset]) -> Result<Vec<Privilege>> {
     super::openapi::check_status(bytes)?;
-    let p: Privileges = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let p: Privileges = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if p.data.len() != assets.len() {
         return Err(malformed());
     }
@@ -482,7 +488,10 @@ fn parse_privileges(bytes: &[u8], id: &str, assets: &[Asset]) -> Result<Vec<Priv
 }
 
 fn check_tracker_status(bytes: &[u8]) -> Result<Tracker> {
-    let t: Tracker = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let t: Tracker = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if t.errcode == Some(40002) || t.error_code == Some(40002) {
         return Err(TuneWeaveError::new(
             ErrorCode::ResourceNotFound,

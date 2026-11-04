@@ -85,7 +85,10 @@ fn changed() -> TuneWeaveError {
 }
 
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status.0 != 1 || envelope.error_code.is_some_and(|n| n.0 != 0) {
         return Err(malformed());
     }

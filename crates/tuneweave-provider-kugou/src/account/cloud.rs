@@ -88,8 +88,12 @@ impl Cipher {
             Err(_) => {
                 // Gateways can return explicit JSON failures without encryption.
                 // Plain JSON success is never accepted as a cloud acknowledgement.
-                let status = serde_json::from_slice::<Envelope<IgnoredAny>>(bytes)
-                    .map_err(|_| malformed())?;
+                let status = serde_json::from_slice::<Envelope<IgnoredAny>>(bytes).map_err(
+                    |json_cause| {
+                        let mapped = malformed();
+                        mapped.with_json_source(&json_cause)
+                    },
+                )?;
                 if status.status != 1 || status.error_code != 0 {
                     return Err(data::<Value>(bytes).err().unwrap_or_else(malformed));
                 }

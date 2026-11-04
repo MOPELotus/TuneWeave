@@ -83,7 +83,10 @@ fn parse(bytes: &[u8], uid: &str) -> Result<(Vec<Playlist>, u64)> {
     if bytes.len() > LIMIT || !valid_uid(uid) {
         return Err(malformed());
     }
-    let directory: Directory = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let directory: Directory = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     // No business-status envelope is consumed by this producer. A failure
     // envelope with incidental list fields must not become an empty success.
     if directory.status.is_some()
@@ -150,7 +153,10 @@ fn parse_tracks(bytes: &[u8]) -> Result<Vec<WebLibraryTrack>> {
     if bytes.len() > LIMIT {
         return Err(malformed());
     }
-    let entries: Vec<TrackEntry> = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let entries: Vec<TrackEntry> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = malformed();
+        mapped.with_json_source(&json_cause)
+    })?;
     if entries.len() > MAX_TRACKS {
         return Err(malformed());
     }

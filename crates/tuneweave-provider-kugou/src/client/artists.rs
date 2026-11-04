@@ -149,7 +149,10 @@ impl KugouClient {
 
 fn parse_artist(bytes: &[u8], id: u64) -> Result<Artist> {
     check_status(bytes)?;
-    let e: Envelope<ArtistDto> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<ArtistDto> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let d = e.data;
     if d.author_id.0 != id || id == 0 {
         return Err(invalid());
@@ -257,7 +260,10 @@ fn validate_page(
 }
 fn parse_tracks(bytes: &[u8], artist_id: u64, page: u32, sort: u8) -> Result<(Vec<Track>, u64)> {
     check_status(bytes)?;
-    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<TrackData> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = e.data.total.0;
     if e.total.is_some_and(|n| n.0 != total) || e.data.input_param.sort != sort {
         return Err(invalid());
@@ -339,7 +345,10 @@ fn map_song(s: Song, artist_id: u64, position: u64) -> Result<Track> {
 }
 fn parse_albums(bytes: &[u8], artist_id: u64, page: u32) -> Result<(Vec<Album>, u64)> {
     check_status(bytes)?;
-    let e: Envelope<Vec<AlbumDto>> = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let e: Envelope<Vec<AlbumDto>> = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let total = e.total.ok_or_else(invalid)?.0;
     validate_page(total, e.extra, page, e.data.len(), ALBUM_PAGE_SIZE)?;
     let albums = e

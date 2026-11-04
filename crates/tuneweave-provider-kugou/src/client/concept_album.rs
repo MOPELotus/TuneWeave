@@ -230,7 +230,10 @@ fn parse(bytes: &[u8], album: u64, page: u64) -> Result<Catalogue> {
     if !(1..=MAX_ITEMS / PAGE_SIZE).contains(&page) {
         return Err(invalid());
     }
-    let value: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let value: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let data = value.data;
     let offset = (page - 1) * PAGE_SIZE;
     if value.status.0 != 1
