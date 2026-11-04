@@ -3868,11 +3868,14 @@ pub struct QqProvider {
 
 fn prepare_qq_extension_api_call(uri: &str, data: Value) -> Result<PreparedQqExtensionCall> {
     let (module, method) = split_qq_extension_uri(uri)?;
-    let options = serde_json::from_value::<QqExtensionOptions>(data).map_err(|_| {
-        TuneWeaveError::invalid_request(
+    let options = serde_json::from_value::<QqExtensionOptions>(data).map_err(|json_cause| {
+        let mapped = {
+            TuneWeaveError::invalid_request(
             "QQ extension data must contain only param, preserve_booleans, and allow_error_codes",
         )
         .with_platform(Platform::Qq)
+        };
+        mapped.with_json_source(&json_cause)
     })?;
     prepare_qq_extension_call(
         module,
@@ -3884,11 +3887,14 @@ fn prepare_qq_extension_api_call(uri: &str, data: Value) -> Result<PreparedQqExt
 }
 
 fn prepare_qq_extension_batch_call(label: &str, value: Value) -> Result<PreparedQqExtensionCall> {
-    let call = serde_json::from_value::<QqExtensionBatchCall>(value).map_err(|_| {
-        TuneWeaveError::invalid_request(format!(
-            "QQ extension batch request {label} has an invalid shape"
-        ))
-        .with_platform(Platform::Qq)
+    let call = serde_json::from_value::<QqExtensionBatchCall>(value).map_err(|json_cause| {
+        let mapped = {
+            TuneWeaveError::invalid_request(format!(
+                "QQ extension batch request {label} has an invalid shape"
+            ))
+            .with_platform(Platform::Qq)
+        };
+        mapped.with_json_source(&json_cause)
     })?;
     prepare_qq_extension_call(
         &call.module,
@@ -6621,13 +6627,16 @@ impl QqProvider {
             .with_details(json!({ "account": account })));
         }
         let credential = serde_json::from_str::<QqCredential>(stored.secret())
-            .map_err(|_| {
-                TuneWeaveError::new(
-                    ErrorCode::InternalError,
-                    "stored QQ account credential is malformed",
-                )
-                .with_platform(Platform::Qq)
-                .with_details(json!({ "account": account }))
+            .map_err(|json_cause| {
+                let mapped = {
+                    TuneWeaveError::new(
+                        ErrorCode::InternalError,
+                        "stored QQ account credential is malformed",
+                    )
+                    .with_platform(Platform::Qq)
+                    .with_details(json!({ "account": account }))
+                };
+                mapped.with_json_source(&json_cause)
             })?
             .normalize()?;
         Ok(Some(credential))
@@ -11676,7 +11685,10 @@ fn map_singing_annotations_info(
     response: QqApiResponse,
 ) -> Result<SingingAnnotationsAvailability> {
     let parsed = serde_json::from_value::<QqSingingAnnotationsInfoResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ singing annotations info response is malformed"))?;
+        .map_err(|json_cause| {
+            let mapped = qq_data_error("QQ singing annotations info response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     let track_id = match requested {
         QqTrackIdentifier::Numeric(_) => song_id.to_string(),
         QqTrackIdentifier::Mid(mid) => mid,
@@ -11698,7 +11710,10 @@ fn map_multi_style_lyric_response(
     response: QqApiResponse,
 ) -> Result<MultiStyleLyricTranslations> {
     let parsed = serde_json::from_value::<QqMultiStyleLyricResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ multi-style lyric response is malformed"))?;
+        .map_err(|json_cause| {
+            let mapped = qq_data_error("QQ multi-style lyric response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     let preserved_data = json!(&parsed);
     let lyrics = parsed
         .lyrics
@@ -11744,8 +11759,12 @@ fn map_ai_lyric_dictionary_availability(
     song_id: u64,
     response: QqApiResponse,
 ) -> Result<AiLyricDictionaryAvailability> {
-    let parsed = serde_json::from_value::<QqAiDictExistsResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ AI lyric dictionary availability response is malformed"))?;
+    let parsed = serde_json::from_value::<QqAiDictExistsResponse>(response.data.clone()).map_err(
+        |json_cause| {
+            let mapped = qq_data_error("QQ AI lyric dictionary availability response is malformed");
+            mapped.with_json_source(&json_cause)
+        },
+    )?;
     let track_id = match requested {
         QqTrackIdentifier::Numeric(_) => song_id.to_string(),
         QqTrackIdentifier::Mid(mid) => mid,
@@ -11766,8 +11785,12 @@ fn map_ai_lyric_dictionary(
     song_id: u64,
     response: QqApiResponse,
 ) -> Result<AiLyricDictionary> {
-    let parsed = serde_json::from_value::<QqAiDictResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ AI lyric dictionary response is malformed"))?;
+    let parsed = serde_json::from_value::<QqAiDictResponse>(response.data.clone()).map_err(
+        |json_cause| {
+            let mapped = qq_data_error("QQ AI lyric dictionary response is malformed");
+            mapped.with_json_source(&json_cause)
+        },
+    )?;
     let preserved_data = json!(&parsed);
     let entries = parsed
         .entries
@@ -12972,8 +12995,10 @@ fn map_qq_vip_info(
     credential: &QqCredential,
     response: QqApiResponse,
 ) -> Result<MembershipSummary> {
-    let vip = serde_json::from_value::<QqVipInfoResponse>(response.data)
-        .map_err(|_| qq_data_error("QQ VIP information response is malformed"))?;
+    let vip = serde_json::from_value::<QqVipInfoResponse>(response.data).map_err(|json_cause| {
+        let mapped = qq_data_error("QQ VIP information response is malformed");
+        mapped.with_json_source(&json_cause)
+    })?;
     let level = u32::try_from(vip.identity.level)
         .map_err(|_| qq_data_error("QQ VIP level exceeds the supported membership range"))?;
     let active = [
@@ -14273,10 +14298,15 @@ fn qq_singer_image_url(candidates: &[(&str, &str)]) -> Result<Option<String>> {
     let Some(url) = first_qq_display_url(candidates)? else {
         return Ok(None);
     };
-    tuneweave_core::validate_upstream_media_url(&url)
+    let parsed = tuneweave_core::validate_upstream_media_url(&url)
         .map_err(|error| qq_data_error("QQ singer image URL is malformed").with_source(&error))?;
-    Ok(Some(if url.starts_with("http://") {
-        url.replacen("http://", "https://", 1)
+    let legacy = parsed.host_str().is_some_and(|host| {
+        ["qq.com", "gtimg.cn", "qpic.cn"]
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    });
+    Ok(Some(if parsed.scheme() == "http" && legacy {
+        format!("https{}", &url[4..])
     } else {
         url
     }))
@@ -15017,8 +15047,11 @@ fn map_qq_new_album(album: QqNewAlbumItem) -> Result<Album> {
 }
 
 fn map_qq_album_detail(requested: &QqAlbumIdentifier, response: QqApiResponse) -> Result<Album> {
-    let detail = serde_json::from_value::<QqAlbumDetailResponse>(response.data)
-        .map_err(|_| qq_data_error("QQ album detail response is malformed"))?;
+    let detail =
+        serde_json::from_value::<QqAlbumDetailResponse>(response.data).map_err(|json_cause| {
+            let mapped = qq_data_error("QQ album detail response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     let album_mid = detail.album.mid.trim();
     if !album_mid.is_empty() {
         validate_qq_media_id(album_mid, "album MID")
@@ -15153,8 +15186,11 @@ fn map_qq_album_songs(
     offset: u32,
     response: QqApiResponse,
 ) -> Result<Page<Track>> {
-    let data = serde_json::from_value::<QqAlbumSongResponse>(response.data)
-        .map_err(|_| qq_data_error("QQ album song response is malformed"))?;
+    let data =
+        serde_json::from_value::<QqAlbumSongResponse>(response.data).map_err(|json_cause| {
+            let mapped = qq_data_error("QQ album song response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     let album_mid = data.album_mid.trim();
     validate_qq_media_id(album_mid, "album MID")
         .map_err(|_| qq_data_error("QQ album song response contains an invalid album MID"))?;
@@ -15410,8 +15446,12 @@ fn map_qq_mv_url_response(
     guid: &str,
     response: QqApiResponse,
 ) -> Result<Vec<VideoStream>> {
-    let groups = serde_json::from_value::<BTreeMap<String, QqMvUrlSet>>(response.data)
-        .map_err(|_| qq_data_error("QQ MV URL response is malformed"))?;
+    let groups = serde_json::from_value::<BTreeMap<String, QqMvUrlSet>>(response.data).map_err(
+        |json_cause| {
+            let mapped = qq_data_error("QQ MV URL response is malformed");
+            mapped.with_json_source(&json_cause)
+        },
+    )?;
     let mut streams = Vec::with_capacity(requested.len());
     for vid in requested {
         let group = groups.get(vid).ok_or_else(|| {
@@ -15828,13 +15868,17 @@ fn validate_qq_encrypted_uin<'a>(value: &'a str, context: &str) -> Result<&'a st
 }
 
 fn parse_created_playlists(value: Value) -> Result<QqCreatedPlaylistsResponse> {
-    serde_json::from_value(value)
-        .map_err(|_| qq_data_error("QQ created playlist response is malformed"))
+    serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = qq_data_error("QQ created playlist response is malformed");
+        mapped.with_json_source(&json_cause)
+    })
 }
 
 fn parse_favorite_playlists(value: Value) -> Result<QqFavoritePlaylistsResponse> {
-    serde_json::from_value(value)
-        .map_err(|_| qq_data_error("QQ favorite playlist response is malformed"))
+    serde_json::from_value(value).map_err(|json_cause| {
+        let mapped = qq_data_error("QQ favorite playlist response is malformed");
+        mapped.with_json_source(&json_cause)
+    })
 }
 
 fn validate_created_playlists(response: &QqCreatedPlaylistsResponse) -> Result<()> {
@@ -16953,7 +16997,10 @@ fn map_qq_album_subscriptions(
         })));
     }
     let parsed = serde_json::from_value::<QqAlbumSubscriptionResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ album subscription response is malformed"))?;
+        .map_err(|json_cause| {
+            let mapped = qq_data_error("QQ album subscription response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     if parsed.result != 0 {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -17077,8 +17124,12 @@ fn map_qq_track_subscription(
             "subscribed": subscribed
         })));
     }
-    let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ track subscription response is malformed"))?;
+    let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(
+        |json_cause| {
+            let mapped = qq_data_error("QQ track subscription response is malformed");
+            mapped.with_json_source(&json_cause)
+        },
+    )?;
     if parsed.ret_code != 0 {
         return Err(TuneWeaveError::new(
             if parsed.ret_code == 80_092 {
@@ -17173,7 +17224,10 @@ fn map_qq_playlist_subscription(
         })));
     }
     let parsed = serde_json::from_value::<QqPlaylistSubscriptionResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ playlist subscription response is malformed"))?;
+        .map_err(|json_cause| {
+            let mapped = qq_data_error("QQ playlist subscription response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     if parsed.result != 0 {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -17280,12 +17334,16 @@ fn map_qq_playlist_items_mutation(
             "action": action
         })));
     }
-    let parsed =
-        serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(|_| {
-            qq_data_error(format!(
-                "QQ playlist track {operation} response is malformed"
-            ))
-        })?;
+    let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(
+        |json_cause| {
+            let mapped = {
+                qq_data_error(format!(
+                    "QQ playlist track {operation} response is malformed"
+                ))
+            };
+            mapped.with_json_source(&json_cause)
+        },
+    )?;
     if parsed.ret_code != 0 {
         return Err(TuneWeaveError::new(
             if parsed.ret_code == 80_092 {
@@ -17395,7 +17453,10 @@ fn map_qq_playlist_creation(
     response: QqApiResponse,
 ) -> Result<PlaylistMutationResult> {
     let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
-        .map_err(|_| qq_data_error("QQ playlist creation response is malformed"))?;
+        .map_err(|json_cause| {
+            let mapped = qq_data_error("QQ playlist creation response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     if parsed.ret_code != 0 {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -17528,7 +17589,10 @@ fn map_qq_playlist_deletions(
     let mut outcomes = Vec::with_capacity(targets.len());
     for ((playlist_ref, directory_id, _), response) in targets.into_iter().zip(responses) {
         let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
-            .map_err(|_| qq_data_error("QQ playlist deletion response is malformed"))?;
+            .map_err(|json_cause| {
+                let mapped = qq_data_error("QQ playlist deletion response is malformed");
+                mapped.with_json_source(&json_cause)
+            })?;
         if parsed.ret_code != 0 {
             return Err(TuneWeaveError::new(
                 ErrorCode::UpstreamError,
@@ -17627,8 +17691,11 @@ fn qq_playlist_track_options(
 }
 
 fn parse_qq_playlist_detail(value: Value) -> Result<QqPlaylistDetailResponse> {
-    let response = serde_json::from_value::<QqPlaylistDetailResponse>(value)
-        .map_err(|_| qq_data_error("QQ playlist detail response is malformed"))?;
+    let response =
+        serde_json::from_value::<QqPlaylistDetailResponse>(value).map_err(|json_cause| {
+            let mapped = qq_data_error("QQ playlist detail response is malformed");
+            mapped.with_json_source(&json_cause)
+        })?;
     if response.code != 0 || response.subcode != 0 {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
@@ -19132,9 +19199,12 @@ fn parse_qq_caller_credential(credential: &ProviderCredential) -> Result<QqCrede
         .with_platform(Platform::Qq));
     }
     let parsed = serde_json::from_str::<QqCredential>(credential.secret())
-        .map_err(|_| {
-            TuneWeaveError::invalid_request("caller QQ credential payload is malformed")
-                .with_platform(Platform::Qq)
+        .map_err(|json_cause| {
+            let mapped = {
+                TuneWeaveError::invalid_request("caller QQ credential payload is malformed")
+                    .with_platform(Platform::Qq)
+            };
+            mapped.with_json_source(&json_cause)
         })?
         .normalize()
         .map_err(|_| {

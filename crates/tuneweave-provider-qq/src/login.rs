@@ -1414,7 +1414,10 @@ async fn authorize_wechat_qr(client: &QqClient, code: &str) -> Result<QqCredenti
 
 fn parse_login_credential(value: serde_json::Value) -> Result<QqCredential> {
     serde_json::from_value::<QqCredential>(value)
-        .map_err(|_| login_data_error("QQ login returned a malformed credential"))?
+        .map_err(|json_cause| {
+            let mapped = login_data_error("QQ login returned a malformed credential");
+            mapped.with_json_source(&json_cause)
+        })?
         .normalize()
 }
 
