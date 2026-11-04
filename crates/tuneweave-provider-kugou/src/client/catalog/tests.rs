@@ -42,7 +42,7 @@ fn catalogue_maps_real_multi_artist_and_global_playlist_identities_without_guess
         Some("https://imge.kugou.com/stdmusic/400/cover.jpg")
     );
     assert!(!serde_json::to_string(a).unwrap().contains("do-not-export"));
-    let a = json!({"AuthorId":3520,"AuthorName":"A","Identity":1135,"VideoCount":29,"AudioCount":40,"FansNum":"99","Avatar":"https://evil.invalid/a"});
+    let a = json!({"AuthorId":3520,"AuthorName":"A","Identity":1135,"VideoCount":29,"AudioCount":40,"FansNum":"99","Avatar":"file:///a"});
     let p = decode(CatalogKind::Artist, &body(vec![a], 1, 1), 1).unwrap();
     let SearchItem::Artist(a) = &p.items[0] else {
         panic!()

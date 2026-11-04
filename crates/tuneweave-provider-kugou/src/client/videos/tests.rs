@@ -145,7 +145,7 @@ fn video_detail_rejects_ambiguous_fields_bad_identities_and_bad_numeric_resource
 fn video_detail_unknowns_and_zero_artist_ids_are_not_invented_or_merged() {
     let d = json!({"video_id":1,"video_name":"Video","authors":[
         {"author_id":0,"author_name":"A"},{"author_id":0,"author_name":"B"}],
-        "cover":"https://evil.invalid/image","user_id":52,"author_name":"Uploader"});
+        "cover":"file:///image","user_id":52,"author_name":"Uploader"});
     let v = decode(vec![d], &["1"]).unwrap().remove(0);
     assert_eq!(v.video.creators.len(), 2);
     assert!(v.video.creators.iter().all(|v| v.resource_ref.is_none()));

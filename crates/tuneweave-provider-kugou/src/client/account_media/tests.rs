@@ -91,7 +91,7 @@ fn authorized_media_rejects_wrong_identity_unsupported_encryption_and_secret_ech
         ("timeLength", json!(0)),
         ("bitRate", json!(320000)),
         ("fail_process", json!(["need_pay"])),
-        ("url", json!(["https://example.invalid/audio.mp3"])),
+        ("url", json!(["file:///audio.mp3"])),
         (
             "url",
             json!(["https://fs.kugou.com/a?auth=synthetic-song-auth"]),

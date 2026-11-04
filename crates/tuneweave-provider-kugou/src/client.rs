@@ -2165,8 +2165,9 @@ fn kugou_upstream_classification<T>(
 }
 
 fn parse_search_response(bytes: &[u8]) -> Result<KugouSearchPage> {
-    let envelope: KugouSearchEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou search returned malformed JSON"))?;
+    let envelope: KugouSearchEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou search returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou search rejected the request").with_details(json!({
@@ -2199,8 +2200,9 @@ fn parse_search_response(bytes: &[u8]) -> Result<KugouSearchPage> {
 }
 
 fn parse_track_metadata(bytes: &[u8], album_audio_id: u64) -> Result<TrackMetadata> {
-    let envelope: TrackMetadataEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou track detail returned malformed JSON"))?;
+    let envelope: TrackMetadataEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou track detail returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou track detail rejected the request").with_details(json!({
@@ -2231,8 +2233,9 @@ fn parse_track_metadata(bytes: &[u8], album_audio_id: u64) -> Result<TrackMetada
 }
 
 fn parse_audio_metadata(bytes: &[u8], audio_id: &str) -> Result<AudioMetadata> {
-    let envelope: AudioMetadataEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou audio metadata returned malformed JSON"))?;
+    let envelope: AudioMetadataEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou audio metadata returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 || envelope.errcode != 0 {
         let code = if envelope.error_code != 0 {
             envelope.error_code
@@ -2307,8 +2310,9 @@ fn validate_public_playlist_page(request: &PageRequest) -> Result<()> {
 }
 
 fn parse_playlist_detail_response(bytes: &[u8], collection_id: &str) -> Result<Playlist> {
-    let envelope: PlaylistDetailEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou playlist detail returned malformed JSON"))?;
+    let envelope: PlaylistDetailEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou playlist detail returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou playlist detail rejected the request").with_details(
@@ -2484,8 +2488,9 @@ fn parse_playlist_tracks_response(
     offset: u32,
     limit: u32,
 ) -> Result<Page<Track>> {
-    let envelope: PlaylistTracksEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou playlist tracks returned malformed JSON"))?;
+    let envelope: PlaylistTracksEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou playlist tracks returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(kugou_upstream_error(
             safe_upstream_message(&envelope.errmsg)
@@ -3365,8 +3370,9 @@ fn parse_privilege_response(
     album_id: u64,
     hash: &str,
 ) -> Result<PrivilegeResource> {
-    let envelope: PrivilegeEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou media privilege returned malformed JSON"))?;
+    let envelope: PrivilegeEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou media privilege returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou media privilege rejected the request").with_details(
@@ -3398,8 +3404,9 @@ fn parse_privilege_response(
 }
 
 fn parse_tracker_response(bytes: &[u8], requested_hash: &str) -> Result<TrackerEnvelope> {
-    let tracker: TrackerEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou media tracker returned malformed JSON"))?;
+    let tracker: TrackerEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou media tracker returned malformed JSON").with_source(&error)
+    })?;
     if !matches!(tracker.status, 1 | 2) {
         return Err(
             kugou_upstream_error("KuGou media tracker rejected the request").with_details(json!({
@@ -3445,22 +3452,9 @@ fn normalize_media_url(value: &str) -> Result<String> {
     } else {
         value.to_owned()
     };
-    let url = Url::parse(&value)
-        .map_err(|_| kugou_upstream_error("KuGou media tracker returned an invalid URL"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| kugou_upstream_error("KuGou media tracker URL omitted a host"))?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.fragment().is_some()
-        || !(host == "kugou.com" || host.ends_with(".kugou.com"))
-    {
-        return Err(kugou_upstream_error(
-            "KuGou media tracker returned an untrusted URL",
-        ));
-    }
+    tuneweave_core::validate_upstream_media_url(&value).map_err(|error| {
+        kugou_upstream_error("KuGou media tracker returned an invalid URL").with_source(&error)
+    })?;
     Ok(value)
 }
 
@@ -3572,8 +3566,9 @@ fn kugou_invalid_media_request(message: impl Into<String>) -> TuneWeaveError {
 }
 
 fn parse_lyric_search_response(bytes: &[u8]) -> Result<(LyricCandidate, Value)> {
-    let envelope: LyricSearchEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou lyric search returned malformed JSON"))?;
+    let envelope: LyricSearchEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou lyric search returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 200 || envelope.errcode != 200 {
         return Err(
             kugou_upstream_error("KuGou lyric search rejected the request").with_details(json!({
@@ -3644,8 +3639,9 @@ fn parse_lyric_download_response(
     candidate: &LyricCandidate,
     requested: RequestedLyricFormat,
 ) -> Result<DecodedLyric> {
-    let envelope: LyricDownloadEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| kugou_upstream_error("KuGou lyric download returned malformed JSON"))?;
+    let envelope: LyricDownloadEnvelope = serde_json::from_slice(bytes).map_err(|error| {
+        kugou_upstream_error("KuGou lyric download returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status != 200 || envelope.error_code != 0 {
         return Err(
             kugou_upstream_error("KuGou lyric download rejected the request").with_details(json!({
@@ -4327,18 +4323,8 @@ pub(crate) fn normalize_image_url(value: &str) -> Option<String> {
     } else if let Some(rest) = value.strip_prefix("http://") {
         value = format!("https://{rest}");
     }
-    let url = Url::parse(&value).ok()?;
-    let host = url.host_str()?;
-    let trusted = url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.fragment().is_none()
-        && (host == "kugou.com"
-            || host.ends_with(".kugou.com")
-            || host == "kgimg.com"
-            || host.ends_with(".kgimg.com"));
-    trusted.then_some(value)
+    tuneweave_core::validate_upstream_media_url(&value).ok()?;
+    Some(value)
 }
 
 fn nonempty(value: &str) -> Option<&str> {
@@ -4511,8 +4497,11 @@ fn parse_device_registration_response(
     seed: &str,
 ) -> Result<DeviceRegistrationOutcome> {
     let plaintext = decrypt_device_registration_response(ciphertext, seed)?;
-    let envelope: DeviceRegistrationEnvelope = serde_json::from_slice(&plaintext)
-        .map_err(|_| kugou_upstream_error("KuGou device registration returned malformed JSON"))?;
+    let envelope: DeviceRegistrationEnvelope =
+        serde_json::from_slice(&plaintext).map_err(|error| {
+            kugou_upstream_error("KuGou device registration returned malformed JSON")
+                .with_source(&error)
+        })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         let message = nonempty(&envelope.error_msg).or_else(|| nonempty(&envelope.msg));
         return Err(
@@ -4578,6 +4567,7 @@ fn kugou_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "KuGou API request failed")
         .with_platform(Platform::Kugou)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 fn kugou_http_error(status: StatusCode) -> TuneWeaveError {
@@ -4999,9 +4989,9 @@ mod tests {
             normalize_image_url("http://c1.kgimg.com/custom/{size}/cover.jpg").as_deref(),
             Some("https://c1.kgimg.com/custom/400/cover.jpg")
         );
-        assert!(normalize_image_url("https://example.com/cover.jpg").is_none());
+        assert!(normalize_image_url("https://new-cdn.example/cover.jpg").is_some());
         assert!(normalize_image_url("https://user@imge.kugou.com/cover.jpg").is_none());
-        assert!(normalize_image_url("https://imge.kugou.com:444/cover.jpg").is_none());
+        assert!(normalize_image_url("https://new-cdn.example:444/cover.jpg").is_some());
     }
 
     #[test]
@@ -5215,7 +5205,10 @@ mod tests {
         assert_eq!(backups, ["https://fsmobile.tx.kugou.com/path/audio.mp3"]);
 
         let mut untrusted = tracker;
-        untrusted.url = vec!["https://example.com/audio.mp3".to_owned()];
+        untrusted.url =
+            vec!["https://new-cdn.example:8443/media/audio.mp3?signature=opaque".to_owned()];
+        assert!(map_tracker_urls(&untrusted).is_ok());
+        untrusted.url = vec!["https://user:password@new-cdn.example/audio.mp3".to_owned()];
         assert!(map_tracker_urls(&untrusted).is_err());
     }
 

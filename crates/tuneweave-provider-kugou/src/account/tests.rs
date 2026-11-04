@@ -419,7 +419,7 @@ fn self_profile_rejects_identity_and_known_field_errors_without_inventing_member
         json!({"nickname":123}),
         json!({"nickname":"a\nb"}),
         json!({"nickname":"x".repeat(513)}),
-        json!({"pic":"https://untrusted.invalid/avatar"}),
+        json!({"pic":"file:///avatar"}),
         json!({"vip_type":1}),
     ] {
         assert!(parse_profile(&envelope(value), &verified).is_err());

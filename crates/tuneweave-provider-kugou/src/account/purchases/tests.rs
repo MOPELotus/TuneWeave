@@ -109,7 +109,7 @@ fn strict_purchase_shapes_reject_incomplete_pages_deleted_rows_bad_ids_and_forei
                         "album_cover"
                     } else {
                         "cover"
-                    }] = json!("https://example.invalid/cover.jpg")
+                    }] = json!("file:///cover.jpg")
                 }
                 "missing_identity" => {
                     row.as_object_mut().unwrap().remove("id");

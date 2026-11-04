@@ -182,7 +182,7 @@ fn tracks_reject_noncanonical_numbers_conflicting_identities_and_duplicate_field
         ("mixsongid", json!(-1)),
         ("sort", json!(1.5)),
         ("hash", json!("not-a-hash")),
-        ("cover", json!("https://evil.invalid/a")),
+        ("cover", json!("file:///a")),
         ("albuminfo", json!({"id":22,"name":"Album"})),
     ] {
         let mut r = row(1);

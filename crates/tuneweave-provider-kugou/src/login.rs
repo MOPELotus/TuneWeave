@@ -666,8 +666,10 @@ fn parse_native_password_challenge(
     bytes: &[u8],
     code_type: u8,
 ) -> Result<KugouNativePasswordChallenge> {
-    let response: NativePasswordChallengeEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| malformed("KuGou native password challenge is not valid JSON"))?;
+    let response: NativePasswordChallengeEnvelope =
+        serde_json::from_slice(bytes).map_err(|error| {
+            malformed("KuGou native password challenge is not valid JSON").with_source(&error)
+        })?;
     if response.status == 0 {
         return Err(malformed("KuGou native password challenge was rejected")
             .with_details(json!({"platform_code": response.status})));
@@ -848,6 +850,7 @@ fn network_error(e: reqwest::Error) -> TuneWeaveError {
         },
         "KuGou QR transport failed",
     )
+    .with_source(&e.without_url())
 }
 fn rate_limited() -> TuneWeaveError {
     error(

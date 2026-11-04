@@ -543,18 +543,8 @@ fn validate_url(value: &str) -> Result<()> {
     {
         return Err(malformed());
     }
-    let u = Url::parse(value).map_err(|_| malformed())?;
-    if u.scheme() != "https"
-        || !u.username().is_empty()
-        || u.password().is_some()
-        || u.port().is_some()
-        || u.fragment().is_some()
-        || !u
-            .host_str()
-            .is_some_and(|h| h.ends_with(".kugou.com") || h == "kgv.stream.tencentmusic.com")
-    {
-        return Err(malformed());
-    }
+    tuneweave_core::validate_upstream_media_url(value)
+        .map_err(|error| malformed().with_source(&error))?;
     Ok(())
 }
 fn valid_hash(hash: &str) -> bool {

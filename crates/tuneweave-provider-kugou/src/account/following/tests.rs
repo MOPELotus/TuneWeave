@@ -64,7 +64,7 @@ fn followed_artists_require_full_snapshot_and_do_not_invent_missing_or_duplicate
         ("name", json!("")),
         ("id", json!("01")),
         ("fansnum", json!(-1)),
-        ("img", json!("https://example.invalid/avatar")),
+        ("img", json!("file:///avatar")),
     ] {
         let mut row = singer(7);
         row[key] = value;

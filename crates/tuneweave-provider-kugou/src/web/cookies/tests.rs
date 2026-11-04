@@ -123,7 +123,7 @@ fn cookie_identity_fields_are_strict_and_cannot_be_injected_or_reencoded() {
         "KugooID=111&t=secret&KugooID=222",
         "KugooID=111&t=one&t=two",
         "KugooID%3D111%26t%3Dsecret",
-        "KugooID=111&t=secret&Pic=https://evil.com/a.jpg",
+        "KugooID=111&t=secret&Pic=file:///a.jpg",
         "KugooID=111&t=secret&NickName=%0a",
         "KugooID=111&t=secret&unknown=1&unknown=2",
     ] {

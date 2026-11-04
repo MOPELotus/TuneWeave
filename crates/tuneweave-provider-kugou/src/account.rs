@@ -817,6 +817,7 @@ pub(crate) fn network_error(e: reqwest::Error) -> TuneWeaveError {
         },
         "KuGou account transport failed",
     )
+    .with_source(&e.without_url())
 }
 
 #[cfg(test)]

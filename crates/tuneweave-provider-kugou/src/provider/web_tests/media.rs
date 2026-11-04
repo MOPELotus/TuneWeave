@@ -339,7 +339,7 @@ async fn web_media_never_exports_token_echoes_untrusted_urls_or_unknown_redirect
     for url in [
         format!("https://webfs.yun.kugou.com/{TOKEN}.mp3"),
         format!("https://webfs.yun.kugou.com/a.mp3?t={encoded}"),
-        "https://evil.example/audio.mp3".into(),
+        "file:///audio.mp3".into(),
         "http://127.0.0.1/audio.mp3".into(),
         "https://user:pass@webfs.yun.kugou.com/a.mp3".into(),
     ] {

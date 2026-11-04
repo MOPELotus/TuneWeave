@@ -130,8 +130,8 @@ impl KugouClient {
 fn parse(bytes: &[u8], uid: &str, list_id: u64, kind: u8, page: u32) -> Result<TrackPage> {
     // Some current v3 clients receive error_code=0 without status. An explicit failure
     // always wins; a missing info array is empty only when the upstream count is zero.
-    let status: TrackEnvelope<IgnoredAny> =
-        serde_json::from_slice(bytes).map_err(|_| malformed_at("envelope_json"))?;
+    let status: TrackEnvelope<IgnoredAny> = serde_json::from_slice(bytes)
+        .map_err(|error| malformed_at("envelope_json").with_source(&error))?;
     if status.status.is_some_and(|v| v != 1) || status.error_code != 0 {
         let code = if status.error_code == 20017 {
             ErrorCode::AuthenticationRequired

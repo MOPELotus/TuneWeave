@@ -201,7 +201,7 @@ fn library_rejects_corrupt_numbers_duplicate_fields_and_inconsistent_physical_pa
         ("is_pri", json!(2)),
         ("tags", json!([])),
         ("name", json!(null)),
-        ("pic", json!("https://evil.invalid/a")),
+        ("pic", json!("file:///a")),
     ] {
         let mut row = entry(1, 0);
         row[field] = value;

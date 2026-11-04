@@ -107,7 +107,7 @@ fn sms_account_choices_are_typed_unique_bounded_and_contain_no_opaque_response_d
     let envelope = |data: Value| {
         serde_json::from_value::<Envelope>(json!({"status":1,"error_code":0,"data":data})).unwrap()
     };
-    let accounts=parse_choices(envelope(json!({"info_list":[{"userid":111,"nickname":"One","pic":"https://foreign.invalid/a.jpg","token":"never-export"},{"userid":"222","duration":999}]}))).unwrap();
+    let accounts=parse_choices(envelope(json!({"info_list":[{"userid":111,"nickname":"One","pic":"file:///a.jpg","token":"never-export"},{"userid":"222","duration":999}]}))).unwrap();
     assert_eq!(accounts[0].user_id, "111");
     assert!(accounts[0].avatar_url.is_none());
     assert!(accounts[1].nickname.is_none());
