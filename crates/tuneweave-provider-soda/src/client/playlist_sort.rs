@@ -107,8 +107,10 @@ fn playlist_sort_authentication_required() -> TuneWeaveError {
 }
 
 fn parse_sort_playlist_ack(body: &[u8], playlist_id: &str, expected_ids: &[String]) -> Result<()> {
-    let ack: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist sort returned malformed data"))?;
+    let ack: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist sort returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let status_code = ack
         .get("status_code")
         .and_then(serde_json::Value::as_i64)

@@ -194,7 +194,10 @@ impl SodaCredential {
             return Err(soda_credential_error("credential exceeds the size limit"));
         }
         serde_json::from_str::<Self>(secret)
-            .map_err(|_| soda_credential_error("credential is malformed"))?
+            .map_err(|json_cause| {
+                let mapped = soda_credential_error("credential is malformed");
+                mapped.with_json_source(&json_cause)
+            })?
             .validate()
     }
 
@@ -1173,8 +1176,9 @@ fn safe_client_context_value(value: &serde_json::Value, depth: usize, nodes: &mu
 }
 
 fn parse_qr_create_response(bytes: &[u8]) -> Result<QrCreateEnvelope> {
-    let response = serde_json::from_slice::<QrCreateEnvelope>(bytes)
-        .map_err(|_| soda_upstream_error("Soda QR creation returned invalid JSON"))?;
+    let response = serde_json::from_slice::<QrCreateEnvelope>(bytes).map_err(|error| {
+        soda_upstream_error("Soda QR creation returned invalid JSON").with_source(&error)
+    })?;
     validate_upstream_token(&response.data.token)?;
     if !response.message.trim().is_empty()
         && !response.message.trim().eq_ignore_ascii_case("success")
@@ -1185,8 +1189,9 @@ fn parse_qr_create_response(bytes: &[u8]) -> Result<QrCreateEnvelope> {
 }
 
 fn parse_qr_poll_response(bytes: &[u8]) -> Result<SodaQrPollOutcome> {
-    let response = serde_json::from_slice::<QrPollEnvelope>(bytes)
-        .map_err(|_| soda_upstream_error("Soda QR polling returned invalid JSON"))?;
+    let response = serde_json::from_slice::<QrPollEnvelope>(bytes).map_err(|error| {
+        soda_upstream_error("Soda QR polling returned invalid JSON").with_source(&error)
+    })?;
     let status = response.data.status.trim().to_ascii_lowercase();
     let account_flow = response.data.account_flow.trim().to_ascii_lowercase();
     if account_flow == "verify" || response.data.error_code == 2046 {

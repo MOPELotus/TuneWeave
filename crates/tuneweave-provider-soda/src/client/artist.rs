@@ -112,8 +112,11 @@ impl SodaClient {
 }
 
 fn parse_artist_page(body: &[u8], expected_id: &str) -> Result<SodaArtistPage> {
-    let envelope: ArtistRouter = serde_json::from_slice(extract_router_json(body)?)
-        .map_err(|_| soda_upstream_error("Soda artist share page contained invalid data"))?;
+    let envelope: ArtistRouter =
+        serde_json::from_slice(extract_router_json(body)?).map_err(|json_cause| {
+            let mapped = soda_upstream_error("Soda artist share page contained invalid data");
+            mapped.with_json_source(&json_cause)
+        })?;
     if envelope.errors.is_some_and(|error| {
         !error.is_null() && !error.as_object().is_some_and(|error| error.is_empty())
     }) {

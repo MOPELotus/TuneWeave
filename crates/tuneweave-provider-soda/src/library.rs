@@ -814,8 +814,10 @@ fn safe_created_owner_counts(items: &[Playlist], source_user_id: &str) -> serde_
 }
 
 fn validate_collection_write(body: &[u8]) -> Result<()> {
-    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda collection write returned invalid data"))?;
+    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda collection write returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let codes = [
         envelope.status_code,
         envelope.status_info.and_then(|info| info.status_code),
@@ -832,10 +834,15 @@ fn validate_collection_write(body: &[u8]) -> Result<()> {
 }
 
 fn parse_playlist_create_ack(body: &[u8]) -> Result<String> {
-    let response: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
-    let envelope: PlaylistCreateEnvelope = serde_json::from_value(response.clone())
-        .map_err(|_| soda_upstream_error("Soda playlist creation returned invalid data"))?;
+    let response: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist creation returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
+    let envelope: PlaylistCreateEnvelope =
+        serde_json::from_value(response.clone()).map_err(|json_cause| {
+            let mapped = soda_upstream_error("Soda playlist creation returned invalid data");
+            mapped.with_json_source(&json_cause)
+        })?;
     if let Some(status_code) = envelope.status_code {
         if status_code == 1_000_016 {
             return Err(authentication_required());
@@ -893,8 +900,10 @@ fn validate_statusless_write_info(value: &serde_json::Value, operation: &str) ->
         .cloned()
         .ok_or_else(|| soda_upstream_error(format!("{operation} returned invalid status info")))
         .and_then(|info| {
-            serde_json::from_value(info).map_err(|_| {
-                soda_upstream_error(format!("{operation} returned invalid status info"))
+            serde_json::from_value(info).map_err(|json_cause| {
+                let mapped =
+                    { soda_upstream_error(format!("{operation} returned invalid status info")) };
+                mapped.with_json_source(&json_cause)
             })
         })?;
     if info.log_id.trim().is_empty()
@@ -968,8 +977,10 @@ fn extract_created_playlist_id(response: &serde_json::Value) -> Result<String> {
 }
 
 fn validate_playlist_update_ack(body: &[u8]) -> Result<()> {
-    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist update returned invalid data"))?;
+    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist update returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let status_code = envelope
         .status_code
         .ok_or_else(|| soda_upstream_error("Soda playlist update omitted its result status"))?;
@@ -991,8 +1002,10 @@ fn validate_playlist_update_ack(body: &[u8]) -> Result<()> {
 }
 
 fn validate_playlist_delete_ack(body: &[u8], requested_id: &str) -> Result<()> {
-    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist deletion returned invalid data"))?;
+    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist deletion returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if let Some(status_code) = envelope.status_code {
         for code in [
             Some(status_code),
@@ -1011,8 +1024,10 @@ fn validate_playlist_delete_ack(body: &[u8], requested_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    let response: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist deletion returned invalid data"))?;
+    let response: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist deletion returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if !has_exact_fields(&response, &["deleted_playlists", "status_info"]) {
         return Err(soda_upstream_error(
             "Soda playlist deletion omitted its result status",
@@ -1034,10 +1049,15 @@ fn validate_playlist_delete_ack(body: &[u8], requested_id: &str) -> Result<()> {
 }
 
 fn validate_playlist_media_write_ack(body: &[u8], requested_id: &str) -> Result<()> {
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist media write returned invalid data"))?;
-    let envelope: CollectionWriteEnvelope = serde_json::from_value(value.clone())
-        .map_err(|_| soda_upstream_error("Soda playlist media write returned invalid data"))?;
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda playlist media write returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
+    let envelope: CollectionWriteEnvelope =
+        serde_json::from_value(value.clone()).map_err(|json_cause| {
+            let mapped = soda_upstream_error("Soda playlist media write returned invalid data");
+            mapped.with_json_source(&json_cause)
+        })?;
     if let Some(status_code) = envelope.status_code {
         for code in [
             Some(status_code),
@@ -1094,8 +1114,10 @@ fn parse_page(
     {
         return Ok(page);
     }
-    let envelope: LibraryEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Soda account playlists returned invalid data"))?;
+    let envelope: LibraryEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account playlists returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let mut unclassified_items = 0;
     let (raw_count, sources) = match section {
         LibrarySection::Created => {
@@ -1185,8 +1207,10 @@ fn empty_saved_library_page<T>(
 }
 
 fn validate_library_status(body: &[u8]) -> Result<()> {
-    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda account library returned malformed data"))?;
+    let envelope: CollectionWriteEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account library returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let codes = [
         envelope.status_code,
         envelope.status_info.and_then(|info| info.status_code),

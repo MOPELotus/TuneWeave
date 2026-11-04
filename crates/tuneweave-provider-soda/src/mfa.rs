@@ -50,7 +50,10 @@ pub(crate) struct SodaMfa {
 
 impl SodaMfa {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        let raw: Value = serde_json::from_slice(bytes).map_err(|_| invalid_mfa())?;
+        let raw: Value = serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = invalid_mfa();
+            mapped.with_json_source(&json_cause)
+        })?;
         let mut fields = BTreeMap::new();
         let mut methods = Vec::new();
         let mut remaining = 128;
@@ -236,7 +239,10 @@ impl SodaMfa {
     }
 
     pub(crate) fn accept(&mut self, action: &QrVerificationAction, bytes: &[u8]) -> Result<()> {
-        let raw: Value = serde_json::from_slice(bytes).map_err(|_| invalid_mfa())?;
+        let raw: Value = serde_json::from_slice(bytes).map_err(|json_cause| {
+            let mapped = invalid_mfa();
+            mapped.with_json_source(&json_cause)
+        })?;
         let data = raw
             .get("data")
             .and_then(Value::as_object)
@@ -342,7 +348,10 @@ fn collect(
         }
         Value::String(text) if text.len() <= 16384 => {
             if text.trim_start().starts_with('{') || text.trim_start().starts_with('[') {
-                let nested: Value = serde_json::from_str(text).map_err(|_| invalid_mfa())?;
+                let nested: Value = serde_json::from_str(text).map_err(|json_cause| {
+                    let mapped = invalid_mfa();
+                    mapped.with_json_source(&json_cause)
+                })?;
                 collect(&nested, depth + 1, remaining, fields, methods)?;
             } else {
                 let query = text

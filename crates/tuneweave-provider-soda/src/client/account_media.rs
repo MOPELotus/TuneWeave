@@ -204,8 +204,10 @@ fn parse_account_track_fields(
     body: &[u8],
     identity: &SodaTrackIdentity,
 ) -> Result<(Track, Option<bool>)> {
-    let status: AccountTrackStatus = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda account media returned malformed data"))?;
+    let status: AccountTrackStatus = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account media returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let status_info_code = status
         .status_info
         .as_ref()
@@ -235,8 +237,10 @@ fn parse_account_track_fields(
             "Soda account media omitted status metadata",
         ));
     }
-    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda account media returned invalid metadata"))?;
+    let envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account media returned invalid metadata");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.track.is_none() || envelope.seo_track.is_some() {
         return Err(soda_upstream_error(
             "Soda account media omitted its own track payload",

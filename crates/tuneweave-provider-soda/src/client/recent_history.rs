@@ -111,8 +111,10 @@ fn parse_history(
     count: u32,
 ) -> Result<(Vec<RecentTrackHistoryEntry>, u64, Option<String>)> {
     // Inspect business status before requiring success-only fields.
-    let raw: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Invalid Soda recent history response"))?;
+    let raw: serde_json::Value = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Invalid Soda recent history response");
+        mapped.with_json_source(&json_cause)
+    })?;
     for value in [
         raw.get("status_code"),
         raw.pointer("/status_info/status_code"),
@@ -132,8 +134,10 @@ fn parse_history(
             ));
         }
     }
-    let source: Envelope = serde_json::from_value(raw)
-        .map_err(|_| soda_upstream_error("Soda recent history omitted required fields"))?;
+    let source: Envelope = serde_json::from_value(raw).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda recent history omitted required fields");
+        mapped.with_json_source(&json_cause)
+    })?;
     if source.status_code.is_some_and(|c| c != 0)
         || source.status_info.status_code.is_some_and(|c| c != 0)
         || source.media.len() > count as usize

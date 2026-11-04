@@ -87,7 +87,10 @@ impl SodaClient {
                 body.extend_from_slice(&chunk);
             }
             let identity: IdentityEnvelope =
-                serde_json::from_slice(&body).map_err(|_| invalid())?;
+                serde_json::from_slice(&body).map_err(|json_cause| {
+                    let mapped = invalid();
+                    mapped.with_json_source(&json_cause)
+                })?;
             match (identity.status_code, identity.my_info) {
                 (1_000_016, None) => Ok(false),
                 (0, Some(identity)) if identity.id == uid => Ok(true),

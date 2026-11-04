@@ -145,8 +145,10 @@ fn parse_player_info(
 ) -> Result<SodaVideoModel> {
     let invalid =
         || soda_upstream_error("Soda player info returned inconsistent authorization metadata");
-    let envelope: PlayerInfoEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda player info returned malformed data"))?;
+    let envelope: PlayerInfoEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda player info returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.response_metadata.error.is_some() {
         return Err(soda_upstream_error(
             "Soda player info reported an upstream error",

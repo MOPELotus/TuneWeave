@@ -145,7 +145,10 @@ impl SodaClient {
 }
 
 fn parse(bytes: &[u8], user_id: &str) -> Result<MembershipSummary> {
-    let business: Business = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let business: Business = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let nested = business.status_info.and_then(|v| v.status_code);
     if [business.status_code, nested].contains(&Some(1_000_016)) {
         return Err(unauthenticated());
@@ -153,7 +156,10 @@ fn parse(bytes: &[u8], user_id: &str) -> Result<MembershipSummary> {
     if business.status_code != Some(0) || nested.is_some_and(|n| n != 0) {
         return Err(invalid());
     }
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     let status = envelope.status_info;
     if status.now == 0
         || status.now > MAX_TIME

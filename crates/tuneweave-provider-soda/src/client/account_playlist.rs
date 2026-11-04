@@ -149,14 +149,19 @@ fn parse_account_playlist_page(
             "Soda account playlist requested an invalid physical page size",
         ));
     }
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda account playlist returned malformed data"))?;
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account playlist returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let shape = account_playlist_business_shape(&value);
     let status: AccountPlaylistBusinessStatus =
-        serde_json::from_value(value.clone()).map_err(|_| {
-            soda_upstream_error(format!(
-                "Soda account playlist returned malformed data ({shape})"
-            ))
+        serde_json::from_value(value.clone()).map_err(|json_cause| {
+            let mapped = {
+                soda_upstream_error(format!(
+                    "Soda account playlist returned malformed data ({shape})"
+                ))
+            };
+            mapped.with_json_source(&json_cause)
         })?;
     let codes = [
         status.status_code,

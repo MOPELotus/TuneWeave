@@ -211,8 +211,10 @@ fn parse_collection_page(body: &[u8]) -> Result<ParsedCollectionPage> {
             "Soda artist collection page is too large",
         ));
     }
-    let page: CollectionPage = serde_json::from_slice(body)
-        .map_err(|_| artist_collection_invalid("Soda artist collection returned malformed data"))?;
+    let page: CollectionPage = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = artist_collection_invalid("Soda artist collection returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let status_codes = [
         page.status_code,
         page.status_info.and_then(|info| info.status_code),
@@ -313,8 +315,10 @@ fn parse_write_ack(body: &[u8], artist_id: &str, subscribed: bool) -> Result<()>
             "Soda artist collection ACK is too large",
         ));
     }
-    let ack: WriteAck = serde_json::from_slice(body)
-        .map_err(|_| artist_collection_invalid("Soda artist collection ACK is malformed"))?;
+    let ack: WriteAck = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = artist_collection_invalid("Soda artist collection ACK is malformed");
+        mapped.with_json_source(&json_cause)
+    })?;
     match ack.status_code {
         Some(100_001 | 1_000_016) => return Err(artist_collection_authentication_required()),
         Some(0) => {}

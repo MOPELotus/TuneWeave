@@ -123,8 +123,10 @@ impl SodaClient {
 }
 
 fn parse(body: &[u8], id: &str) -> Result<SodaAlbumPage> {
-    let business: Business = serde_json::from_slice(body)
-        .map_err(|_| invalid("Soda account album returned malformed data"))?;
+    let business: Business = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = invalid("Soda account album returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let codes = [
         business.status_code,
         business.status_info.and_then(|s| s.status_code),
@@ -135,8 +137,10 @@ fn parse(body: &[u8], id: &str) -> Result<SodaAlbumPage> {
     if codes.into_iter().flatten().any(|n| n != 0) {
         return Err(invalid("Soda account album request was rejected"));
     }
-    let mut response: Envelope = serde_json::from_slice(body)
-        .map_err(|_| invalid("Soda account album omitted complete metadata"))?;
+    let mut response: Envelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = invalid("Soda account album omitted complete metadata");
+        mapped.with_json_source(&json_cause)
+    })?;
     if response.status_info.now == 0
         || response.status_info.now_ts_ms / 1000 != response.status_info.now
         || response.has_more

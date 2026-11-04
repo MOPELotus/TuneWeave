@@ -70,8 +70,10 @@ fn wall_auth() -> TuneWeaveError {
     .with_platform(Platform::Soda)
 }
 fn parse_wall(bytes: &[u8], user: &str, other: bool) -> Result<serde_json::Value> {
-    let raw: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Invalid Soda music wall response"))?;
+    let raw: serde_json::Value = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Invalid Soda music wall response");
+        mapped.with_json_source(&json_cause)
+    })?;
     let object = raw
         .as_object()
         .ok_or_else(|| soda_upstream_error("Invalid Soda music wall object"))?;

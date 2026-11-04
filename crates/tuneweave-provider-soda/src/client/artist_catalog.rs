@@ -53,8 +53,10 @@ fn present_cursor<'de, D: serde::Deserializer<'de>>(
 
 impl PageState {
     fn parse(body: &[u8]) -> Result<Self> {
-        let state: Self = serde_json::from_slice(body)
-            .map_err(|_| invalid("Soda artist catalogue returned malformed status"))?;
+        let state: Self = serde_json::from_slice(body).map_err(|json_cause| {
+            let mapped = invalid("Soda artist catalogue returned malformed status");
+            mapped.with_json_source(&json_cause)
+        })?;
         if [state.status_code, state.status_info.status_code]
             .into_iter()
             .flatten()
@@ -132,8 +134,10 @@ impl CatalogueItem for Track {
         &self.id
     }
     fn parse(body: &[u8], artist_id: &str) -> Result<Vec<Self>> {
-        let page: TrackPage = serde_json::from_slice(body)
-            .map_err(|_| invalid("Soda artist tracks returned malformed data"))?;
+        let page: TrackPage = serde_json::from_slice(body).map_err(|json_cause| {
+            let mapped = invalid("Soda artist tracks returned malformed data");
+            mapped.with_json_source(&json_cause)
+        })?;
         if page.albums.is_some() || page.tracks.len() > MAX_PAGE_ITEMS {
             return Err(invalid(
                 "Soda artist tracks returned an invalid physical page",
@@ -164,8 +168,10 @@ impl CatalogueItem for Album {
         &self.id
     }
     fn parse(body: &[u8], artist_id: &str) -> Result<Vec<Self>> {
-        let page: AlbumPage = serde_json::from_slice(body)
-            .map_err(|_| invalid("Soda artist albums returned malformed data"))?;
+        let page: AlbumPage = serde_json::from_slice(body).map_err(|json_cause| {
+            let mapped = invalid("Soda artist albums returned malformed data");
+            mapped.with_json_source(&json_cause)
+        })?;
         if page.tracks.is_some() || page.albums.len() > MAX_PAGE_ITEMS {
             return Err(invalid(
                 "Soda artist albums returned an invalid physical page",
@@ -276,8 +282,10 @@ impl SodaClient {
         let response = response?;
         let body = response.body;
         let mut bytes = body.len();
-        let profile: Profile = serde_json::from_slice(&body)
-            .map_err(|_| invalid("Soda artist catalogue omitted artist metadata"))?;
+        let profile: Profile = serde_json::from_slice(&body).map_err(|json_cause| {
+            let mapped = invalid("Soda artist catalogue omitted artist metadata");
+            mapped.with_json_source(&json_cause)
+        })?;
         let mut artist = super::artist::map_artist_metadata(
             profile.artist_info.metadata,
             "official_pc_artist_detail",
@@ -497,8 +505,11 @@ impl SodaClient {
                     body.extend_from_slice(&chunk);
                 }
                 if credential.is_some() {
-                    let value: serde_json::Value = serde_json::from_slice(&body)
-                        .map_err(|_| invalid("Soda artist catalogue returned malformed data"))?;
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&body).map_err(|json_cause| {
+                            let mapped = invalid("Soda artist catalogue returned malformed data");
+                            mapped.with_json_source(&json_cause)
+                        })?;
                     for code in [
                         value.get("status_code"),
                         value.get("status_info").and_then(|s| s.get("status_code")),

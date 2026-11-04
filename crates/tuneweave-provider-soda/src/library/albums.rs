@@ -82,8 +82,10 @@ fn parse_page(owner: &str, credential: &SodaCredential, body: &[u8]) -> Result<L
     if let Some(page) = super::empty_saved_library_page(credential, body) {
         return Ok(page);
     }
-    let envelope: AlbumEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda saved albums returned malformed data"))?;
+    let envelope: AlbumEnvelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda saved albums returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let entries = envelope
         .mixed_collections
         .ok_or_else(|| soda_upstream_error("Soda saved albums omitted mixed collections"))?;

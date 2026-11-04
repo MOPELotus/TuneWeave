@@ -94,8 +94,10 @@ fn mark(extensions: &mut Extensions, user_id: &str, backend: &str) {
 
 fn parse(body: &[u8], id: &str) -> Result<ArtistOverview> {
     PageState::parse(body)?;
-    let response: Detail = serde_json::from_slice(body)
-        .map_err(|_| invalid("Soda artist detail omitted valid metadata or preview"))?;
+    let response: Detail = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = invalid("Soda artist detail omitted valid metadata or preview");
+        mapped.with_json_source(&json_cause)
+    })?;
     let mut artist = super::super::artist::map_artist_metadata(
         response.artist_info.metadata,
         "official_pc_artist_detail",

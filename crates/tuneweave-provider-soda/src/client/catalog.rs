@@ -138,8 +138,10 @@ pub(super) fn parse_catalog(
     kind: SodaCatalogKind,
     cursor: u32,
 ) -> Result<SodaCatalogPage> {
-    let envelope: CatalogEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Soda catalogue search returned invalid data"))?;
+    let envelope: CatalogEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda catalogue search returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status_code.is_some_and(|code| code != 0) {
         return Err(soda_upstream_error("Soda catalogue search was rejected"));
     }

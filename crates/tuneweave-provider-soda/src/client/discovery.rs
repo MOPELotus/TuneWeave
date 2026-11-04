@@ -74,8 +74,10 @@ impl SodaClient {
     }
 }
 fn parse_discovery(bytes: &[u8]) -> Result<(Vec<Playlist>, bool)> {
-    let source: Envelope = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Soda discovery response is invalid"))?;
+    let source: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda discovery response is invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if source.status_code.is_some_and(|c| c != 0) || source.inner_block.len() > 256 {
         return Err(soda_upstream_error(
             "Soda discovery was rejected or exceeded its limits",
@@ -106,8 +108,11 @@ fn parse_discovery(bytes: &[u8]) -> Result<(Vec<Playlist>, bool)> {
                         .ok_or_else(|| soda_upstream_error("Soda discovery track count is invalid"))
                 })
                 .transpose()?;
-            let metadata: SodaPlaylistMetadata = serde_json::from_value(raw.clone())
-                .map_err(|_| soda_upstream_error("Soda discovery playlist metadata is invalid"))?;
+            let metadata: SodaPlaylistMetadata =
+                serde_json::from_value(raw.clone()).map_err(|json_cause| {
+                    let mapped = soda_upstream_error("Soda discovery playlist metadata is invalid");
+                    mapped.with_json_source(&json_cause)
+                })?;
             let (mut playlist, _, _, _) = map_playlist(metadata, &resource.resource_id)?;
             playlist.track_count = count;
             playlist

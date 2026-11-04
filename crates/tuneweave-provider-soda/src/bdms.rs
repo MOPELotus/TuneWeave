@@ -324,7 +324,10 @@ impl SignerChannel {
         read_bounded_line(&mut self.reader)
             .ok_or_else(signer_runtime_error)
             .and_then(|line| {
-                serde_json::from_slice::<SignerResponse>(&line).map_err(|_| signer_runtime_error())
+                serde_json::from_slice::<SignerResponse>(&line).map_err(|json_cause| {
+                    let mapped = signer_runtime_error();
+                    mapped.with_json_source(&json_cause)
+                })
             })
     }
 }
@@ -362,7 +365,10 @@ impl RemoteSigner {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| signer_runtime_error())
+        serde_json::from_slice(&bytes).map_err(|json_cause| {
+            let mapped = signer_runtime_error();
+            mapped.with_json_source(&json_cause)
+        })
     }
 }
 

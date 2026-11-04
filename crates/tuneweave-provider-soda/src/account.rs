@@ -132,8 +132,10 @@ impl SodaClient {
 }
 
 fn parse_account(alias: &str, credential: &SodaCredential, bytes: &[u8]) -> Result<SodaAccount> {
-    let envelope: AccountEnvelope = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Soda account profile returned invalid data"))?;
+    let envelope: AccountEnvelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda account profile returned invalid data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status_code == 1_000_016 {
         return Err(authentication_required());
     }

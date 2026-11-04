@@ -83,8 +83,10 @@ impl SodaClient {
 }
 
 fn parse_chart(bytes: &[u8], expected_id: &str) -> Result<(Chart, Vec<Track>)> {
-    let envelope: Envelope = serde_json::from_slice(bytes)
-        .map_err(|_| soda_upstream_error("Soda chart response is invalid"))?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda chart response is invalid");
+        mapped.with_json_source(&json_cause)
+    })?;
     if envelope.status_code.is_some_and(|code| code != 0) {
         return Err(soda_upstream_error("Soda chart request was rejected"));
     }

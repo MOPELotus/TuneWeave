@@ -278,8 +278,10 @@ fn check_account_business_status(body: &[u8]) -> Result<()> {
     struct Info {
         status_code: Option<i64>,
     }
-    let response: Business = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda suggestions returned malformed data"))?;
+    let response: Business = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda suggestions returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     let codes = [
         response.status_code,
         response.status_info.and_then(|s| s.status_code),
@@ -298,8 +300,10 @@ fn valid_text(value: &str) -> bool {
 }
 
 fn parse(body: &[u8], query: &str) -> Result<SearchSuggestionList> {
-    let response: Envelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda suggestions returned malformed data"))?;
+    let response: Envelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda suggestions returned malformed data");
+        mapped.with_json_source(&json_cause)
+    })?;
     if [response.status_code, response.status_info.status_code]
         .into_iter()
         .flatten()

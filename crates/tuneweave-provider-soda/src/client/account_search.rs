@@ -153,7 +153,10 @@ impl SodaClient {
 }
 
 fn parse_page(bytes: &[u8], kind: SearchKind, cursor: u32) -> Result<catalog::SodaCatalogPage> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|json_cause| {
+        let mapped = invalid();
+        mapped.with_json_source(&json_cause)
+    })?;
     for code in [
         value.get("status_code"),
         value.get("status_info").and_then(|v| v.get("status_code")),

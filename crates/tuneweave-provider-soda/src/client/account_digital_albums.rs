@@ -134,8 +134,10 @@ impl SodaClient {
 }
 
 fn parse(body: &[u8]) -> Result<Vec<DigitalAlbum>> {
-    let business: Business = serde_json::from_slice(body)
-        .map_err(|_| invalid("Soda purchased-albums response was malformed"))?;
+    let business: Business = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = invalid("Soda purchased-albums response was malformed");
+        mapped.with_json_source(&json_cause)
+    })?;
     let codes = [
         business.status_code,
         business.status_info.and_then(|info| info.status_code),
@@ -156,8 +158,10 @@ fn parse(body: &[u8]) -> Result<Vec<DigitalAlbum>> {
         };
     }
 
-    let envelope: Envelope = serde_json::from_slice(body)
-        .map_err(|_| invalid("Soda purchased-albums response was malformed"))?;
+    let envelope: Envelope = serde_json::from_slice(body).map_err(|json_cause| {
+        let mapped = invalid("Soda purchased-albums response was malformed");
+        mapped.with_json_source(&json_cause)
+    })?;
     let rows = envelope.albums.unwrap_or_default();
     if rows.len() > MAX_ALBUMS {
         return Err(invalid(

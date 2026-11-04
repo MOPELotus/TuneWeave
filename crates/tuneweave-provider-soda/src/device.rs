@@ -134,7 +134,7 @@ fn read_device(path: &Path) -> Result<SodaDeviceState> {
         return Err(device_state_error("stored state exceeds the size limit"));
     }
     serde_json::from_slice::<SodaDeviceState>(&bytes)
-        .map_err(|_| device_state_error("stored state is not valid JSON"))?
+        .map_err(|error| device_state_error("stored state is not valid JSON").with_source(&error))?
         .validate()
 }
 

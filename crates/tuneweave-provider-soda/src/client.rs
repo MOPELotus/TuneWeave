@@ -1408,8 +1408,9 @@ fn soda_upstream_classification(
 }
 
 fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearchPage> {
-    let envelope: SodaSearchEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda search returned malformed JSON"))?;
+    let envelope: SodaSearchEnvelope = serde_json::from_slice(body).map_err(|error| {
+        soda_upstream_error("Soda search returned malformed JSON").with_source(&error)
+    })?;
     validate_status_metadata(&envelope.status_info, "Soda search")?;
 
     let mut track_groups = envelope
@@ -1481,8 +1482,9 @@ fn parse_playlist_response(
     requested_cursor: u64,
     requested_count: u32,
 ) -> Result<SodaPlaylistPage> {
-    let envelope: SodaPlaylistEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda playlist detail returned malformed JSON"))?;
+    let envelope: SodaPlaylistEnvelope = serde_json::from_slice(body).map_err(|error| {
+        soda_upstream_error("Soda playlist detail returned malformed JSON").with_source(&error)
+    })?;
     validate_status_metadata(&envelope.status_info, "Soda playlist detail")?;
     if let Some(code) = envelope.status_code.filter(|code| *code != 0) {
         if code == 1_000_005 {
@@ -1674,8 +1676,9 @@ fn map_playlist(
 
 fn parse_album_share_page(body: &[u8], expected_id: &str) -> Result<SodaAlbumPage> {
     let router_json = extract_router_json(body)?;
-    let envelope: SodaRouterEnvelope = serde_json::from_slice(router_json).map_err(|_| {
+    let envelope: SodaRouterEnvelope = serde_json::from_slice(router_json).map_err(|error| {
         soda_upstream_error("Soda album share page contained malformed router JSON")
+            .with_source(&error)
     })?;
     let page = envelope.loader_data.album_page;
     if page.album_info.has_error {
@@ -1870,8 +1873,9 @@ fn extract_router_json(body: &[u8]) -> Result<&[u8]> {
 }
 
 fn parse_track_envelope(body: &[u8]) -> Result<SodaTrackDetailEnvelope> {
-    let mut envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body)
-        .map_err(|_| soda_upstream_error("Soda track response returned malformed JSON"))?;
+    let mut envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body).map_err(|error| {
+        soda_upstream_error("Soda track response returned malformed JSON").with_source(&error)
+    })?;
     if envelope.status_code.is_some_and(|code| code != 0) {
         return Err(soda_upstream_error("Soda rejected the track request"));
     }
@@ -2294,8 +2298,10 @@ fn decode_direct_player_model(player: &SodaTrackPlayer) -> Result<SodaVideoModel
             "Soda availability omitted a bounded player model",
         ));
     }
-    serde_json::from_str(source)
-        .map_err(|_| soda_upstream_error("Soda availability returned a malformed player model"))
+    serde_json::from_str(source).map_err(|json_cause| {
+        let mapped = soda_upstream_error("Soda availability returned a malformed player model");
+        mapped.with_json_source(&json_cause)
+    })
 }
 
 fn validate_decoded_player_model(
@@ -2516,27 +2522,16 @@ fn validate_media_url(value: &str) -> Result<()> {
             "Soda availability returned an invalid media URL",
         ));
     }
-    let url = Url::parse(value)
-        .map_err(|_| soda_upstream_error("Soda availability returned an invalid media URL"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| soda_upstream_error("Soda availability returned an invalid media URL"))?;
-    let prefix = host
-        .strip_suffix("-luna.douyinvod.com")
-        .ok_or_else(|| soda_upstream_error("Soda availability returned an untrusted media host"))?;
+    let url = tuneweave_core::validate_upstream_media_url(value).map_err(|error| {
+        soda_upstream_error("Soda availability returned an invalid media URL").with_source(&error)
+    })?;
     if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !matches!(url.port(), None | Some(443))
-        || url.fragment().is_some()
-        || url.path().is_empty()
-        || prefix.is_empty()
-        || !prefix
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !url
+            .host_str()
+            .is_some_and(|host| host == "douyinvod.com" || host.ends_with(".douyinvod.com"))
     {
         return Err(soda_upstream_error(
-            "Soda availability returned an untrusted media URL",
+            "Soda media fetch requires its official HTTPS CDN family",
         ));
     }
     Ok(())
@@ -3184,6 +3179,7 @@ pub(crate) fn soda_network_error(error: reqwest::Error) -> TuneWeaveError {
     TuneWeaveError::new(code, "Soda API request failed")
         .with_platform(Platform::Soda)
         .retryable(true)
+        .with_source(&error.without_url())
 }
 
 pub(crate) fn soda_http_error(status: StatusCode) -> TuneWeaveError {
@@ -3272,6 +3268,25 @@ mod tests {
         );
     }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn media_fetch_accepts_new_official_cdn_node_shapes_and_ports() {
+        assert!(
+            validate_media_url(
+                "https://edge-other.douyinvod.com:8443/new/path/audio?signature=opaque"
+            )
+            .is_ok()
+        );
+        assert!(validate_media_url("https://v3-luna.douyinvod.com/audio").is_ok());
+        for value in [
+            "https://douyinvod.com.evil.invalid/audio",
+            "https://user:secret@v3-luna.douyinvod.com/audio",
+            "https://127.0.0.1/audio",
+            "file:///audio",
+        ] {
+            assert!(validate_media_url(value).is_err());
+        }
+    }
 
     #[test]
     fn seo_envelope_keeps_identity_and_lyric_precedence_and_rejects_business_errors() {
