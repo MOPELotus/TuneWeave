@@ -636,6 +636,8 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             platform,
             status,
             retryable = error.retryable,
+            source_chain = ?error.details.get("source_chain"),
+            upstream_code = ?error.details.get("platform_code").and_then(serde_json::Value::as_i64),
             "TuneWeave request failed"
         );
     } else {
@@ -646,6 +648,8 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             platform,
             status,
             retryable = error.retryable,
+            source_chain = ?error.details.get("source_chain"),
+            upstream_code = ?error.details.get("platform_code").and_then(serde_json::Value::as_i64),
             "TuneWeave request failed"
         );
     }
