@@ -3997,8 +3997,7 @@ mod tests {
             br#"{"status_info":{"status_code":99,"status_msg":"try again later"},"extra":{"empty_search":1}}"#,
             0,
         )
-        .err()
-        .expect("a search rejection is not an empty search");
+        .expect_err("a search rejection is not an empty search");
         assert_eq!(search_error.code, ErrorCode::UpstreamError);
         assert_eq!(search_error.details["platform_code"], 99);
         assert_eq!(search_error.details["upstream_message"], "try again later");
