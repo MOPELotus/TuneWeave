@@ -995,6 +995,7 @@ struct PlaylistTracksQuery<'a> {
 struct PlaylistDetailEnvelope {
     status: i64,
     error_code: i64,
+    errmsg: Option<Value>,
     data: Vec<KugouPlaylistInfo>,
 }
 
@@ -2169,12 +2170,12 @@ fn parse_search_response(bytes: &[u8]) -> Result<KugouSearchPage> {
         kugou_upstream_error("KuGou search returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 1 || envelope.error_code != 0 {
-        return Err(
-            kugou_upstream_error("KuGou search rejected the request").with_details(json!({
-                "platform_code": envelope.error_code,
-                "platform_message": safe_upstream_message(&envelope.error_msg),
-            })),
-        );
+        return Err(kugou_business_error(
+            "KuGou search rejected the request",
+            envelope.status,
+            envelope.error_code,
+            &envelope.error_msg,
+        ));
     }
     let data = envelope
         .data
@@ -2204,12 +2205,12 @@ fn parse_track_metadata(bytes: &[u8], album_audio_id: u64) -> Result<TrackMetada
         kugou_upstream_error("KuGou track detail returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 1 || envelope.error_code != 0 {
-        return Err(
-            kugou_upstream_error("KuGou track detail rejected the request").with_details(json!({
-                "platform_code": envelope.error_code,
-                "platform_message": safe_upstream_message(&envelope.msg),
-            })),
-        );
+        return Err(kugou_business_error(
+            "KuGou track detail rejected the request",
+            envelope.status,
+            envelope.error_code,
+            &envelope.msg,
+        ));
     }
     let [metadata] = <[TrackMetadata; 1]>::try_from(envelope.data).map_err(|_| {
         kugou_upstream_error("KuGou track detail returned an unexpected result count")
@@ -2242,12 +2243,12 @@ fn parse_audio_metadata(bytes: &[u8], audio_id: &str) -> Result<AudioMetadata> {
         } else {
             envelope.errcode
         };
-        return Err(
-            kugou_upstream_error("KuGou audio metadata rejected the request").with_details(json!({
-                "platform_code": code,
-                "platform_message": safe_upstream_message(&envelope.errmsg),
-            })),
-        );
+        return Err(kugou_business_error(
+            "KuGou audio metadata rejected the request",
+            envelope.status,
+            code,
+            &envelope.errmsg,
+        ));
     }
     let [audio] = <[AudioMetadata; 1]>::try_from(envelope.data).map_err(|_| {
         kugou_upstream_error("KuGou audio metadata returned an unexpected result count")
@@ -2314,14 +2315,19 @@ fn parse_playlist_detail_response(bytes: &[u8], collection_id: &str) -> Result<P
         kugou_upstream_error("KuGou playlist detail returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 1 || envelope.error_code != 0 {
-        return Err(
-            kugou_upstream_error("KuGou playlist detail rejected the request").with_details(
-                json!({
-                    "status": envelope.status,
-                    "error_code": envelope.error_code
-                }),
-            ),
+        let mut error = kugou_business_error(
+            "KuGou playlist detail rejected the request",
+            envelope.status,
+            envelope.error_code,
+            envelope
+                .errmsg
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
         );
+        error.details["status"] = json!(envelope.status);
+        error.details["error_code"] = json!(envelope.error_code);
+        return Err(error);
     }
     if envelope.data.len() != 1 {
         return Err(kugou_upstream_error(
@@ -2492,14 +2498,15 @@ fn parse_playlist_tracks_response(
         kugou_upstream_error("KuGou playlist tracks returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 1 || envelope.error_code != 0 {
-        return Err(kugou_upstream_error(
-            safe_upstream_message(&envelope.errmsg)
-                .unwrap_or_else(|| "KuGou playlist tracks rejected the request".to_owned()),
-        )
-        .with_details(json!({
-            "status": envelope.status,
-            "error_code": envelope.error_code
-        })));
+        let mut error = kugou_business_error(
+            "KuGou playlist tracks rejected the request",
+            envelope.status,
+            envelope.error_code,
+            &envelope.errmsg,
+        );
+        error.details["status"] = json!(envelope.status);
+        error.details["error_code"] = json!(envelope.error_code);
+        return Err(error);
     }
     let data = envelope
         .data
@@ -3374,14 +3381,12 @@ fn parse_privilege_response(
         kugou_upstream_error("KuGou media privilege returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 1 || envelope.error_code != 0 {
-        return Err(
-            kugou_upstream_error("KuGou media privilege rejected the request").with_details(
-                json!({
-                    "platform_code": envelope.error_code,
-                    "platform_message": safe_upstream_message(&envelope.message),
-                }),
-            ),
-        );
+        return Err(kugou_business_error(
+            "KuGou media privilege rejected the request",
+            envelope.status,
+            envelope.error_code,
+            &envelope.message,
+        ));
     }
     let [resource] = <[PrivilegeResource; 1]>::try_from(envelope.data).map_err(|_| {
         kugou_upstream_error("KuGou media privilege returned an unexpected result count")
@@ -3575,14 +3580,16 @@ fn parse_lyric_search_response(bytes: &[u8]) -> Result<(LyricCandidate, Value)> 
         kugou_upstream_error("KuGou lyric search returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 200 || envelope.errcode != 200 {
-        return Err(
-            kugou_upstream_error("KuGou lyric search rejected the request").with_details(json!({
-                "platform_code": envelope.errcode,
-                "platform_message": safe_upstream_message(
-                    nonempty(&envelope.errmsg).unwrap_or(&envelope.info)
-                ),
-            })),
-        );
+        return Err(kugou_business_error(
+            "KuGou lyric search rejected the request",
+            envelope.status,
+            if envelope.errcode == 200 {
+                envelope.status
+            } else {
+                envelope.errcode
+            },
+            nonempty(&envelope.errmsg).unwrap_or(&envelope.info),
+        ));
     }
     if envelope.candidates.len() > 1_000 {
         return Err(kugou_upstream_error(
@@ -3648,13 +3655,14 @@ fn parse_lyric_download_response(
         kugou_upstream_error("KuGou lyric download returned malformed JSON").with_source(&error)
     })?;
     if envelope.status != 200 || envelope.error_code != 0 {
-        return Err(
-            kugou_upstream_error("KuGou lyric download rejected the request").with_details(json!({
-                "platform_code": envelope.error_code,
-                "platform_message": safe_upstream_message(&envelope.info),
-                "requested_format": requested.as_str(),
-            })),
+        let mut error = kugou_business_error(
+            "KuGou lyric download rejected the request",
+            envelope.status,
+            envelope.error_code,
+            &envelope.info,
         );
+        error.details["requested_format"] = json!(requested.as_str());
+        return Err(error);
     }
     if envelope.id.trim() != candidate.id {
         return Err(kugou_upstream_error(
@@ -4346,12 +4354,23 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn safe_upstream_message(value: &str) -> Option<String> {
-    let value = nonempty(value)?;
-    if value.chars().any(char::is_control) {
-        return None;
+fn kugou_business_error(
+    context: &'static str,
+    platform_status: i64,
+    platform_code: i64,
+    message: &str,
+) -> TuneWeaveError {
+    let mut error = kugou_upstream_error(context)
+        .with_details(json!({
+            "platform_code": platform_code,
+            "platform_status": platform_status,
+        }))
+        .with_upstream_message(message);
+    // Keep the legacy diagnostics field, using only the shared redacted text.
+    if let Some(message) = error.details.get("upstream_message") {
+        error.details["platform_message"] = message.clone();
     }
-    Some(value.chars().take(256).collect())
+    error
 }
 
 fn unix_seconds_now() -> u64 {
@@ -4518,14 +4537,12 @@ fn parse_device_registration_response(
         })?;
     if envelope.status != 1 || envelope.error_code != 0 {
         let message = nonempty(&envelope.error_msg).or_else(|| nonempty(&envelope.msg));
-        return Err(
-            kugou_upstream_error("KuGou device registration rejected the request").with_details(
-                json!({
-                    "platform_code": envelope.error_code,
-                    "platform_message": message.map(safe_upstream_message),
-                }),
-            ),
-        );
+        return Err(kugou_business_error(
+            "KuGou device registration rejected the request",
+            envelope.status,
+            envelope.error_code,
+            message.unwrap_or_default(),
+        ));
     }
     Ok(envelope
         .data
@@ -4593,6 +4610,7 @@ fn kugou_http_error(status: StatusCode) -> TuneWeaveError {
     TuneWeaveError::new(code, format!("KuGou API returned HTTP {status}"))
         .with_platform(Platform::Kugou)
         .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+        .with_details(json!({"http_status": status.as_u16()}))
 }
 
 fn kugou_upstream_error(message: impl Into<String>) -> TuneWeaveError {
@@ -4773,11 +4791,20 @@ mod tests {
     #[test]
     fn search_response_rejects_business_errors_without_echoing_the_body() {
         let error = parse_search_response(
-            br#"{"status":1,"error_code":152,"error_msg":"Parameter Error","data":null}"#,
+            br#"{"status":1,"error_code":152,"error_msg":"Parameter Error token=fixture-secret","data":{"token":"body-secret"}}"#,
         )
         .expect_err("reject business error");
         let rendered = format!("{error:?}");
-        assert!(rendered.contains("152"));
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.details["platform_code"], 152);
+        assert!(!error.retryable);
+        assert!(error.message.contains("Parameter Error"));
+        assert_eq!(
+            error.details["platform_message"],
+            error.details["upstream_message"]
+        );
+        assert!(!rendered.contains("fixture-secret"));
+        assert!(!rendered.contains("body-secret"));
         assert!(!rendered.contains("\"data\""));
     }
 

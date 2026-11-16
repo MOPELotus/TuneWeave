@@ -228,7 +228,10 @@ impl KugouClient {
                     ErrorCode::UpstreamError,
                     "KuGou Web token exchange was rejected",
                 )
-                .with_details(serde_json::json!({"platform_code":envelope.error_code})));
+                .with_details(serde_json::json!({
+                    "platform_code": envelope.error_code,
+                    "platform_status": envelope.status,
+                })));
             }
             let cookie = WebCookie::received(headers, crate::account::now_ms()? / 1000)?;
             let identity = cookie.identity()?;

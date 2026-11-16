@@ -490,8 +490,12 @@ fn data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         } else {
             ErrorCode::UpstreamError
         };
-        return Err(error(code, "KuGou native account request was rejected")
-            .with_details(json!({"platform_code": status.error_code})));
+        return Err(
+            error(code, "KuGou native account request was rejected").with_details(json!({
+                "platform_code": status.error_code,
+                "platform_status": status.status,
+            })),
+        );
     }
     let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(|json_cause| {
         let mapped = malformed();

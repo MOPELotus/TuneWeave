@@ -565,8 +565,12 @@ fn data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         mapped.with_json_source(&json_cause)
     })?;
     if response.status != 1 || response.error_code != 0 {
-        return Err(malformed("KuGou QR request was rejected")
-            .with_details(json!({"platform_code": response.error_code})));
+        return Err(
+            malformed("KuGou QR request was rejected").with_details(json!({
+                "platform_code": response.error_code,
+                "platform_status": response.status,
+            })),
+        );
     }
     response
         .data
@@ -645,7 +649,8 @@ fn parse_poll(
                 token,
             }))
         }
-        _ => Err(malformed("KuGou QR polling returned an unknown state")),
+        code => Err(malformed("KuGou QR polling returned an unknown state")
+            .with_details(json!({"platform_code": code}))),
     }
 }
 
