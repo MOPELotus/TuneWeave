@@ -1161,6 +1161,50 @@ pub struct PodcastTaxonomy {
     pub extensions: Extensions,
 }
 
+/// Hierarchical navigation from the platform's current podcast catalog.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCategoryTree {
+    pub categories: Vec<PodcastCategoryBranch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastCategoryBranch {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub cover_url: Option<String>,
+    pub children: Vec<PodcastSubcategory>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PodcastSubcategory {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CollectedPodcastFeedRequest {
+    pub account: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CollectedPodcastFeedPage {
+    pub items: Vec<CollectedPodcastFeedItem>,
+    /// Native time cursor for the next page, only present when `has_more` is true.
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub total: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CollectedPodcastFeedItem {
+    /// Activity identifier, distinct from a station or episode ID.
+    pub feed_id: Option<String>,
+    pub extensions: Extensions,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PodcastTaxonomyKind {
@@ -2509,6 +2553,14 @@ pub struct RecommendationDislikeResult {
     pub track_ref: ResourceRef,
     pub applied: bool,
     pub extensions: Extensions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecommendationDislikeList {
+    pub song_ids: Vec<String>,
+    pub artist_ids: Vec<String>,
+    pub podcast_ids: Vec<String>,
+    pub checkpoint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

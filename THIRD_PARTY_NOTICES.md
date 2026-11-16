@@ -14,6 +14,9 @@ future ports can be audited precisely.
 - Additional reviewed commit: `984cc021b8598cf94c22134f32a8426887fb2de7`
   (CSR XEAPI and NEAPI wire/configuration format research; independently implemented
   with bounded parsing and authenticated response validation).
+- Additional reviewed commit: `d89fc6033b9b7e98658195f1e1df2e5ce055343c`
+  (protocol evidence for the recommendation dislike list, podcast category tree,
+  and collected podcast activity feed).
 - License: MIT
 - Used for: NetEase Cloud Music request protocols, endpoint behavior, response
   normalization, and authentication flow research.

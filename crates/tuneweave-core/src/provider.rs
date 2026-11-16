@@ -1,6 +1,9 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::{ScrobbleRequest, ScrobbleResult};
+use crate::{
+    CollectedPodcastFeedPage, CollectedPodcastFeedRequest, PodcastCategoryTree,
+    RecommendationDislikeList, ScrobbleRequest, ScrobbleResult,
+};
 use async_trait::async_trait;
 
 use crate::{
@@ -392,6 +395,23 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::PodcastCategoryRecommendations,
+        ))
+    }
+
+    async fn podcast_category_tree(&self, _account: Option<&str>) -> Result<PodcastCategoryTree> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::PodcastCategoryTree,
+        ))
+    }
+
+    async fn collected_podcast_feed(
+        &self,
+        _request: &CollectedPodcastFeedRequest,
+    ) -> Result<CollectedPodcastFeedPage> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::CollectedPodcastFeed,
         ))
     }
 
@@ -1943,6 +1963,16 @@ pub trait MusicProvider: Send + Sync {
         Err(TuneWeaveError::unsupported(
             self.platform(),
             Capability::AccountDislikes,
+        ))
+    }
+
+    async fn recommendation_dislikes(
+        &self,
+        _account: Option<&str>,
+    ) -> Result<RecommendationDislikeList> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::RecommendationDislikeList,
         ))
     }
 

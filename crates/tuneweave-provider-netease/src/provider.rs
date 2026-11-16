@@ -1,6 +1,8 @@
 mod cloud_transfer;
 #[path = "new_search.rs"]
 mod new_search;
+#[path = "podcast_discovery.rs"]
+mod podcast_discovery;
 #[path = "recent_history.rs"]
 mod recent_history;
 #[path = "recommendation_styles.rs"]
@@ -94,6 +96,10 @@ use tuneweave_core::{
     VideoResourceKind, VideoStats, VideoStream, VideoStreamRequest, VideoTaxonomyKind,
     VideoTaxonomyRequest,
 };
+use tuneweave_core::{
+    CollectedPodcastFeedPage, CollectedPodcastFeedRequest, PodcastCategoryTree,
+    RecommendationDislikeList,
+};
 use tuneweave_core::{ScrobbleRequest, ScrobbleResult};
 use url::Url;
 
@@ -149,6 +155,7 @@ struct PendingCaptchaClient {
 #[derive(Clone)]
 pub struct NeteaseProvider {
     client: NeteaseClient,
+    anonymous_discovery_client: NeteaseClient,
     accounts: Arc<RwLock<BTreeMap<String, NeteaseClient>>>,
     anonymous_identity: Arc<RwLock<Option<StoredAnonymousIdentity>>>,
     pending_captcha_clients: Arc<RwLock<BTreeMap<String, PendingCaptchaClient>>>,
@@ -163,6 +170,7 @@ impl NeteaseProvider {
         let client = NeteaseClient::new(config)?;
         let anonymous_identity = configured_anonymous_identity(&client);
         let provider = Self {
+            anonymous_discovery_client: client.without_cookie(),
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
@@ -179,6 +187,7 @@ impl NeteaseProvider {
     pub fn from_client(client: NeteaseClient) -> Self {
         let anonymous_identity = configured_anonymous_identity(&client);
         Self {
+            anonymous_discovery_client: client.without_cookie(),
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::new())),
             anonymous_identity: Arc::new(RwLock::new(anonymous_identity)),
@@ -194,6 +203,7 @@ impl NeteaseProvider {
         let client = self.client.without_cookie();
         let account_client = client.with_cookie(cookie);
         Ok(Self {
+            anonymous_discovery_client: self.anonymous_discovery_client.clone(),
             client,
             accounts: Arc::new(RwLock::new(BTreeMap::from([(
                 "default".to_owned(),
@@ -713,6 +723,9 @@ impl MusicProvider for NeteaseProvider {
             Capability::RadioStyleCatalog,
             Capability::RadioPlaybackQueue,
             Capability::PodcastCategories,
+            Capability::PodcastCategoryTree,
+            Capability::CollectedPodcastFeed,
+            Capability::RecommendationDislikeList,
             Capability::PodcastCategoryRecommendations,
             Capability::PodcastList,
             Capability::PodcastCharts,
@@ -1372,6 +1385,24 @@ impl MusicProvider for NeteaseProvider {
         let (path, payload) = netease_podcast_categories_request(request.kind);
         let response = client.request_weapi(path, payload).await?;
         map_netease_podcast_categories(response.body, request.kind)
+    }
+
+    async fn podcast_category_tree(&self, account: Option<&str>) -> Result<PodcastCategoryTree> {
+        self.read_podcast_category_tree(account).await
+    }
+
+    async fn collected_podcast_feed(
+        &self,
+        request: &CollectedPodcastFeedRequest,
+    ) -> Result<CollectedPodcastFeedPage> {
+        self.read_collected_podcast_feed(request).await
+    }
+
+    async fn recommendation_dislikes(
+        &self,
+        account: Option<&str>,
+    ) -> Result<RecommendationDislikeList> {
+        self.read_recommendation_dislikes(account).await
     }
 
     async fn podcast_category_recommendations(

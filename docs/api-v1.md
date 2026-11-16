@@ -890,6 +890,18 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 
 更新风格使用 `PUT /v1/recommendations/styles/selection`，JSON 为 `{"platform":"netease","account":"personal","category_id":1,"tag_ids":[2]}`；ID 必须来自当前目录，选择 1–64 个不同标签且属于同一分类。请求先读取并验证目录，写入后读取所选标签确认，只有与请求一致才返回成功。操作总限时 45 秒，账户更换会拒绝迟到结果；写入发出后超时或回读失败会返回 `write_outcome=unconfirmed`，不自动重发。上述响应均为 `no-store`。
 
+### 网易云播客分类和账户收藏
+
+下表的 `platform` 默认为 `netease`。可用性可通过 `/v1/capabilities?platform=netease` 查询。
+
+| 路径 | SDK / 能力 | 返回内容 |
+| --- | --- | --- |
+| `GET /v1/podcasts/category-tree` | `podcast_category_tree` | 新版目录的父分类及其 `children`，保留上游顺序、包括“全部”在内的导航项及 ID 前导零。匿名可读。不替换 `/v1/podcasts/categories` 的平铺目录。 |
+| `GET /v1/account/recommendation-dislikes` | `recommendation_dislikes` / `recommendation_dislike_list` | 当前账户标记为“不感兴趣”的 `song_ids`、`artist_ids`、`podcast_ids`，以及上游提供时的 `checkpoint`。为读取操作，不提交反馈，也不改动 `/v1/account/dislikes` 的其他平台语义。 |
+| `GET /v1/account/podcasts/collected-feed` | `collected_podcast_feed` | 当前账户收藏的播客动态（Mlog），与订阅的电台、节目播放历史分别读取。结果含 `items`、`next_cursor`、`has_more`、`total`（上游未提供时为 `null`）。 |
+
+两条账户入口选择 `account=personal` 等服务端账户，省略时选择 `default`；也可使用调用方凭据，不能同时指定账户别名。成功和错误响应均为 `Cache-Control: no-store`。分类树不指定账户或调用方凭据时使用匿名身份，不读取已登录的默认账户。收藏动态第一页省略 `cursor`，下一页传上次 `next_cursor`；`limit` 为 1–100，默认 30。客户端应以 `has_more` 判定是否继续，不能用 `offset` 或通过总数推算游标。动态条目的 `feed_id` 是动态标识，不是电台或节目 ID；未提供时为 `null`。仅保留已知的展示扩展字段，`publish_time` 保留上游原值。
+
 咪咕 songId 专用查询：`GET /v1/extensions/migu/song-identifiers?song_id=1114323823` 返回 `song_id`、`content_id`、`copyright_id` 及以 contentId 为身份的 `track_ref`；`POST /v1/extensions/migu/songs/by-songid` 接受 `{"song_ids":["1114323823"]}`，返回完整歌曲。SDK 对应 `migu_song_identifiers`、`migu_tracks_by_song_ids`，能力为 `song_id_lookup`。这些入口使用公开来源，不接受账户或调用方凭据；songId 必须是正十进制字符串，一次 1–100 项，保留请求顺序和重复项。映射会核对购买状态入口提供的身份提示与歌曲详情，缺失或矛盾时返回错误，不跟随应用跳转地址，也不推断购买或播放权益。
 
 汽水榜单目录使用 `GET /v1/charts?platform=soda&view=summary`，`overview`、`modern` 返回同一组已知官方榜单。目录范围明确标记为 `curated_chart_ids`，包含热歌、新歌、欧美和音乐人榜，逐一读取实时官方详情，不声称涵盖所有榜单，也不把推荐歌单当作榜单。歌曲使用 `GET /v1/charts/soda:chart:7036274230471712007/tracks?limit=20&offset=0`；先验证完整榜单及曲目身份、总数，再应用本地分页，保留官方顺序。榜单数量按当前响应读取，不固定为 50；原始 `rank_type`、`rank_delta` 保留在歌曲扩展，不推断未提供的上期名次。仅支持当前期，拒绝账户和调用方凭据，匿名读取不需要签名辅助服务。

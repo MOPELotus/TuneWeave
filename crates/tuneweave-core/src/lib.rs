@@ -14,6 +14,10 @@ mod provider;
 mod registry;
 
 pub use model::SoundPowerQuery;
+pub use model::{
+    CollectedPodcastFeedItem, CollectedPodcastFeedPage, CollectedPodcastFeedRequest,
+    PodcastCategoryBranch, PodcastCategoryTree, PodcastSubcategory, RecommendationDislikeList,
+};
 mod resolver;
 mod scrobble;
 mod uni_playlist_document;

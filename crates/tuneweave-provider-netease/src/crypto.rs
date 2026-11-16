@@ -163,6 +163,28 @@ pub(crate) fn decrypt_eapi_response(body: &[u8]) -> Result<Vec<u8>, &'static str
     Ok(decoded)
 }
 
+#[cfg(test)]
+pub(crate) fn xeapi_registration_fixture(nonce: &str) -> Vec<u8> {
+    let key = serde_json::json!({
+        "publicKey": BASE64.encode([1; 32]),
+        "version": "fixture-version",
+        "sk": "fixture-server-key"
+    });
+    let timestamp = "1720000000000";
+    serde_json::json!({"code": 200, "data": {
+        "timestamp": timestamp,
+        "signature": xeapi_sign(timestamp, nonce),
+        "encryptedData": BASE64.encode(encrypt_aes_256_ecb(&XEAPI_STATIC_KEY, key.to_string().as_bytes()))
+    }})
+    .to_string()
+    .into_bytes()
+}
+
+#[cfg(test)]
+pub(crate) fn xeapi_response_fixture(body: &Value) -> Vec<u8> {
+    encrypt_aes_128_ecb(EAPI_KEY, body.to_string().as_bytes())
+}
+
 fn encrypt_weapi_with_secret(payload: &str, secret: &[u8; 16]) -> WeapiPayload {
     let first = encrypt_cbc_base64(payload.as_bytes(), WEAPI_PRESET_KEY);
     let params = encrypt_cbc_base64(first.as_bytes(), secret);

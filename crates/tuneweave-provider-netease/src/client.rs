@@ -1617,6 +1617,9 @@ impl NeteaseClient {
 
     pub(crate) fn with_cookie(&self, cookie: String) -> Self {
         let mut client = self.clone();
+        if self.cookie.as_deref() != Some(cookie.as_str()) {
+            client.xeapi_state = Arc::new(RwLock::new(XeapiState::default()));
+        }
         if cookie_value(Some(&cookie), "MUSIC_U") != cookie_value(self.cookie.as_deref(), "MUSIC_U")
             || cookie_value(Some(&cookie), "MUSIC_A")
                 != cookie_value(self.cookie.as_deref(), "MUSIC_A")
@@ -1640,7 +1643,11 @@ impl NeteaseClient {
     }
 
     pub(crate) fn with_account_scope(mut self, account: &str) -> Self {
-        self.identity_scope = format!("account:{account}");
+        let scope = format!("account:{account}");
+        if self.identity_scope != scope {
+            self.xeapi_state = Arc::new(RwLock::new(XeapiState::default()));
+        }
+        self.identity_scope = scope;
         self.anti_cheat_v3_token = Arc::new(RwLock::new(None));
         self
     }
@@ -1651,6 +1658,9 @@ impl NeteaseClient {
 
     pub(crate) fn with_device_id(&self, device_id: String) -> Self {
         let mut client = self.clone();
+        if self.device_id != device_id {
+            client.xeapi_state = Arc::new(RwLock::new(XeapiState::default()));
+        }
         client.device_id = device_id;
         client
     }
@@ -1661,6 +1671,9 @@ impl NeteaseClient {
 
     pub(crate) fn without_cookie(&self) -> Self {
         let mut client = self.clone();
+        if self.cookie.is_some() {
+            client.xeapi_state = Arc::new(RwLock::new(XeapiState::default()));
+        }
         client.cookie = None;
         client.identities = Arc::new(Identities::ephemeral());
         client.anti_cheat_v3_token = Arc::new(RwLock::new(None));
@@ -3421,6 +3434,35 @@ mod tests {
             .await
             .expect("live XEAPI request succeeds");
         assert!(response_code(&response.body).is_some());
+    }
+
+    #[test]
+    fn xeapi_session_state_does_not_cross_cookie_account_or_device_scopes() {
+        let client = NeteaseClient::new(NeteaseConfig {
+            cookie: Some("MUSIC_U=fixture-session-a".to_owned()),
+            ..NeteaseConfig::default()
+        })
+        .unwrap();
+        client.xeapi_state.write().unwrap().session_id = "fixture-xeapi-session".to_owned();
+
+        for same in [
+            client.clone(),
+            client.with_cookie("MUSIC_U=fixture-session-a".to_owned()),
+            client.with_device_id(client.device_id().to_owned()),
+        ] {
+            assert_eq!(
+                same.xeapi_state.read().unwrap().session_id,
+                "fixture-xeapi-session"
+            );
+        }
+        for different in [
+            client.without_cookie(),
+            client.with_cookie("MUSIC_U=fixture-session-b".to_owned()),
+            client.with_device_id("fixture-other-device".to_owned()),
+            client.clone().with_account_scope("other"),
+        ] {
+            assert!(different.xeapi_state.read().unwrap().session_id.is_empty());
+        }
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ mod chart_periods;
 mod cloud_transfers;
 mod migu_identifiers;
 mod music_wall;
+mod netease_podcast_catalog;
 mod playlist_catalog;
 mod playlist_submissions;
 mod purchases;
@@ -911,6 +912,18 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/radio/stations/{reference}", get(radio_station))
         .route("/podcasts/categories", get(podcast_categories))
+        .route(
+            "/podcasts/category-tree",
+            get(netease_podcast_catalog::category_tree),
+        )
+        .route(
+            "/account/recommendation-dislikes",
+            get(netease_podcast_catalog::recommendation_dislikes),
+        )
+        .route(
+            "/account/podcasts/collected-feed",
+            get(netease_podcast_catalog::collected_feed),
+        )
         .route(
             "/podcasts/category-recommendations",
             get(podcast_category_recommendations),
@@ -19749,6 +19762,7 @@ mod tests {
     mod migu_purchases;
     mod migu_video_playback;
     mod migu_videos;
+    mod netease_podcast_catalog;
     mod password_challenges;
     mod session_rotation;
     mod soda_account_artist;
@@ -21037,6 +21051,74 @@ mod tests {
                     ("kind".to_owned(), json!(request.kind)),
                     ("response".to_owned(), json!({"code": 200})),
                 ]),
+            })
+        }
+
+        async fn podcast_category_tree(
+            &self,
+            account: Option<&str>,
+        ) -> tuneweave_core::Result<tuneweave_core::PodcastCategoryTree> {
+            assert!(matches!(account, None | Some("listener")));
+            Ok(tuneweave_core::PodcastCategoryTree {
+                categories: vec![tuneweave_core::PodcastCategoryBranch {
+                    id: "1".to_owned(),
+                    name: "音乐".to_owned(),
+                    description: None,
+                    cover_url: None,
+                    children: vec![tuneweave_core::PodcastSubcategory {
+                        id: "2".to_owned(),
+                        name: "全部".to_owned(),
+                    }],
+                }],
+            })
+        }
+
+        async fn recommendation_dislikes(
+            &self,
+            account: Option<&str>,
+        ) -> tuneweave_core::Result<tuneweave_core::RecommendationDislikeList> {
+            let song = match account {
+                Some("listener") => "7",
+                Some("default") => "8",
+                _ => {
+                    return Err(TuneWeaveError::new(
+                        ErrorCode::AuthenticationRequired,
+                        "login required",
+                    ));
+                }
+            };
+            Ok(tuneweave_core::RecommendationDislikeList {
+                song_ids: vec![song.to_owned()],
+                artist_ids: vec![],
+                podcast_ids: vec!["100".to_owned()],
+                checkpoint: None,
+            })
+        }
+
+        async fn collected_podcast_feed(
+            &self,
+            request: &tuneweave_core::CollectedPodcastFeedRequest,
+        ) -> tuneweave_core::Result<tuneweave_core::CollectedPodcastFeedPage> {
+            assert_eq!(request.account.as_deref(), Some("listener"));
+            let next_cursor = match request.cursor.as_deref() {
+                None => {
+                    assert_eq!(request.limit, 30);
+                    Some("1800000000000".to_owned())
+                }
+                Some("1800000000000") => {
+                    assert_eq!(request.limit, 3);
+                    None
+                }
+                _ => panic!("unexpected collected feed cursor"),
+            };
+            Ok(tuneweave_core::CollectedPodcastFeedPage {
+                items: vec![tuneweave_core::CollectedPodcastFeedItem {
+                    feed_id: Some("podcast-activity-1".to_owned()),
+                    extensions: Extensions::new(),
+                }],
+                has_more: next_cursor.is_some(),
+                next_cursor,
+                total: None,
             })
         }
 
