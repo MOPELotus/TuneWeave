@@ -208,6 +208,17 @@ pub(crate) struct QqBusinessResponse {
     pub raw: Value,
 }
 
+impl QqBusinessResponse {
+    pub(crate) fn upstream_message(&self) -> &str {
+        if self.code == 0 {
+            qq_message_from(&self.data)
+        } else {
+            qq_message_from(&self.raw).or_else(|| qq_message_from(&self.data))
+        }
+        .unwrap_or_default()
+    }
+}
+
 #[derive(Clone)]
 pub struct QqClient {
     http: Client,
@@ -1243,6 +1254,24 @@ fn value_as_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn qq_message_from(value: &Value) -> Option<&str> {
+    ["message", "msg", "errMsg", "errmsg", "err_msg", "retMsg"]
+        .into_iter()
+        .find_map(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+        })
+}
+
+pub(crate) fn qq_upstream_message(value: &Value) -> &str {
+    qq_message_from(value)
+        .or_else(|| value.get("data").and_then(qq_message_from))
+        .unwrap_or_default()
+}
+
 fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
     let code = value
         .get("code")
@@ -1264,13 +1293,7 @@ fn ensure_zero_code(value: &Value, context: &str) -> Result<()> {
             .with_platform(Platform::Qq)
             .retryable(matches!(code, 100_001 | 104_604 | 2001))
             .with_details(json!({ "platform_code": code }))
-            .with_upstream_message(
-                value
-                    .get("message")
-                    .or_else(|| value.get("msg"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            ),
+            .with_upstream_message(qq_upstream_message(value)),
     )
 }
 
@@ -1960,6 +1983,36 @@ mod tests {
         assert_eq!(subrequest.code, ErrorCode::AuthenticationRequired);
         assert_eq!(subrequest.details["platform_code"], 104_400);
         assert!(subrequest.message.contains("music.test.First"));
+    }
+
+    #[test]
+    fn qq_api_preserves_login_business_reason_from_known_nested_message_fields() {
+        let request = QqApiRequest::new("QQConnectLogin.LoginServer", "QQLogin", json!({}));
+        let Err(error) = parse_api_responses(
+            &json!({
+                "code": 0,
+                "req_0": {
+                    "code": 20279, "message": null, "msg": " ",
+                    "data": {"errMsg": "登录设备超限 token=private-value", "token":"raw-payload-secret"}
+                }
+            }),
+            &[request],
+            false,
+        ) else {
+            panic!("login rejection was accepted");
+        };
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(!error.retryable);
+        assert_eq!(error.details["platform_code"], 20279);
+        assert!(error.message.contains("登录设备超限"));
+        assert!(
+            error.details["upstream_message"]
+                .as_str()
+                .unwrap()
+                .contains("登录设备超限")
+        );
+        assert!(!error.message.contains("private-value"));
+        assert!(!error.details.to_string().contains("raw-payload-secret"));
     }
 
     #[test]

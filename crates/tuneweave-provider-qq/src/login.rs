@@ -74,7 +74,7 @@ enum ParsedQqQrPoll {
     Scanned,
     Confirmed { uin: String, sigx: String },
     Expired,
-    Failed,
+    Failed(String),
 }
 
 enum ParsedWechatQrPoll {
@@ -427,7 +427,8 @@ pub(crate) async fn send_phone_authcode(
             .with_details(json!({
                 "platform_code": response.code,
                 "security_url": security_url
-            })))
+            }))
+            .with_upstream_message(response.upstream_message()))
         }
         100_001 | 104_604 | 2001 => Err(TuneWeaveError::new(
             ErrorCode::RateLimited,
@@ -435,11 +436,12 @@ pub(crate) async fn send_phone_authcode(
         )
         .with_platform(Platform::Qq)
         .retryable(true)
-        .with_details(json!({ "platform_code": response.code }))),
-        code => Err(qq_login_business_error(
-            code,
-            "QQ failed to send the phone verification code",
-        )),
+        .with_details(json!({ "platform_code": response.code }))
+        .with_upstream_message(response.upstream_message())),
+        code => Err(
+            qq_login_business_error(code, "QQ failed to send the phone verification code")
+                .with_upstream_message(response.upstream_message()),
+        ),
     }
 }
 
@@ -481,7 +483,8 @@ pub(crate) async fn refresh_qq_credential(
         return Err(qq_login_business_error(
             response.code,
             "QQ failed to refresh the account credential",
-        ));
+        )
+        .with_upstream_message(response.upstream_message()));
     }
     parse_login_credential(response.data)
 }
@@ -498,6 +501,7 @@ pub(crate) async fn logout_qq_credential(
         )
         .await?;
     logout_outcome(response.code)
+        .map_err(|error| error.with_upstream_message(response.upstream_message()))
 }
 
 async fn poll_qq_qr(client: &QqClient, transaction: &QqQrTransaction) -> Result<QqQrPollOutcome> {
@@ -558,9 +562,7 @@ async fn poll_qq_qr(client: &QqClient, transaction: &QqQrTransaction) -> Result<
         ParsedQqQrPoll::Waiting => Ok(QqQrPollOutcome::Waiting),
         ParsedQqQrPoll::Scanned => Ok(QqQrPollOutcome::Scanned),
         ParsedQqQrPoll::Expired => Ok(QqQrPollOutcome::Expired),
-        ParsedQqQrPoll::Failed => Ok(QqQrPollOutcome::Failed(
-            "QQ QR login was refused".to_owned(),
-        )),
+        ParsedQqQrPoll::Failed(reason) => Ok(QqQrPollOutcome::Failed(reason)),
         ParsedQqQrPoll::Confirmed { uin, sigx } => {
             let credential = authorize_qq_qr(client, &uin, &sigx).await?;
             Ok(QqQrPollOutcome::Confirmed(Box::new(credential)))
@@ -616,7 +618,7 @@ async fn poll_wechat_qr(
         ParsedWechatQrPoll::Scanned => Ok(QqQrPollOutcome::Scanned),
         ParsedWechatQrPoll::Expired => Ok(QqQrPollOutcome::Expired),
         ParsedWechatQrPoll::Failed => Ok(QqQrPollOutcome::Failed(
-            "WeChat QR login was refused".to_owned(),
+            "WeChat QR login was refused (code 403)".to_owned(),
         )),
         ParsedWechatQrPoll::Confirmed { code } => {
             let credential = authorize_wechat_qr(client, &code).await?;
@@ -1575,16 +1577,17 @@ fn parse_qq_status_arguments(body: &str) -> Result<Vec<String>> {
         .find("ptuiCB(")
         .map(|index| index + "ptuiCB(".len())
         .ok_or_else(|| login_data_error("QQ QR status response is missing ptuiCB"))?;
-    let end = body[start..]
-        .find(')')
-        .map(|index| start + index)
-        .ok_or_else(|| login_data_error("QQ QR status response has an unterminated ptuiCB"))?;
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
     let mut escaped = false;
-    for character in body[start..end].chars() {
+    let mut closed = false;
+    for character in body[start..].chars() {
         if !quoted {
+            if character == ')' {
+                closed = true;
+                break;
+            }
             if character == '\'' {
                 quoted = true;
                 current.clear();
@@ -1608,6 +1611,11 @@ fn parse_qq_status_arguments(body: &str) -> Result<Vec<String>> {
             "QQ QR status response has malformed callback arguments",
         ));
     }
+    if !closed {
+        return Err(login_data_error(
+            "QQ QR status response has an unterminated ptuiCB",
+        ));
+    }
     Ok(args)
 }
 
@@ -1620,7 +1628,11 @@ fn parse_qq_qr_poll(body: &str) -> Result<ParsedQqQrPoll> {
         66 => Ok(ParsedQqQrPoll::Waiting),
         67 => Ok(ParsedQqQrPoll::Scanned),
         65 => Ok(ParsedQqQrPoll::Expired),
-        68 => Ok(ParsedQqQrPoll::Failed),
+        68 => Ok(ParsedQqQrPoll::Failed(
+            login_data_error("QQ QR login was refused (code 68)")
+                .with_upstream_message(args.get(4).map(String::as_str).unwrap_or_default())
+                .message,
+        )),
         0 => {
             let callback = args.get(2).ok_or_else(|| {
                 login_data_error("QQ QR success response is missing callback URL")
@@ -1670,7 +1682,9 @@ fn parse_qq_qr_poll(body: &str) -> Result<ParsedQqQrPoll> {
         }
         _ => Err(login_data_error(format!(
             "QQ QR status returned unsupported state code {status}"
-        ))),
+        ))
+        .with_details(json!({ "platform_code": status }))
+        .with_upstream_message(args.get(4).map(String::as_str).unwrap_or_default())),
     }
 }
 
@@ -1728,7 +1742,8 @@ fn parse_wechat_qr_poll(body: &str) -> Result<ParsedWechatQrPoll> {
         }
         _ => Err(login_data_error(format!(
             "WeChat QR status returned unsupported state code {status}"
-        ))),
+        ))
+        .with_details(json!({ "platform_code": status }))),
     }
 }
 
@@ -1999,6 +2014,20 @@ mod tests {
                 "unsafe QQ callback was accepted: {callback}"
             );
         }
+    }
+
+    #[test]
+    fn qq_qr_refusal_uses_only_the_sanitized_status_message_slot() {
+        let body = "ptuiCB('68','0','callback-secret','0','拒绝登录 (设备限制) token=private-value','nickname-secret');";
+        let ParsedQqQrPoll::Failed(reason) = parse_qq_qr_poll(body).expect("terminal refusal")
+        else {
+            panic!("expected terminal refusal");
+        };
+        assert!(reason.contains("code 68"));
+        assert!(reason.contains("拒绝登录 (设备限制)"));
+        assert!(!reason.contains("private-value"));
+        assert!(!reason.contains("callback-secret"));
+        assert!(!reason.contains("nickname-secret"));
     }
 
     #[test]

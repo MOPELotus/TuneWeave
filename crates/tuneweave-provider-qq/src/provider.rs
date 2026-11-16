@@ -60,6 +60,7 @@ use tuneweave_core::{
 
 use crate::client::{
     QqApiRequest, QqApiResponse, QqBusinessResponse, QqClient, QqConfig, QqCredential,
+    qq_upstream_message,
 };
 use crate::login::{
     QqLogoutOutcome, QqQrLoginKind, QqQrPollOutcome, QqQrTransactions, login_with_phone_authcode,
@@ -4155,10 +4156,10 @@ fn map_qq_extension_response(
     context: &str,
 ) -> Result<Value> {
     if response.code != 0 && !allow_error_codes.contains(&response.code) {
-        return Err(qq_login_business_error(
-            response.code,
-            &format!("{context} failed"),
-        ));
+        return Err(
+            qq_login_business_error(response.code, &format!("{context} failed"))
+                .with_upstream_message(response.upstream_message()),
+        );
     }
     let mut raw = response.raw;
     redact_qq_extension_value(&mut raw);
@@ -6271,7 +6272,8 @@ impl MusicProvider for QqProvider {
                 return Err(qq_login_business_error(
                     code,
                     "QQ failed to check the account credential",
-                ));
+                )
+                .with_upstream_message(response.upstream_message()));
             }
         };
         let mut profile = AccountProfile::authenticated(Platform::Qq, account);
@@ -7492,10 +7494,8 @@ fn map_qq_recommendation_feed(
             "QQ recommendation feed was rejected",
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({
-            "platform_code": parsed.retcode,
-            "platform_message": parsed.msg
-        })));
+        .with_details(json!({ "platform_code": parsed.retcode }))
+        .with_upstream_message(&parsed.msg));
     }
     let QqRecommendationFeedResponse {
         msg,
@@ -12440,7 +12440,8 @@ fn map_hotkey_response(
             format!("QQ hotkey service failed with code {code}"),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({ "platform_code": code })));
+        .with_details(json!({ "platform_code": code }))
+        .with_upstream_message(qq_upstream_message(&response.data)));
     }
     let hotkeys = response
         .data
@@ -13873,14 +13874,11 @@ fn map_qq_similar_singers(
     if data.code != 0 {
         return Err(TuneWeaveError::new(
             ErrorCode::UpstreamError,
-            if data.error_message.trim().is_empty() {
-                format!("QQ similar singer request failed with code {}", data.code)
-            } else {
-                data.error_message.trim().to_owned()
-            },
+            format!("QQ similar singer request failed with code {}", data.code),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({ "platform_code": data.code })));
+        .with_details(json!({ "platform_code": data.code }))
+        .with_upstream_message(&data.error_message));
     }
     if data.singerlist.len() != raw_singers.len() {
         return Err(qq_data_error(
@@ -16355,10 +16353,8 @@ fn map_qq_dislike_list(
             format!("QQ dislike list failed with code {}", data.retcode),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({
-            "platform_code": data.retcode,
-            "platform_message": data.message
-        })));
+        .with_details(json!({ "platform_code": data.retcode }))
+        .with_upstream_message(&data.message));
     }
     let empty_page_sentinel = data.page == 0
         && data.artists.is_empty()
@@ -16483,10 +16479,8 @@ fn map_qq_dislike_mutation(
             format!("QQ dislike mutation failed with code {}", data.retcode),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({
-            "platform_code": data.retcode,
-            "platform_message": data.message
-        })));
+        .with_details(json!({ "platform_code": data.retcode }))
+        .with_upstream_message(&data.message));
     }
     let typed_data = serde_json::to_value(&data)
         .map_err(|_| qq_data_error("failed to preserve typed QQ dislike mutation response"))?;
@@ -16521,10 +16515,8 @@ fn parse_qq_dislike_clear_token(response: QqApiResponse) -> Result<(String, Valu
             ),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({
-            "platform_code": data.retcode,
-            "platform_message": data.message
-        })));
+        .with_details(json!({ "platform_code": data.retcode }))
+        .with_upstream_message(&data.message));
     }
     let token = data.token.trim();
     if token.is_empty() || token.len() > 4096 || token.bytes().any(|byte| byte.is_ascii_control()) {
@@ -16628,10 +16620,10 @@ fn map_qq_favorite_mvs(
             return Err(
                 qq_login_business_error(business_code, "QQ favorite MV listing failed")
                     .with_details(json!({
-                        "platform_code": data.code,
-                        "platform_subcode": data.sub_code,
-                        "platform_message": data.msg
-                    })),
+                        "platform_code": business_code,
+                        "platform_subcode": data.sub_code
+                    }))
+                    .with_upstream_message(&data.msg),
             );
         }
         let count = u32::try_from(data.videos.len())
@@ -17097,6 +17089,25 @@ fn qq_playlist_wire_song_type(song_type: i64) -> i64 {
     }
 }
 
+fn qq_playlist_write_failure_code(response: &QqBusinessResponse) -> Option<i64> {
+    (response.code != 0).then_some(response.code).or_else(|| {
+        response
+            .data
+            .get("retCode")
+            .and_then(json_i64)
+            .filter(|code| *code != 0)
+    })
+}
+
+fn qq_playlist_write_echo_matches(
+    requested: QqPlaylistWriteTrack,
+    echoed: &QqPlaylistWriteResultTrack,
+) -> bool {
+    echoed.song_id == requested.song_id
+        && (echoed.song_type == requested.song_type
+            || echoed.song_type == qq_playlist_wire_song_type(requested.song_type))
+}
+
 fn qq_track_subscription_request(track: QqPlaylistWriteTrack, subscribed: bool) -> QqApiRequest {
     let request = QqApiRequest::new(
         "music.musicasset.PlaylistDetailWrite",
@@ -17128,9 +17139,9 @@ fn map_qq_track_subscription(
     subscribed: bool,
     response: QqBusinessResponse,
 ) -> Result<SubscriptionResult> {
-    if response.code != 0 {
+    if let Some(code) = qq_playlist_write_failure_code(&response) {
         return Err(TuneWeaveError::new(
-            if response.code == 80_092 {
+            if code == 80_092 {
                 ErrorCode::Conflict
             } else {
                 ErrorCode::UpstreamError
@@ -17139,9 +17150,10 @@ fn map_qq_track_subscription(
         )
         .with_platform(Platform::Qq)
         .with_details(json!({
-            "platform_code": response.code,
+            "platform_code": code,
             "subscribed": subscribed
-        })));
+        }))
+        .with_upstream_message(response.upstream_message()));
     }
     let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(
         |json_cause| {
@@ -17149,21 +17161,6 @@ fn map_qq_track_subscription(
             mapped.with_json_source(&json_cause)
         },
     )?;
-    if parsed.ret_code != 0 {
-        return Err(TuneWeaveError::new(
-            if parsed.ret_code == 80_092 {
-                ErrorCode::Conflict
-            } else {
-                ErrorCode::UpstreamError
-            },
-            "QQ track subscription was rejected",
-        )
-        .with_platform(Platform::Qq)
-        .with_details(json!({
-            "platform_code": parsed.ret_code,
-            "subscribed": subscribed
-        })));
-    }
     let result = parsed
         .result
         .as_ref()
@@ -17174,9 +17171,7 @@ fn map_qq_track_subscription(
         ));
     }
     if subscribed {
-        if result.songlist.len() != 1
-            || result.songlist[0].song_id != track.song_id
-            || result.songlist[0].song_type != track.song_type
+        if result.songlist.len() != 1 || !qq_playlist_write_echo_matches(track, &result.songlist[0])
         {
             return Err(qq_data_error(
                 "QQ track subscription returned an unexpected song result",
@@ -17240,7 +17235,8 @@ fn map_qq_playlist_subscription(
         .with_details(json!({
             "platform_code": response.code,
             "subscribed": subscribed
-        })));
+        }))
+        .with_upstream_message(response.upstream_message()));
     }
     let parsed = serde_json::from_value::<QqPlaylistSubscriptionResponse>(response.data.clone())
         .map_err(|json_cause| {
@@ -17254,11 +17250,12 @@ fn map_qq_playlist_subscription(
         )
         .with_platform(Platform::Qq)
         .with_details(json!({
-            "platform_code": response.code,
+            "platform_code": parsed.result,
             "result": parsed.result,
             "subscribed": subscribed,
             "failed_playlist_ids": parsed.failed_playlist_ids
-        })));
+        }))
+        .with_upstream_message(response.upstream_message()));
     }
     if parsed.failed_playlist_ids.contains(&playlist_id) {
         return Err(TuneWeaveError::new(
@@ -17337,9 +17334,9 @@ fn map_qq_playlist_items_mutation(
         PlaylistItemMutationAction::Add => "addition",
         PlaylistItemMutationAction::Remove => "removal",
     };
-    if response.code != 0 {
+    if let Some(code) = qq_playlist_write_failure_code(&response) {
         return Err(TuneWeaveError::new(
-            if response.code == 80_092 {
+            if code == 80_092 {
                 ErrorCode::Conflict
             } else {
                 ErrorCode::UpstreamError
@@ -17349,9 +17346,12 @@ fn map_qq_playlist_items_mutation(
         .with_platform(Platform::Qq)
         .with_details(json!({
             "playlist_ref": qq_ref(playlist_id, "playlist track mutation")?,
-            "platform_code": response.code,
+            "platform_code": code,
+            "wrapper_code": response.code,
+            "ret_code": response.data.get("retCode").and_then(json_i64),
             "action": action
-        })));
+        }))
+        .with_upstream_message(response.upstream_message()));
     }
     let parsed = serde_json::from_value::<QqPlaylistWriteResponse>(response.data.clone()).map_err(
         |json_cause| {
@@ -17363,23 +17363,6 @@ fn map_qq_playlist_items_mutation(
             mapped.with_json_source(&json_cause)
         },
     )?;
-    if parsed.ret_code != 0 {
-        return Err(TuneWeaveError::new(
-            if parsed.ret_code == 80_092 {
-                ErrorCode::Conflict
-            } else {
-                ErrorCode::UpstreamError
-            },
-            format!("QQ playlist track {operation} was rejected"),
-        )
-        .with_platform(Platform::Qq)
-        .with_details(json!({
-            "playlist_ref": qq_ref(playlist_id, "playlist track mutation")?,
-            "platform_code": response.code,
-            "ret_code": parsed.ret_code,
-            "action": action
-        })));
-    }
     let result = parsed.result.as_ref().ok_or_else(|| {
         qq_data_error(format!(
             "QQ playlist track {operation} response is missing its result"
@@ -17403,9 +17386,9 @@ fn map_qq_playlist_items_mutation(
     if result.songlist.iter().any(|returned| {
         returned.song_id == 0
             || returned.song_type < 0
-            || !tracks.iter().any(|requested| {
-                requested.song_id == returned.song_id && requested.song_type == returned.song_type
-            })
+            || !tracks
+                .iter()
+                .any(|requested| qq_playlist_write_echo_matches(*requested, returned))
     }) {
         return Err(qq_data_error(format!(
             "QQ playlist track {operation} returned an unexpected song identity"
@@ -17471,19 +17454,21 @@ fn map_qq_playlist_creation(
     requested_name: String,
     response: QqApiResponse,
 ) -> Result<PlaylistMutationResult> {
+    if let Some(code) = response
+        .data
+        .get("retCode")
+        .and_then(json_i64)
+        .filter(|code| *code != 0)
+    {
+        return Err(qq_data_error("QQ playlist creation was rejected")
+            .with_details(json!({ "platform_code": code }))
+            .with_upstream_message(qq_upstream_message(&response.data)));
+    }
     let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
         .map_err(|json_cause| {
             let mapped = qq_data_error("QQ playlist creation response is malformed");
             mapped.with_json_source(&json_cause)
         })?;
-    if parsed.ret_code != 0 {
-        return Err(TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            "QQ playlist creation was rejected",
-        )
-        .with_platform(Platform::Qq)
-        .with_details(json!({ "platform_code": parsed.ret_code })));
-    }
     let result = parsed
         .result
         .as_ref()
@@ -17605,26 +17590,32 @@ fn map_qq_playlist_deletions(
             "QQ playlist deletion response count does not match the request",
         ));
     }
-    let mut outcomes = Vec::with_capacity(targets.len());
+    let mut outcomes: Vec<QqPlaylistDeleteOutcome> = Vec::with_capacity(targets.len());
     for ((playlist_ref, directory_id, _), response) in targets.into_iter().zip(responses) {
+        if let Some(code) = response
+            .data
+            .get("retCode")
+            .and_then(json_i64)
+            .filter(|code| *code != 0)
+        {
+            return Err(qq_data_error("QQ playlist deletion was rejected")
+                .with_details(json!({
+                    "playlist_ref": playlist_ref,
+                    "directory_id": directory_id,
+                    "platform_code": code,
+                    "completed": outcomes.iter().map(|outcome| json!({
+                        "playlist_ref": outcome.playlist_ref,
+                        "directory_id": outcome.directory_id,
+                        "deleted": outcome.deleted
+                    })).collect::<Vec<_>>()
+                }))
+                .with_upstream_message(qq_upstream_message(&response.data)));
+        }
         let parsed = serde_json::from_value::<QqPlaylistMutationResponse>(response.data.clone())
             .map_err(|json_cause| {
                 let mapped = qq_data_error("QQ playlist deletion response is malformed");
                 mapped.with_json_source(&json_cause)
             })?;
-        if parsed.ret_code != 0 {
-            return Err(TuneWeaveError::new(
-                ErrorCode::UpstreamError,
-                "QQ playlist deletion was rejected",
-            )
-            .with_platform(Platform::Qq)
-            .with_details(json!({
-                "playlist_ref": playlist_ref,
-                "directory_id": directory_id,
-                "platform_code": parsed.ret_code,
-                "completed": outcomes
-            })));
-        }
         let result = parsed
             .result
             .as_ref()
@@ -17722,9 +17713,10 @@ fn parse_qq_playlist_detail(value: Value) -> Result<QqPlaylistDetailResponse> {
         )
         .with_platform(Platform::Qq)
         .with_details(json!({
-            "platform_code": response.code,
+            "platform_code": if response.code == 0 { response.subcode } else { response.code },
             "platform_subcode": response.subcode
-        })));
+        }))
+        .with_upstream_message(&response.msg));
     }
     Ok(response)
 }
@@ -19096,7 +19088,8 @@ fn ensure_data_success(data: &Value, context: &str) -> Result<()> {
             format!("{context} failed with code {code}"),
         )
         .with_platform(Platform::Qq)
-        .with_details(json!({ "platform_code": code })))
+        .with_details(json!({ "platform_code": code }))
+        .with_upstream_message(qq_upstream_message(data)))
     }
 }
 
@@ -26427,28 +26420,29 @@ mod tests {
         for response in [
             QqBusinessResponse {
                 code: 80_092,
-                data: json!({}),
-                raw: json!({"code": 80092}),
+                data: json!({"raw_token":"payload-private"}),
+                raw: json!({"code": 80092, "message": "曲目已存在 token=private-value"}),
             },
             QqBusinessResponse {
                 code: 0,
-                data: json!({"retCode": 80092}),
-                raw: json!({"code": 0}),
+                data: json!({"retCode": "80092", "msg": "曲目已存在 token=private-value", "result":"malformed", "raw_token":"payload-private"}),
+                raw: json!({"code": 0, "message": "success"}),
             },
         ] {
-            assert_eq!(
-                map_qq_playlist_items_mutation(
-                    "7039749142",
-                    PlaylistItemMutationAction::Add,
-                    &request,
-                    locator,
-                    tracks.clone(),
-                    response,
-                )
-                .expect_err("playlist conflict")
-                .code,
-                ErrorCode::Conflict
-            );
+            let error = map_qq_playlist_items_mutation(
+                "7039749142",
+                PlaylistItemMutationAction::Add,
+                &request,
+                locator,
+                tracks.clone(),
+                response,
+            )
+            .expect_err("playlist conflict");
+            assert_eq!(error.code, ErrorCode::Conflict);
+            assert_eq!(error.details["platform_code"], 80_092);
+            assert!(error.message.contains("曲目已存在"));
+            assert!(!error.message.contains("private-value"));
+            assert!(!error.details.to_string().contains("payload-private"));
         }
         assert_eq!(
             map_qq_playlist_items_mutation(
@@ -26515,6 +26509,51 @@ mod tests {
                 .expect_err("invalid playlist mutation result")
                 .code,
                 ErrorCode::UpstreamError
+            );
+        }
+    }
+
+    #[test]
+    fn playlist_add_and_like_accept_wire_type_echo_without_accepting_other_track_identity() {
+        let request = PlaylistItemMutationRequest {
+            item_refs: vec![qq_ref("97773", "track").unwrap()],
+            kind: PlaylistItemKind::Track,
+            account: None,
+        };
+        let track = QqPlaylistWriteTrack {
+            song_id: 97_773,
+            song_type: 1,
+        };
+        let locator = parse_qq_playlist_locator("dir:201").unwrap();
+        for (id, song_type, expected) in [
+            (97_773, 0, true),
+            (97_773, 1, true),
+            (97_773, 113, false),
+            (97_774, 0, false),
+        ] {
+            let response = || QqBusinessResponse {
+                code: 0,
+                data: json!({"retCode": 0, "result": {
+                    "tid": 123, "dirId": 201,
+                    "songlist": [{"songId": id, "songType": song_type}]
+                }}),
+                raw: json!({"code":0}),
+            };
+            assert_eq!(
+                map_qq_track_subscription("97773", track, true, response()).is_ok(),
+                expected
+            );
+            assert_eq!(
+                map_qq_playlist_items_mutation(
+                    "dir:201",
+                    PlaylistItemMutationAction::Add,
+                    &request,
+                    locator,
+                    vec![track],
+                    response()
+                )
+                .is_ok(),
+                expected
             );
         }
     }

@@ -459,7 +459,8 @@ fn order_request(target: QqPlaylistLocator, tracks: &[OrderTrack]) -> QqApiReque
 fn accept_order_ack(response: QqBusinessResponse) -> Result<()> {
     if response.code != 0 {
         return Err(qq_data_error("QQ playlist ordering request was rejected")
-            .with_details(json!({ "platform_code": response.code })));
+            .with_details(json!({ "platform_code": response.code }))
+            .with_upstream_message(response.upstream_message()));
     }
     let ret_code = response
         .data
@@ -470,7 +471,8 @@ fn accept_order_ack(response: QqBusinessResponse) -> Result<()> {
         })?;
     if ret_code != 0 {
         return Err(qq_data_error("QQ playlist ordering was not acknowledged")
-            .with_details(json!({ "platform_code": ret_code })));
+            .with_details(json!({ "platform_code": ret_code }))
+            .with_upstream_message(response.upstream_message()));
     }
     Ok(())
 }
@@ -744,6 +746,26 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_order_ack_reports_sanitized_platform_cause_and_never_retries() {
+        let (server, provider) = ScriptedServer::launch(vec![
+            created(),
+            page(&[1, 2], 2, false, 123456),
+            json!({"retCode":"80095", "msg":"歌单曲目不存在 token=private-value", "token":"raw-secret"}),
+        ]);
+        let error = provider
+            .reorder_playlist_tracks("12345", &request(&[2, 1]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.details["platform_code"], 80_095);
+        assert_eq!(error.details["write_outcome"], "unconfirmed");
+        assert!(error.message.contains("歌单曲目不存在"));
+        assert!(!error.message.contains("private-value"));
+        assert!(!error.details.to_string().contains("raw-secret"));
+        assert!(!error.retryable);
+        assert_eq!(server.finish().len(), 3);
     }
 
     #[test]
