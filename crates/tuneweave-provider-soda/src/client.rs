@@ -12,7 +12,7 @@ use reqwest::{
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tuneweave_core::{
     AccountCredentialStore, Album, AlbumSummary, ArtistSummary, AudioContent, DigitalAlbum,
     ErrorCode, Extensions, LyricContributor, Lyrics, Platform, Playlist, Quality, ResourceRef,
@@ -183,6 +183,7 @@ struct SodaAlbumShareQuery<'a> {
 #[serde(default)]
 struct SodaTrackDetailEnvelope {
     status_code: Option<i64>,
+    status_msg: Option<Value>,
     status_info: SodaStatusInfo,
     track: Option<SodaTrack>,
     seo_track: Option<SodaSeoTrack>,
@@ -358,6 +359,8 @@ pub(crate) struct SodaPlayback {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SodaSearchEnvelope {
+    status_code: Option<Value>,
+    status_msg: Option<Value>,
     status_info: SodaStatusInfo,
     result_groups: Vec<SodaSearchGroup>,
     extra: SodaSearchExtra,
@@ -369,6 +372,8 @@ struct SodaStatusInfo {
     log_id: String,
     now: u64,
     now_ts_ms: u64,
+    status_code: Option<Value>,
+    status_msg: Option<Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -381,6 +386,7 @@ struct SodaSearchExtra {
 #[serde(default)]
 struct SodaPlaylistEnvelope {
     status_code: Option<i64>,
+    status_msg: Option<Value>,
     status_info: SodaStatusInfo,
     has_more: Option<bool>,
     next_cursor: FlexibleText,
@@ -1411,6 +1417,16 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
     let envelope: SodaSearchEnvelope = serde_json::from_slice(body).map_err(|error| {
         soda_upstream_error("Soda search returned malformed JSON").with_source(&error)
     })?;
+    if let Some((code, messages)) = envelope.status_info.rejection(
+        envelope.status_code.as_ref().and_then(Value::as_i64),
+        envelope.status_msg.as_ref(),
+    ) {
+        return Err(soda_business_diagnostic(
+            soda_upstream_error("Soda rejected the track search"),
+            code,
+            messages,
+        ));
+    }
     validate_status_metadata(&envelope.status_info, "Soda search")?;
 
     let mut track_groups = envelope
@@ -1485,19 +1501,22 @@ fn parse_playlist_response(
     let envelope: SodaPlaylistEnvelope = serde_json::from_slice(body).map_err(|error| {
         soda_upstream_error("Soda playlist detail returned malformed JSON").with_source(&error)
     })?;
-    validate_status_metadata(&envelope.status_info, "Soda playlist detail")?;
-    if let Some(code) = envelope.status_code.filter(|code| *code != 0) {
-        if code == 1_000_005 {
-            return Err(TuneWeaveError::new(
+    if let Some((code, messages)) = envelope
+        .status_info
+        .rejection(envelope.status_code, envelope.status_msg.as_ref())
+    {
+        let error = if code == 1_000_005 {
+            TuneWeaveError::new(
                 ErrorCode::ResourceNotFound,
                 "Soda playlist was not found or is not public",
             )
-            .with_platform(Platform::Soda));
-        }
-        return Err(soda_upstream_error(format!(
-            "Soda playlist detail returned platform code {code}"
-        )));
+            .with_platform(Platform::Soda)
+        } else {
+            soda_upstream_error("Soda rejected the playlist detail request")
+        };
+        return Err(soda_business_diagnostic(error, code, messages));
     }
+    validate_status_metadata(&envelope.status_info, "Soda playlist detail")?;
     if requested_count == 0
         || requested_count > UPSTREAM_PLAYLIST_PAGE_SIZE
         || envelope.media_resources.len() > usize::try_from(requested_count).unwrap_or(usize::MAX)
@@ -1876,8 +1895,15 @@ fn parse_track_envelope(body: &[u8]) -> Result<SodaTrackDetailEnvelope> {
     let mut envelope: SodaTrackDetailEnvelope = serde_json::from_slice(body).map_err(|error| {
         soda_upstream_error("Soda track response returned malformed JSON").with_source(&error)
     })?;
-    if envelope.status_code.is_some_and(|code| code != 0) {
-        return Err(soda_upstream_error("Soda rejected the track request"));
+    if let Some((code, messages)) = envelope
+        .status_info
+        .rejection(envelope.status_code, envelope.status_msg.as_ref())
+    {
+        return Err(soda_business_diagnostic(
+            soda_upstream_error("Soda rejected the track request"),
+            code,
+            messages,
+        ));
     }
     if let Some(seo) = envelope.seo_track.take() {
         if let (Some(legacy), Some(current)) = (&envelope.track, &seo.track)
@@ -2765,6 +2791,43 @@ fn validate_status_metadata(status: &SodaStatusInfo, operation: &str) -> Result<
     Ok(())
 }
 
+impl SodaStatusInfo {
+    fn rejection<'a>(
+        &'a self,
+        top_code: Option<i64>,
+        top_message: Option<&'a Value>,
+    ) -> Option<(i64, [Option<&'a Value>; 2])> {
+        let nested = self.status_msg.as_ref();
+        if let Some(code) = top_code.filter(|code| *code != 0) {
+            Some((code, [top_message, nested]))
+        } else {
+            self.status_code
+                .as_ref()
+                .and_then(Value::as_i64)
+                .filter(|code| *code != 0)
+                .map(|code| (code, [nested, top_message]))
+        }
+    }
+}
+
+fn soda_business_diagnostic(
+    mut error: TuneWeaveError,
+    code: i64,
+    messages: [Option<&Value>; 2],
+) -> TuneWeaveError {
+    error.message.push_str(&format!(" (platform code {code})"));
+    let error = error.with_details(json!({ "platform_code": code }));
+    match messages
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|message| !message.trim().is_empty())
+    {
+        Some(message) => error.with_upstream_message(message),
+        None => error,
+    }
+}
+
 fn map_track(source: SodaTrack, backend: &'static str) -> Result<Track> {
     validate_track_metadata_bounds(&source)?;
     let track_id = canonical_positive_decimal(&source.id)
@@ -3191,6 +3254,7 @@ pub(crate) fn soda_http_error(status: StatusCode) -> TuneWeaveError {
     TuneWeaveError::new(code, format!("Soda API returned HTTP {status}"))
         .with_platform(Platform::Soda)
         .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+        .with_details(json!({ "http_status": status.as_u16() }))
 }
 
 fn soda_media_http_error(status: StatusCode) -> TuneWeaveError {
@@ -3204,6 +3268,7 @@ fn soda_media_http_error(status: StatusCode) -> TuneWeaveError {
     TuneWeaveError::new(code, format!("Soda media CDN returned HTTP {status}"))
         .with_platform(Platform::Soda)
         .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+        .with_details(json!({ "http_status": status.as_u16() }))
 }
 
 fn soda_invalid_request(message: impl Into<String>) -> TuneWeaveError {
@@ -3907,6 +3972,36 @@ mod tests {
         let error =
             parse_playlist_response(missing, "1", 0, 100).expect_err("missing Soda playlist");
         assert_eq!(error.code, ErrorCode::ResourceNotFound);
+        assert_eq!(error.details["platform_code"], 1_000_005);
+    }
+
+    #[test]
+    fn business_rejections_expose_sanitized_soda_diagnostics() {
+        let error = parse_track_envelope(
+            r#"{
+            "status_code":403,
+            "status_info":{"status_msg":"播放受限 https://cdn.example/link?token=very-private"}
+        }"#
+            .as_bytes(),
+        )
+        .err()
+        .expect("upstream track rejection");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(!error.retryable);
+        assert_eq!(error.details["platform_code"], 403);
+        assert!(error.message.contains("播放受限"));
+        assert!(error.message.contains("403"));
+        assert!(!format!("{error:?}").contains("very-private"));
+
+        let search_error = parse_search_response(
+            br#"{"status_info":{"status_code":99,"status_msg":"try again later"},"extra":{"empty_search":1}}"#,
+            0,
+        )
+        .err()
+        .expect("a search rejection is not an empty search");
+        assert_eq!(search_error.code, ErrorCode::UpstreamError);
+        assert_eq!(search_error.details["platform_code"], 99);
+        assert_eq!(search_error.details["upstream_message"], "try again later");
     }
 
     #[test]
@@ -4123,6 +4218,7 @@ mod tests {
         assert_eq!(limited.code, ErrorCode::RateLimited);
         assert!(limited.retryable);
         assert_eq!(limited.platform, Some(Platform::Soda));
+        assert_eq!(limited.details["http_status"], 429);
         assert!(soda_http_error(StatusCode::SERVICE_UNAVAILABLE).retryable);
         assert!(!soda_http_error(StatusCode::BAD_REQUEST).retryable);
     }

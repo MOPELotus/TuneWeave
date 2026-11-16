@@ -381,6 +381,7 @@ struct QrCreateData {
     qrcode: String,
     qrcode_index_url: String,
     expire_time: Option<u64>,
+    error_code: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -1179,12 +1180,22 @@ fn parse_qr_create_response(bytes: &[u8]) -> Result<QrCreateEnvelope> {
     let response = serde_json::from_slice::<QrCreateEnvelope>(bytes).map_err(|error| {
         soda_upstream_error("Soda QR creation returned invalid JSON").with_source(&error)
     })?;
-    validate_upstream_token(&response.data.token)?;
     if !response.message.trim().is_empty()
         && !response.message.trim().eq_ignore_ascii_case("success")
     {
-        return Err(soda_upstream_error("Soda QR creation was rejected"));
+        let mut error = soda_upstream_error("Soda QR creation was rejected");
+        if let Some(code) = response
+            .data
+            .error_code
+            .as_ref()
+            .and_then(serde_json::Value::as_i64)
+            .filter(|code| *code != 0)
+        {
+            error = error.with_details(serde_json::json!({ "platform_code": code }));
+        }
+        return Err(error.with_upstream_message(&response.message));
     }
+    validate_upstream_token(&response.data.token)?;
     Ok(response)
 }
 
@@ -1616,6 +1627,13 @@ mod tests {
         )
         .expect("parse create response");
         assert_eq!(created.data.token.len(), 35);
+        let rejected = parse_qr_create_response(
+            br#"{"message":"try again later","data":{"error_code":1234}}"#,
+        )
+        .err()
+        .expect("business rejection without a token");
+        assert_eq!(rejected.details["platform_code"], 1234);
+        assert_eq!(rejected.details["upstream_message"], "try again later");
         assert_eq!(
             parse_qr_poll_response(br#"{"data":{"status":"new","error_code":0}}"#)
                 .expect("waiting"),

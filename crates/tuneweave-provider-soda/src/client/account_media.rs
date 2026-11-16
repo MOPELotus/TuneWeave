@@ -1,7 +1,5 @@
 use crate::login::SodaCredential;
 use reqwest::header::ACCEPT;
-#[cfg(debug_assertions)]
-use serde_json::Value;
 
 use super::*;
 
@@ -11,12 +9,14 @@ const ACCOUNT_TRACK_BACKEND: &str = "official_pc_track_v2";
 #[derive(Deserialize)]
 struct AccountTrackStatus {
     status_code: Option<i64>,
+    status_msg: Option<Value>,
     status_info: Option<AccountBusinessStatus>,
 }
 
 #[derive(Deserialize)]
 struct AccountBusinessStatus {
     status_code: Option<i64>,
+    status_msg: Option<Value>,
 }
 
 /// Validated metadata from one account-bound response. Player material stays private.
@@ -213,20 +213,28 @@ fn parse_account_track_fields(
         .as_ref()
         .and_then(|info| info.status_code);
     let codes = [status.status_code, status_info_code];
-    if codes.contains(&Some(1_000_016)) {
-        return Err(account_media_authentication_required());
-    }
-    if codes.iter().flatten().any(|code| *code != 0) {
-        let platform_code = codes
-            .into_iter()
-            .flatten()
-            .find(|code| *code != 0)
-            .or(status.status_code)
-            .or(status_info_code);
-        return Err(
+    let rejection_code = if codes.contains(&Some(1_000_016)) {
+        Some(1_000_016)
+    } else {
+        codes.into_iter().flatten().find(|code| *code != 0)
+    };
+    if let Some(code) = rejection_code {
+        let error = if code == 1_000_016 {
+            account_media_authentication_required()
+        } else {
             soda_upstream_error("Soda account media did not report success")
-                .with_details(json!({"platform_code":platform_code})),
-        );
+        };
+        let top = status.status_msg.as_ref();
+        let nested = status
+            .status_info
+            .as_ref()
+            .and_then(|info| info.status_msg.as_ref());
+        let messages = if status.status_code == Some(code) {
+            [top, nested]
+        } else {
+            [nested, top]
+        };
+        return Err(soda_business_diagnostic(error, code, messages));
     }
     // Current track_v2 account responses may omit both status-code members while
     // still returning the account-bound track payload. Treat that as success

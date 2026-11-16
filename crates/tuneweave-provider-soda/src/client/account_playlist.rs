@@ -170,20 +170,38 @@ fn parse_account_playlist_page(
             .as_ref()
             .and_then(|info| info.status_code),
     ];
-    if codes.contains(&Some(1_000_016)) {
-        return Err(playlist_authentication_required());
-    }
-    if codes.contains(&Some(1_000_005)) {
-        return Err(TuneWeaveError::new(
-            ErrorCode::ResourceNotFound,
-            "Soda playlist was not found or is not visible to this account",
-        )
-        .with_platform(Platform::Soda));
-    }
-    if codes.into_iter().flatten().any(|code| code != 0) {
-        return Err(soda_upstream_error(
-            "Soda rejected the account playlist request",
-        ));
+    let rejection = if codes.contains(&Some(1_000_016)) {
+        Some((1_000_016, playlist_authentication_required()))
+    } else if codes.contains(&Some(1_000_005)) {
+        Some((
+            1_000_005,
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Soda playlist was not found or is not visible to this account",
+            )
+            .with_platform(Platform::Soda),
+        ))
+    } else {
+        codes
+            .into_iter()
+            .flatten()
+            .find(|code| *code != 0)
+            .map(|code| {
+                (
+                    code,
+                    soda_upstream_error("Soda rejected the account playlist request"),
+                )
+            })
+    };
+    if let Some((code, error)) = rejection {
+        let top = value.get("status_msg");
+        let nested = value.pointer("/status_info/status_msg");
+        let messages = if status.status_code == Some(code) {
+            [top, nested]
+        } else {
+            [nested, top]
+        };
+        return Err(soda_business_diagnostic(error, code, messages));
     }
     let proof: AccountPlaylistProof = match serde_json::from_value(value.clone()) {
         Ok(proof) => proof,
