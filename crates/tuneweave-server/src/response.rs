@@ -585,6 +585,7 @@ impl IntoResponse for ApiError {
             ErrorCode::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
             ErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        self.error.normalize_upstream_diagnostics();
         log_api_error(&self.error, status, &request_id);
         let error = ErrorBody {
             code: self.error.code,
@@ -637,7 +638,10 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             status,
             retryable = error.retryable,
             source_chain = ?error.details.get("source_chain"),
-            upstream_code = ?error.details.get("platform_code").and_then(serde_json::Value::as_i64),
+            os_error_code = ?error.details.get("os_error_code"),
+            upstream_code = ?error.details.get("upstream_code"),
+            upstream_message = ?error.details.get("upstream_message"),
+            upstream_http_status = ?error.details.get("upstream_http_status"),
             "TuneWeave request failed"
         );
     } else {
@@ -649,7 +653,10 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
             status,
             retryable = error.retryable,
             source_chain = ?error.details.get("source_chain"),
-            upstream_code = ?error.details.get("platform_code").and_then(serde_json::Value::as_i64),
+            os_error_code = ?error.details.get("os_error_code"),
+            upstream_code = ?error.details.get("upstream_code"),
+            upstream_message = ?error.details.get("upstream_message"),
+            upstream_http_status = ?error.details.get("upstream_http_status"),
             "TuneWeave request failed"
         );
     }
@@ -658,6 +665,36 @@ fn log_api_error(error: &TuneWeaveError, status: StatusCode, request_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_errors_expose_provider_and_transport_diagnostics_separately() {
+        let response = ApiError::from(
+            TuneWeaveError::new(ErrorCode::Conflict, "QQ login was rejected")
+                .with_platform(Platform::Qq)
+                .with_details(serde_json::json!({"platform_code": 20279, "http_status": 200}))
+                .with_upstream_message("Device limit reached; cookie: one=a; two=b"),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let error = &value["error"];
+        assert_eq!(error["code"], "conflict");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["details"]["upstream_code"], 20279);
+        assert_eq!(error["details"]["platform_code"], 20279);
+        assert_eq!(error["details"]["upstream_http_status"], 200);
+        assert!(error["message"].as_str().unwrap().contains("20279"));
+        assert!(
+            error["details"]["upstream_message"]
+                .as_str()
+                .unwrap()
+                .contains("Device limit")
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("two=b"));
+    }
 
     #[test]
     fn request_activity_counts_only_live_guards() {

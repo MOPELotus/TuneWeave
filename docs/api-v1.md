@@ -158,6 +158,8 @@ Minecraft 客户端直接与 TuneWeave 通信，凭据按[登录与凭证](authe
 
 网络和解析失败在 `error.message` 中保留脱敏后的底层原因，便于只显示消息的机器人直接定位；`error.details.source_chain` 提供有界原因链，JSON 错误还包含 `json_line`、`json_column` 和 `json_category`。请求编号、原有错误码与凭据归属保持不变。日志保留同一脱敏原因链；不会返回完整请求 URL、Cookie、令牌或被拒绝的 JSON 字符串值。SDK 可用 `with_source` / `with_json_source` 为错误追加这些诊断，平台业务提示可用 `with_upstream_message` 追加。
 
+上游有可用诊断时，`error.details.upstream_code` 是平台业务码（数字或字符串，保留前导零），`upstream_message` 是脱敏后的原始提示，`upstream_http_status` 是上游 HTTP 状态。上游可能以 HTTP 200 返回业务失败，因此这两个码独立；调用方仍按 TuneWeave 的 `error.code` 和 `error.retryable` 决策。旧字段如 `platform_code` 保留。只展示一行的客户端应使用 `error.message`；排查时连同 `meta.request_id` 记录诊断字段。没有上游原因时不补造。
+
 | HTTP | `error.code` | 说明 |
 | ---: | --- | --- |
 | 400 | `invalid_request` | 参数、引用或请求体无效 |
