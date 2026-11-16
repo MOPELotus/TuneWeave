@@ -121,7 +121,7 @@ struct Envelope {
     #[serde(flatten)]
     fields: serde_json::Map<String, serde_json::Value>,
 }
-fn parse_envelope(operation: Operation<'_>, body: &[u8]) -> Result<Envelope> {
+fn parse_envelope(operation: Operation<'_>, body: &[u8], token: &str) -> Result<Envelope> {
     let envelope: Envelope = serde_json::from_slice(body).map_err(|json_cause| {
         let mapped = migu_upstream_error("Migu session response is invalid");
         mapped.with_json_source(&json_cause)
@@ -148,14 +148,21 @@ fn parse_envelope(operation: Operation<'_>, body: &[u8]) -> Result<Envelope> {
             | Operation::PurchasedAlbums(..) => envelope.code == "290001",
             Operation::Check | Operation::Logout => envelope.code == "850001",
         };
-        if auth {
-            return Err(authentication_required());
-        }
-        let mut e = migu_upstream_error("Migu session business request failed");
-        if envelope.code.len() == 6 && envelope.code.bytes().all(|b| b.is_ascii_digit()) {
-            e = e.with_details(json!({"platform_code":envelope.code}));
-        }
-        return Err(e);
+        let error = if auth {
+            authentication_required()
+        } else {
+            migu_upstream_error("Migu session business request failed")
+        };
+        let text = ["info", "message", "msg"]
+            .into_iter()
+            .filter_map(|field| envelope.fields.get(field)?.as_str())
+            .find(|text| !text.trim().is_empty());
+        return Err(migu_account_business_error(
+            error,
+            &envelope.code,
+            text,
+            token,
+        ));
     }
     Ok(envelope)
 }
@@ -233,7 +240,7 @@ impl MiguClient {
         parse: impl FnOnce(Envelope, &HeaderMap) -> Result<T>,
     ) -> Result<T> {
         self.raw_session_request(operation, token, |value, headers| {
-            parse(parse_envelope(operation, value)?, headers)
+            parse(parse_envelope(operation, value, token)?, headers)
         })
         .await
     }
@@ -512,7 +519,7 @@ impl MiguClient {
         parse: impl FnOnce(serde_json::Value, usize) -> Result<T>,
     ) -> Result<AccountData<T>> {
         self.raw_session_request(operation, token, |bytes, headers| {
-            let body = parse_envelope(operation, bytes)?;
+            let body = parse_envelope(operation, bytes, token)?;
             let data = body
                 .data
                 .ok_or_else(|| migu_upstream_error("Migu account playlist omitted its data"))?;
@@ -686,7 +693,7 @@ impl MiguClient {
                 _ => {
                     // Error responses still use the common code/info object. Do
                     // not synthesize a success code for an unexpected envelope.
-                    parse_envelope(operation, body)?;
+                    parse_envelope(operation, body, token)?;
                     return Err(migu_upstream_error(
                         "Migu collection state did not return an operation array",
                     ));

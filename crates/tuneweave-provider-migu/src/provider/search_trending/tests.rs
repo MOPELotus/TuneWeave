@@ -99,7 +99,7 @@ async fn pc_search_trending_refuses_selected_and_caller_accounts_before_io() {
 async fn pc_search_trending_rejects_business_transport_and_body_failures_without_fallback() {
     let secret = "private-upstream-value";
     let mut cases = vec![
-        (response(json!({"code":"111111","info":secret,"data":{"hotWordItemList":[{"word":"Never"}]}})), ErrorCode::UpstreamError),
+        (response(json!({"code":"111111","info":format!("Hot words unavailable; token={secret}"),"data":{"hotWordItemList":[{"word":"Never"}]}})), ErrorCode::UpstreamError),
         (response(json!({"code":"000000","data":{}})), ErrorCode::UpstreamError),
         (response(reply()).replace("application/json; charset=utf-8", "text/html"), ErrorCode::UpstreamError),
         ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 262145\r\nConnection: close\r\n\r\n".into(), ErrorCode::UpstreamError),

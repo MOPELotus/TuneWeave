@@ -200,7 +200,7 @@ async fn catalogue_search_rejects_repeated_or_incomplete_pages_without_returning
                     false,
                 )),
                 "business" => response(
-                    json!({"code":"123456","data":{"hasNext":false},"info":"not exported"}),
+                    json!({"code":"123456","data":{"hasNext":false},"info":"Catalogue refused pagination; authorization: not exported"}),
                 ),
                 "transport" => {
                     "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"

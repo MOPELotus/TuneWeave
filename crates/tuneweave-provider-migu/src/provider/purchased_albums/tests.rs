@@ -214,7 +214,7 @@ async fn purchased_albums_invalid_pages_and_transport_failures_never_become_empt
                 }
                 "business" => {
                     responses[3] = reply(
-                        json!({"code":"299999","info":"do-not-export","data":{}}),
+                        json!({"code":"299999","info":"Purchase lookup unavailable; token=do-not-export","data":{}}),
                         Some("untrusted"),
                     );
                     (3, ErrorCode::UpstreamError, "verified-1")

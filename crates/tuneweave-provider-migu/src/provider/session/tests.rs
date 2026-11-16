@@ -196,10 +196,11 @@ async fn later_failure_retains_only_the_latest_identity_bound_rotation() {
         json!({"code":"000000"}),
         json!({"code":"000000","data":{}}),
         json!({"code":"000000","data":{"userId":"0"}}),
-        json!({"code":"299999","data":{"userId":"111"},"info":"secret upstream message"}),
+        json!({"code":"299999","data":{"userId":"111"},"info":"Playlist lookup unavailable; authorization: secret upstream message"}),
         json!({"code":"000000","data":{"userId":"111","nickName":"bad\n"}}),
     ];
     for (index, body) in malformed.into_iter().enumerate() {
+        let business_rejection = body["code"] == "299999";
         let (mut provider, requests) = server(vec![
             check("check-rotated"),
             reply(body, "pacmtoken: response-rotated\r\n"),
@@ -214,6 +215,10 @@ async fn later_failure_retains_only_the_latest_identity_bound_rotation() {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::UpstreamError);
         assert!(!format!("{err:?}").contains("secret upstream"));
+        assert_eq!(
+            err.message.contains("Playlist lookup unavailable"),
+            business_rejection
+        );
         let expected = old
             .rotate(
                 if index == 4 {

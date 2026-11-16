@@ -123,7 +123,7 @@ async fn pc_search_suggestions_refuse_unproved_clients_queries_and_account_sourc
 #[tokio::test]
 async fn pc_search_suggestions_business_failure_never_falls_back_to_hot_or_empty_results() {
     for value in [
-        json!({"code":"111111","info":"private-error"}),
+        json!({"code":"111111","info":"Suggestions rejected request; token=private-error"}),
         json!({"code":"000000","data":{"singerList":[{"singerName":"ok"}],"songList":[{}]}}),
     ] {
         let (p, seen) = server(vec![response(value)]).await;

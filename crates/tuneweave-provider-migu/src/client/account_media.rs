@@ -11,6 +11,8 @@ const MAX_RESPONSE: u64 = 1024 * 1024;
 #[derive(Deserialize)]
 struct Envelope {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
@@ -139,7 +141,7 @@ impl MiguClient {
             }
             let headers = response.headers().clone();
             let bytes = read_session_body_limited(response, MAX_RESPONSE).await?;
-            let data = decode_envelope(&bytes, &headers, path == PLAY)?;
+            let data = decode_envelope(&bytes, &headers, path == PLAY, token)?;
             let token =
                 rotated_token_for_host(&headers, HOST, path)?.unwrap_or_else(|| token.to_owned());
             Ok(AccountData {
@@ -213,6 +215,7 @@ fn decode_envelope(
     bytes: &[u8],
     headers: &HeaderMap,
     encrypted_allowed: bool,
+    token: &str,
 ) -> Result<serde_json::Value> {
     let mime = headers
         .get(CONTENT_TYPE)
@@ -255,8 +258,11 @@ fn decode_envelope(
     })?;
     if envelope.code != "000000" {
         // Media business failures do not prove that this account's PACM is invalid.
-        return Err(migu_upstream_error(
-            "Migu account media authorization failed",
+        return Err(migu_account_business_error(
+            migu_upstream_error("Migu account media authorization failed"),
+            &envelope.code,
+            envelope.message.text(),
+            token,
         ));
     }
     envelope

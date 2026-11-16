@@ -51,6 +51,8 @@ impl AlbumKind {
 #[derive(Deserialize)]
 struct Envelope<T> {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<T>,
 }
 
@@ -173,8 +175,11 @@ impl MiguClient {
                 mapped.with_json_source(&json_cause)
             })?;
             if envelope.code != "000000" {
-                return Err(migu_upstream_error("Migu album request was rejected")
-                    .with_details(json!({"platform_code":bounded_text(&envelope.code,64)})));
+                return Err(migu_business_error(
+                    migu_upstream_error("Migu album request was rejected"),
+                    &envelope.code,
+                    envelope.message.text(),
+                ));
             }
             envelope.data.ok_or_else(|| {
                 TuneWeaveError::new(ErrorCode::ResourceNotFound, "Migu album data was not found")

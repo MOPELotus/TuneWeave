@@ -190,7 +190,8 @@ pub(crate) async fn song(
             ErrorCode::PermissionDenied,
             "Migu TV did not authorize media",
         )
-        .with_platform(Platform::Migu));
+        .with_platform(Platform::Migu)
+        .with_upstream_message(&envelope.message));
     }
     let payload: Payload =
         serde_json::from_slice(&decrypt(&envelope.body, &envelope.salt)?).map_err(|_| failure())?;

@@ -307,7 +307,7 @@ async fn purchases_protocol_failures_never_become_empty_success_or_accept_unveri
                 }
                 "business" => {
                     responses[1] = reply(
-                        json!({"code":"299999","info":"private-error","data":[]}),
+                        json!({"code":"299999","info":"Purchase lookup unavailable; token=private-error","data":[]}),
                         Some("untrusted"),
                     );
                     (ErrorCode::UpstreamError, "verified-1")

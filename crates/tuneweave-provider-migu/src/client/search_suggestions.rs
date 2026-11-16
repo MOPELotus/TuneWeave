@@ -26,6 +26,8 @@ pub(crate) fn validate_query(query: &str) -> Result<&str> {
 #[derive(Deserialize)]
 struct Envelope {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<Data>,
 }
 
@@ -53,8 +55,10 @@ fn parse(bytes: &[u8], query: &str) -> Result<SearchSuggestionList> {
         mapped.with_json_source(&json_cause)
     })?;
     if reply.code != "000000" {
-        return Err(migu_upstream_error(
-            "Migu PC search suggestion request was rejected",
+        return Err(migu_business_error(
+            migu_upstream_error("Migu PC search suggestion request was rejected"),
+            &reply.code,
+            reply.message.text(),
         ));
     }
     // The official consumer explicitly uses optional data/list access and || [].

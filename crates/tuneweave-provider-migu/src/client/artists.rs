@@ -22,6 +22,8 @@ impl ArtistOperation {
 #[derive(Deserialize)]
 struct Envelope {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<Data>,
 }
 #[derive(Deserialize)]
@@ -489,7 +491,11 @@ impl MiguClient {
                 mapped.with_json_source(&json_cause)
             })?;
             if envelope.code != "000000" {
-                return Err(migu_upstream_error("Migu artist request was rejected"));
+                return Err(migu_business_error(
+                    migu_upstream_error("Migu artist request was rejected"),
+                    &envelope.code,
+                    envelope.message.text(),
+                ));
             }
             envelope.data.ok_or_else(invalid)
         }

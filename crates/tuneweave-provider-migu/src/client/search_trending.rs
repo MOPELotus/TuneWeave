@@ -9,7 +9,9 @@ const MAX_WORDS: usize = 200;
 #[derive(Deserialize)]
 struct Envelope {
     code: String,
-    data: Data,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
+    data: Option<Data>,
 }
 
 #[derive(Deserialize)]
@@ -36,15 +38,20 @@ fn parse(bytes: &[u8], detail: SearchTrendingDetail) -> Result<SearchTrendingLis
         mapped.with_json_source(&json_cause)
     })?;
     if reply.code != "000000" {
-        return Err(migu_upstream_error("Migu PC hot-word request was rejected"));
+        return Err(migu_business_error(
+            migu_upstream_error("Migu PC hot-word request was rejected"),
+            &reply.code,
+            reply.message.text(),
+        ));
     }
     // Unlike nonempty input completion, the official consumer directly filters
     // this array. Missing/null data or lists do not mean successful emptiness.
-    if reply.data.hot_word_item_list.len() > MAX_WORDS {
+    let words = reply.data.ok_or_else(invalid)?.hot_word_item_list;
+    if words.len() > MAX_WORDS {
         return Err(invalid());
     }
     let mut entries = Vec::new();
-    for row in reply.data.hot_word_item_list {
+    for row in words {
         if row.value.as_ref().and_then(serde_json::Value::as_str) == Some("年度听歌报告") {
             continue;
         }

@@ -236,7 +236,7 @@ fn charts_reject_partial_catalogues_wrong_shapes_and_duplicate_fields() {
             ErrorCode::UpstreamError,
         ),
         (
-            json!({"code":"999999","info":"untrusted"}),
+            json!({"code":"999999","info":"Chart service rejected request; token=untrusted"}),
             ErrorCode::UpstreamError,
         ),
     ] {

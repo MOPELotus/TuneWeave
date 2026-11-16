@@ -40,6 +40,8 @@ pub(crate) struct CatalogPage {
 #[derive(Deserialize)]
 struct CatalogEnvelope {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<CatalogData>,
 }
 
@@ -182,8 +184,11 @@ fn parse_catalog_response(kind: CatalogKind, bytes: &[u8]) -> Result<CatalogPage
         mapped.with_json_source(&json_cause)
     })?;
     if envelope.code != "000000" {
-        return Err(migu_upstream_error("Migu catalogue rejected the request")
-            .with_details(json!({"platform_code":bounded_text(&envelope.code,64)})));
+        return Err(migu_business_error(
+            migu_upstream_error("Migu catalogue rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let data = envelope
         .data

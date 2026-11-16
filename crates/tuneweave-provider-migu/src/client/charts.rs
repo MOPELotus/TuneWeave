@@ -15,6 +15,8 @@ const MAX_TRACKS: usize = 1000;
 #[derive(Deserialize)]
 struct Envelope<T> {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<T>,
 }
 #[derive(Deserialize)]
@@ -192,8 +194,10 @@ fn parse_catalogue(bytes: &[u8], view: ChartCatalogView) -> Result<ChartCatalog>
         mapped.with_json_source(&json_cause)
     })?;
     if envelope.code != "000000" {
-        return Err(migu_upstream_error(
-            "Migu chart catalogue request was rejected",
+        return Err(migu_business_error(
+            migu_upstream_error("Migu chart catalogue request was rejected"),
+            &envelope.code,
+            envelope.message.text(),
         ));
     }
     let data = envelope.data.ok_or_else(invalid)?;
@@ -280,15 +284,21 @@ fn parse_period_tracks(
         mapped.with_json_source(&json_cause)
     })?;
     if envelope.code == "200000" && envelope.data.is_none() {
-        return Err(TuneWeaveError::new(
-            ErrorCode::ResourceNotFound,
-            "Migu chart or requested period was not found",
-        )
-        .with_platform(Platform::Migu));
+        return Err(migu_business_error(
+            TuneWeaveError::new(
+                ErrorCode::ResourceNotFound,
+                "Migu chart or requested period was not found",
+            )
+            .with_platform(Platform::Migu),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     if envelope.code != "000000" {
-        return Err(migu_upstream_error(
-            "Migu chart tracks request was rejected",
+        return Err(migu_business_error(
+            migu_upstream_error("Migu chart tracks request was rejected"),
+            &envelope.code,
+            envelope.message.text(),
         ));
     }
     let data = envelope.data.ok_or_else(invalid)?;

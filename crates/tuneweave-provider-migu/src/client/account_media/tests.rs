@@ -135,7 +135,7 @@ fn account_media_pc_envelope_codec_requires_consistent_signature_magic_and_json(
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     assert_eq!(
-        decode_envelope(json, &headers, true).unwrap()["value"],
+        decode_envelope(json, &headers, true, "fixture-account-token").unwrap()["value"],
         "fixture"
     );
     let mut bytes = vec![0xab, 0xcd, 0x01, 13];
@@ -148,13 +148,13 @@ fn account_media_pc_envelope_codec_requires_consistent_signature_magic_and_json(
     );
     headers.insert("signature", HeaderValue::from_static("1"));
     assert_eq!(
-        decode_envelope(&bytes, &headers, true).unwrap()["value"],
+        decode_envelope(&bytes, &headers, true, "fixture-account-token").unwrap()["value"],
         "fixture"
     );
-    assert!(decode_envelope(&bytes, &headers, false).is_err());
-    assert!(decode_envelope(json, &headers, true).is_err());
+    assert!(decode_envelope(&bytes, &headers, false, "fixture-account-token").is_err());
+    assert!(decode_envelope(json, &headers, true, "fixture-account-token").is_err());
     headers.append("signature", HeaderValue::from_static("1"));
-    assert!(decode_envelope(&bytes, &headers, true).is_err());
+    assert!(decode_envelope(&bytes, &headers, true, "fixture-account-token").is_err());
     headers.remove("signature");
     for body in [
         b"<html>login</html>".as_slice(),
@@ -164,12 +164,32 @@ fn account_media_pc_envelope_codec_requires_consistent_signature_magic_and_json(
         &bytes,
     ] {
         assert_eq!(
-            decode_envelope(body, &headers, true).unwrap_err().code,
+            decode_envelope(body, &headers, true, "fixture-account-token")
+                .unwrap_err()
+                .code,
             ErrorCode::UpstreamError
         );
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
-    assert!(decode_envelope(json, &headers, true).is_err());
+    assert!(decode_envelope(json, &headers, true, "fixture-account-token").is_err());
+}
+
+#[test]
+fn account_media_business_denials_keep_the_status_but_not_the_credential() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let failure = decode_envelope(
+        br#"{"code":"290001","msg":"playback unavailable; fixture-pacm","data":null}"#,
+        &headers,
+        true,
+        "fixture-pacm",
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, ErrorCode::UpstreamError);
+    assert!(!failure.retryable);
+    assert_eq!(failure.details["platform_code"], "290001");
+    assert!(failure.message.contains("playback unavailable"));
+    assert!(!format!("{failure:?}").contains("fixture-pacm"));
 }
 
 #[test]

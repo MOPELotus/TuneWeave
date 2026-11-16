@@ -16,7 +16,7 @@ use tuneweave_core::{
     AlbumSummary, ArtistSummary, ErrorCode, Extensions, Lyrics, MediaDownload, MediaStream,
     Platform, Playlist, Quality, ResourceRef, Result, StreamRequest, StreamVariant, Track,
     TrackAvailability, TrackAvailabilityRequest, TrialWindow, TuneWeaveError,
-    UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary,
+    UpstreamBusinessClass, UpstreamOutcome, UpstreamRequestSummary, redact_upstream_message,
 };
 use url::Url;
 
@@ -300,8 +300,8 @@ struct MiguSearchRequest<'a> {
 struct MiguSearchEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<MiguSearchData>,
 }
 
@@ -338,8 +338,8 @@ struct MiguPlaylistTracksQuery<'a> {
 struct MiguPlaylistEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<MiguPlaylistInfo>,
 }
 
@@ -398,8 +398,8 @@ struct MiguPlaylistPresentation {
 struct MiguPlaylistTracksEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<MiguPlaylistTracksData>,
 }
 
@@ -423,8 +423,8 @@ struct MiguResourceInfoRequest<'a> {
 struct MiguResourceEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     #[serde(default)]
     resource: Vec<MiguResource>,
 }
@@ -634,8 +634,8 @@ struct MiguListeningRightsRequest<'a> {
 struct MiguListeningRightsEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<MiguListeningRightsData>,
 }
 
@@ -665,12 +665,12 @@ struct MiguPublicStreamRequest<'a> {
     lower_quality_content_id: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct MiguPlaybackEnvelope {
     #[serde(default)]
     code: String,
-    #[serde(default)]
-    info: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<MiguPlaybackData>,
 }
 
@@ -1187,8 +1187,10 @@ impl MiguClient {
                         .with_source(&error)
                 })?;
             if envelope.code != "000000" {
-                return Err(migu_media_permission_error(
-                    "Migu Android did not authorize playback",
+                return Err(migu_business_error(
+                    migu_media_permission_error("Migu Android did not authorize playback"),
+                    &envelope.code,
+                    envelope.message.text(),
                 ));
             }
             let mut playback = envelope
@@ -1475,12 +1477,11 @@ fn parse_search_response(bytes: &[u8]) -> Result<MiguSearchPage> {
         migu_upstream_error("Migu search returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(
-            migu_upstream_error("Migu search rejected the request").with_details(json!({
-                "platform_code": bounded_text(&envelope.code, 64),
-                "platform_message": bounded_text(&envelope.info, 256),
-            })),
-        );
+        return Err(migu_public_envelope_error(
+            migu_upstream_error("Migu search rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let data = envelope
         .data
@@ -1507,12 +1508,11 @@ fn parse_playlist_detail_response(bytes: &[u8], requested_playlist_id: &str) -> 
         migu_upstream_error("Migu playlist detail returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(
-            migu_upstream_error("Migu playlist detail rejected the request").with_details(json!({
-                "platform_code": bounded_text(&envelope.code, 64),
-                "platform_message": bounded_text(&envelope.info, 256),
-            })),
-        );
+        return Err(migu_public_envelope_error(
+            migu_upstream_error("Migu playlist detail rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let info = envelope.data.ok_or_else(|| {
         TuneWeaveError::new(ErrorCode::ResourceNotFound, "Migu playlist was not found")
@@ -1617,12 +1617,11 @@ fn parse_playlist_tracks_response(
         migu_upstream_error("Migu playlist tracks returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(
-            migu_upstream_error("Migu playlist tracks rejected the request").with_details(json!({
-                "platform_code": bounded_text(&envelope.code, 64),
-                "platform_message": bounded_text(&envelope.info, 256),
-            })),
-        );
+        return Err(migu_public_envelope_error(
+            migu_upstream_error("Migu playlist tracks rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let data = envelope.data.ok_or_else(|| {
         TuneWeaveError::new(
@@ -1683,12 +1682,11 @@ fn parse_resource_record(bytes: &[u8], requested_content_id: &str) -> Result<Mig
         migu_upstream_error("Migu resource detail returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(
-            migu_upstream_error("Migu resource detail rejected the request").with_details(json!({
-                "platform_code": bounded_text(&envelope.code, 64),
-                "platform_message": bounded_text(&envelope.info, 256),
-            })),
-        );
+        return Err(migu_public_envelope_error(
+            migu_upstream_error("Migu resource detail rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     if envelope.resource.is_empty() {
         return Err(
@@ -1721,12 +1719,11 @@ fn parse_listening_rights_response(
         migu_upstream_error("Migu listening rights returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(
-            migu_upstream_error("Migu listening rights rejected the request").with_details(json!({
-                "platform_code": bounded_text(&envelope.code, 64),
-                "platform_message": bounded_text(&envelope.info, 256),
-            })),
-        );
+        return Err(migu_public_envelope_error(
+            migu_upstream_error("Migu listening rights rejected the request"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let data = envelope
         .data
@@ -1754,15 +1751,11 @@ fn parse_public_stream_response(bytes: &[u8]) -> Result<MiguPlaybackData> {
         migu_upstream_error("Migu public stream returned malformed JSON").with_source(&error)
     })?;
     if envelope.code != "000000" {
-        return Err(TuneWeaveError::new(
-            ErrorCode::PermissionDenied,
-            "Migu did not authorize the requested public media",
-        )
-        .with_platform(Platform::Migu)
-        .with_details(json!({
-            "platform_code": bounded_text(&envelope.code, 64),
-            "platform_message": bounded_text(&envelope.info, 256),
-        })));
+        return Err(migu_public_envelope_error(
+            migu_media_permission_error("Migu did not authorize the requested public media"),
+            &envelope.code,
+            envelope.message.text(),
+        ));
     }
     let mut playback = envelope
         .data
@@ -1994,14 +1987,19 @@ fn safe_public_audio_url_shape(url: &Url) -> serde_json::Value {
 }
 
 fn playback_denied(playback: &MiguPlaybackData) -> TuneWeaveError {
-    migu_media_permission_error("Migu did not return authorized media").with_details(json!({
+    let dialog = playback.dialog_info.as_ref();
+    let mut error = migu_media_permission_error("Migu did not return authorized media").with_details(json!({
         "version": bounded_optional(&playback.version, 128),
         "cannot_code": bounded_optional(&playback.cannot_code, 64),
         "free_listen_type": bounded_optional(&playback.free_listen_type, 32),
-        "dialog_show_type": playback.dialog_info.as_ref().and_then(|dialog| dialog.show_type),
-        "dialog_text": playback.dialog_info.as_ref().and_then(|dialog| bounded_optional(&dialog.text, 512)),
-        "pay_complete_text": playback.dialog_info.as_ref().and_then(|dialog| bounded_optional(&dialog.pay_complete_text, 512)),
-    }))
+        "dialog_show_type": dialog.and_then(|dialog| dialog.show_type),
+        "dialog_text": dialog.and_then(|dialog| migu_safe_business_text(&dialog.text)),
+        "pay_complete_text": dialog.and_then(|dialog| migu_safe_business_text(&dialog.pay_complete_text)),
+    }));
+    if let Some(text) = dialog.and_then(|dialog| nonempty(&dialog.text)) {
+        error = error.with_upstream_message(text);
+    }
+    error
 }
 
 fn validate_other_media_url(
@@ -2107,8 +2105,8 @@ fn map_song_download(
     #[derive(Deserialize)]
     struct Envelope {
         code: String,
-        #[serde(default)]
-        info: String,
+        #[serde(flatten)]
+        message: MiguBusinessMessage,
         data: Option<Data>,
     }
     #[derive(Deserialize)]
@@ -2131,7 +2129,7 @@ fn map_song_download(
     })?;
     result.platform_code = envelope.code.parse().ok();
     if envelope.code != "000000" {
-        result.message = Some(bounded_text(&envelope.info, 256));
+        result.message = envelope.message.text().and_then(migu_safe_business_text);
         return Ok(result);
     }
     let data = envelope
@@ -3526,6 +3524,90 @@ fn migu_invalid_request(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::invalid_request(message).with_platform(Platform::Migu)
 }
 
+#[derive(Deserialize)]
+struct MiguBusinessMessage {
+    #[serde(default)]
+    info: serde_json::Value,
+    #[serde(default)]
+    message: serde_json::Value,
+    #[serde(default)]
+    msg: serde_json::Value,
+}
+
+impl MiguBusinessMessage {
+    fn text(&self) -> Option<&str> {
+        [&self.info, &self.message, &self.msg]
+            .into_iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|text| !text.trim().is_empty())
+    }
+}
+
+fn migu_safe_business_text(message: &str) -> Option<String> {
+    let message = redact_upstream_message(message);
+    (!message.is_empty()).then_some(message)
+}
+
+fn migu_business_error(
+    mut error: TuneWeaveError,
+    code: &str,
+    message: Option<&str>,
+) -> TuneWeaveError {
+    // Business codes are short numeric values; an unexpected string may be
+    // producer data rather than a status code and must not be echoed.
+    if (1..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        error.details["platform_code"] = json!(code);
+    }
+    if let Some(message) = message {
+        error = error.with_upstream_message(message);
+    }
+    error
+}
+
+fn migu_account_business_error(
+    error: TuneWeaveError,
+    code: &str,
+    message: Option<&str>,
+    token: &str,
+) -> TuneWeaveError {
+    // PACM and native token values may be shorter than the generic opaque-value
+    // redaction threshold. Do not expose echoes of the credential sent.
+    let message = message.map(|message| {
+        if token.is_empty() {
+            message.chars().take(4096).collect::<String>()
+        } else {
+            message
+                .split(token)
+                .enumerate()
+                .flat_map(|(index, part)| {
+                    let marker = if index == 0 {
+                        ""
+                    } else {
+                        "[credential redacted]"
+                    };
+                    marker.chars().chain(part.chars())
+                })
+                .take(4096)
+                .collect()
+        }
+    });
+    let code = if code == token { "" } else { code };
+    migu_business_error(error, code, message.as_deref())
+}
+
+fn migu_public_envelope_error(
+    error: TuneWeaveError,
+    code: &str,
+    message: Option<&str>,
+) -> TuneWeaveError {
+    let mut error = migu_business_error(error, code, message);
+    if let Some(message) = error.details.get("upstream_message") {
+        // Keep the legacy Migu field populated with the redacted value.
+        error.details["platform_message"] = message.clone();
+    }
+    error
+}
+
 fn migu_upstream_error(message: impl Into<String>) -> TuneWeaveError {
     TuneWeaveError::new(ErrorCode::UpstreamError, message).with_platform(Platform::Migu)
 }
@@ -3856,6 +3938,25 @@ mod tests {
         ] {
             assert!(parse_search_response(bad).is_err());
         }
+    }
+
+    #[test]
+    fn public_business_error_preserves_message_and_code_without_raw_diagnostics() {
+        let error = parse_search_response(
+            br#"{"code":"100001","info":null,"message":"service denied token=private-value https://secret.example/","data":null}"#,
+        )
+        .expect_err("business rejection");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(!error.retryable);
+        assert_eq!(error.details["platform_code"], "100001");
+        assert!(error.message.contains("service denied"));
+        assert_eq!(
+            error.details["platform_message"],
+            error.details["upstream_message"]
+        );
+        let exposed = format!("{error:?}");
+        assert!(!exposed.contains("private-value"));
+        assert!(!exposed.contains("secret.example"));
     }
 
     #[test]
@@ -4201,6 +4302,7 @@ mod tests {
         let error = parse_public_stream_response(&rejected).expect_err("business rejection");
         assert_eq!(error.code, ErrorCode::PermissionDenied);
         assert_eq!(error.details["platform_code"], "440013");
+        assert_eq!(error.details["upstream_message"], "entitlement required");
     }
 
     #[test]

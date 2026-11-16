@@ -47,7 +47,7 @@ impl MiguClient {
                 true,
             )
             .await?;
-        let data = success_data(value)?;
+        let data = success_data(value, &token)?;
         let actual = data
             .get("userInfoItem")
             .and_then(|value| value.get("userId"))
@@ -129,14 +129,16 @@ impl MiguClient {
                 false,
             )
             .await?;
-        success_data(value)
+        success_data(value, &auth.token)
     }
 }
 
-fn success_data(value: serde_json::Value) -> Result<serde_json::Value> {
+fn success_data(value: serde_json::Value, token: &str) -> Result<serde_json::Value> {
     #[derive(Deserialize)]
     struct Envelope {
         code: String,
+        #[serde(flatten)]
+        message: MiguBusinessMessage,
         data: Option<serde_json::Value>,
     }
     let body: Envelope = serde_json::from_value(value).map_err(|json_cause| {
@@ -152,11 +154,12 @@ fn success_data(value: serde_json::Value) -> Result<serde_json::Value> {
         } else {
             ErrorCode::UpstreamError
         };
-        let mut failure = error(code, "Migu native authorization was not granted");
-        if body.code.len() == 6 && body.code.bytes().all(|byte| byte.is_ascii_digit()) {
-            failure = failure.with_details(json!({"platform_code":body.code}));
-        }
-        return Err(failure);
+        return Err(migu_account_business_error(
+            error(code, "Migu native authorization was not granted"),
+            &body.code,
+            body.message.text(),
+            token,
+        ));
     }
     body.data
         .ok_or_else(|| migu_upstream_error("Migu native authorization omitted data"))

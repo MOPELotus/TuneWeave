@@ -193,7 +193,7 @@ async fn charts_transport_rejects_bad_mime_business_status_redirects_and_declare
         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{huge}"),
         "HTTP/1.1 302 Found\r\nLocation: https://elsewhere.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
         "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
-        response(json!({"code":"999999","info":"untrusted"})),
+        response(json!({"code":"999999","info":"Chart service rejected request; token=untrusted"})),
         response(json!({"code":"000000","data":null})),
     ] {
         let (p,requests)=server(vec![body]).await;

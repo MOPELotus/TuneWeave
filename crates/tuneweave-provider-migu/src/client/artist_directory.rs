@@ -53,6 +53,8 @@ impl Selection {
 #[derive(Deserialize)]
 struct Envelope {
     code: String,
+    #[serde(flatten)]
+    message: MiguBusinessMessage,
     data: Option<Data>,
 }
 
@@ -106,8 +108,10 @@ fn decode(bytes: &[u8]) -> Result<Data> {
         mapped.with_json_source(&json_cause)
     })?;
     if envelope.code != "000000" {
-        return Err(migu_upstream_error(
-            "Migu artist directory request was rejected",
+        return Err(migu_business_error(
+            migu_upstream_error("Migu artist directory request was rejected"),
+            &envelope.code,
+            envelope.message.text(),
         ));
     }
     let data = envelope.data.ok_or_else(invalid)?;

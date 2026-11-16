@@ -70,7 +70,7 @@ fn pc_search_trending_empty_requires_exact_success_and_explicit_array() {
         json!({"code":"000000","data":{}}),
         json!({"code":"000000","data":{"hotWordItemList":null}}),
         json!({"code":"000000","data":{"hotWordItemList":{}}}),
-        json!({"code":"111111","info":"private-error","data":{"hotWordItemList":[]}}),
+        json!({"code":"111111","info":"Hot words unavailable; token=private-error","data":{"hotWordItemList":[]}}),
         json!({"code":0,"data":{"hotWordItemList":[]}}),
         json!({"data":{"hotWordItemList":[]}}),
     ] {

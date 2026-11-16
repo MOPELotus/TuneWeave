@@ -66,7 +66,7 @@ fn pc_search_suggestions_empty_lists_require_an_exact_successful_ack() {
         assert!(parse_value(value).unwrap().suggestions.is_empty());
     }
     for value in [
-        json!({"code":"999999","info":"private error","data":null}),
+        json!({"code":"999999","info":"Suggestions rejected request; authorization: private error","data":null}),
         json!({"data":{}}),
         json!({"code":0,"data":{}}),
         json!({"code":"000000","data":[]}),

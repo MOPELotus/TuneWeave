@@ -264,9 +264,11 @@ fn native_errors_and_ephemeral_auth_never_reflect_tokens_or_messages() {
     assert!(!format!("{auth:?}").contains("fixture-secret"));
     for code in ["200010", "290001", "unknown-fixture-secret"] {
         let failure = success_data(
-            json!({"code":code,"info":"fixture-secret","data":{"url":"fixture-secret"}}),
+            json!({"code":code,"info":"binding denied; fixture-secret","data":{"url":"fixture-secret"}}),
+            "fixture-secret",
         )
         .unwrap_err();
+        assert!(failure.message.contains("binding denied"));
         assert!(!failure.message.contains("fixture-secret"));
         assert!(
             !serde_json::to_string(&failure.details)
