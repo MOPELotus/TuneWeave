@@ -43,7 +43,7 @@ pub use capability::Capability;
 pub use credential_store::{
     AccountCredentialStore, FileAccountCredentialStore, StoredAccountCredential,
 };
-pub use error::{ErrorCode, Result, TuneWeaveError};
+pub use error::{ErrorCode, Result, TuneWeaveError, redact_upstream_message};
 pub use matcher::{MatchAssessment, assess_track_match};
 pub use model::{
     AccountDislikeEntry, AccountDislikeKind, AccountDislikeList, AccountDislikeListRequest,

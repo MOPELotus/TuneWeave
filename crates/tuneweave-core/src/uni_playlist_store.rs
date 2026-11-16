@@ -1121,8 +1121,9 @@ fn load_database(path: &Path) -> Result<UniPlaylistDatabase> {
     let database = serde_json::from_slice::<UniPlaylistDatabase>(&encoded).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::InternalError,
-            format!("failed to decode Uni Playlist database: {error}"),
+            "failed to decode Uni Playlist database",
         )
+        .with_json_source(&error)
     })?;
     if database.version != UNI_PLAYLIST_FILE_VERSION {
         return Err(TuneWeaveError::new(
@@ -1257,8 +1258,9 @@ fn load_store_manifest(path: &Path) -> Result<UniPlaylistStoreManifest> {
         serde_json::from_slice::<UniPlaylistStoreManifest>(&encoded).map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("failed to decode Uni Playlist store manifest: {error}"),
+                "failed to decode Uni Playlist store manifest",
             )
+            .with_json_source(&error)
         })?;
     if manifest.version != UNI_PLAYLIST_RECORD_VERSION {
         return Err(TuneWeaveError::new(
@@ -1278,8 +1280,9 @@ fn load_playlist_record(path: &Path) -> Result<UniPlaylistRecord> {
     let record = serde_json::from_slice::<UniPlaylistRecord>(&encoded).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::InternalError,
-            format!("failed to decode Uni Playlist record: {error}"),
+            "failed to decode Uni Playlist record",
         )
+        .with_json_source(&error)
     })?;
     if record.version != UNI_PLAYLIST_RECORD_VERSION {
         return Err(TuneWeaveError::new(
@@ -1332,8 +1335,9 @@ fn persist_database(path: &Path, database: &UniPlaylistDatabase) -> Result<()> {
         let encoded = serde_json::to_vec(database).map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("failed to serialize Uni Playlist database: {error}"),
+                "failed to serialize Uni Playlist database",
             )
+            .with_json_source(&error)
         })?;
         persist_encoded_file(path, &encoded)
     })();
@@ -1352,8 +1356,9 @@ fn persist_playlist_record(path: &Path, record: &UniPlaylistRecord) -> Result<()
         let encoded = serde_json::to_vec(record).map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("failed to serialize Uni Playlist record: {error}"),
+                "failed to serialize Uni Playlist record",
             )
+            .with_json_source(&error)
         })?;
         persist_encoded_file(path, &encoded)
     })();
@@ -1380,8 +1385,9 @@ fn ensure_store_manifest(directory: &Path) -> Result<()> {
         .map_err(|error| {
             TuneWeaveError::new(
                 ErrorCode::InternalError,
-                format!("failed to serialize Uni Playlist store manifest: {error}"),
+                "failed to serialize Uni Playlist store manifest",
             )
+            .with_json_source(&error)
         })?;
         persist_encoded_file(&path, &encoded)
     })();
@@ -1685,10 +1691,9 @@ fn uni_playlist_lock_error() -> TuneWeaveError {
 }
 
 fn store_io_error(operation: &str, error: std::io::Error) -> TuneWeaveError {
-    TuneWeaveError::new(
-        ErrorCode::InternalError,
-        format!("failed to {operation}: {error}"),
-    )
+    TuneWeaveError::new(ErrorCode::InternalError, format!("failed to {operation}"))
+        .with_source(&error)
+        .with_details(json!({"operation": operation}))
 }
 
 #[cfg(test)]

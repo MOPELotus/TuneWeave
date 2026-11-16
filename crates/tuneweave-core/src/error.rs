@@ -85,7 +85,18 @@ impl TuneWeaveError {
     #[must_use]
     pub fn with_details(mut self, mut details: Value) -> Self {
         if let Some(object) = details.as_object_mut() {
-            for key in ["source_chain", "json_line", "json_column", "json_category"] {
+            for key in [
+                "source_chain",
+                "json_line",
+                "json_column",
+                "json_category",
+                "os_error_code",
+                "upstream_code",
+                "platform_code",
+                "upstream_message",
+                "upstream_http_status",
+                "http_status",
+            ] {
                 if let Some(value) = self.details.get(key) {
                     object.entry(key).or_insert_with(|| value.clone());
                 }
@@ -101,9 +112,15 @@ impl TuneWeaveError {
     pub fn with_source(mut self, error: &(dyn std::error::Error + 'static)) -> Self {
         let mut chain = Vec::new();
         let mut current = Some(error);
+        let mut os_error_code = None;
         for _ in 0..8 {
             let Some(source) = current else { break };
-            let message = safe_error_cause(&source.to_string());
+            os_error_code = os_error_code.or_else(|| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error)
+            });
+            let message = redact_upstream_message(&source.to_string());
             if !message.is_empty() && !chain.contains(&message) {
                 chain.push(message);
             }
@@ -124,16 +141,21 @@ impl TuneWeaveError {
             self.details["json_category"] =
                 json!(format!("{:?}", error.classify()).to_ascii_lowercase());
         }
+        if let Some(code) = os_error_code {
+            self.details["os_error_code"] = json!(code);
+        }
         self
     }
 
     /// Include a producer's human-readable business failure without echoing its payload.
     #[must_use]
     pub fn with_upstream_message(mut self, message: &str) -> Self {
-        let message = safe_error_cause(message);
+        let message = redact_upstream_message(message);
         if !message.is_empty() {
-            self.message.push_str(": ");
-            self.message.push_str(&message);
+            if !self.message.ends_with(&message) {
+                self.message.push_str(": ");
+                self.message.push_str(&message);
+            }
             if !self.details.is_object() {
                 self.details = json!({});
             }
@@ -142,15 +164,65 @@ impl TuneWeaveError {
         self
     }
 
+    /// Normalize known provider diagnostic aliases for adapters. Legacy fields
+    /// remain available; business codes are kept separate from HTTP status.
+    pub fn normalize_upstream_diagnostics(&mut self) {
+        if self.platform.is_none() {
+            return;
+        }
+        let Some(details) = self.details.as_object_mut() else {
+            return;
+        };
+        if let Some(code) = ["upstream_code", "platform_code"]
+            .iter()
+            .filter_map(|key| details.get(*key))
+            .find(|value| is_upstream_code(value))
+            .cloned()
+        {
+            let text = code
+                .as_str()
+                .map_or_else(|| code.to_string(), str::to_owned);
+            if text.bytes().any(|byte| byte != b'0') {
+                append_diagnostic(&mut self.message, "upstream code", &text);
+            }
+            details.insert("upstream_code".into(), code);
+        } else {
+            details.remove("upstream_code");
+        }
+        if let Some(status) = ["upstream_http_status", "http_status", "upstream_status"]
+            .iter()
+            .filter_map(|key| details.get(*key).and_then(Value::as_u64))
+            .find(|status| (100..=599).contains(status))
+        {
+            if status >= 300 {
+                append_diagnostic(&mut self.message, "upstream HTTP", &status.to_string());
+            }
+            details.insert("upstream_http_status".into(), json!(status));
+        } else {
+            details.remove("upstream_http_status");
+        }
+        // Some provider adapters predate the shared diagnostic field.
+        if let Some(message) = details.get("platform_message").and_then(Value::as_str) {
+            let message = redact_upstream_message(message);
+            details.insert("platform_message".into(), json!(message));
+            if !details
+                .get("upstream_message")
+                .is_some_and(Value::is_string)
+                && !message.is_empty()
+            {
+                if !self.message.ends_with(&message) {
+                    self.message.push_str(": ");
+                    self.message.push_str(&message);
+                }
+                details.insert("upstream_message".into(), json!(message));
+            }
+        }
+    }
+
     /// JSON diagnostics include location/category; actual payload values are redacted.
     #[must_use]
     pub fn with_json_source(self, error: &serde_json::Error) -> Self {
-        let mut error_result = self.with_source(error);
-        error_result.details["json_line"] = json!(error.line());
-        error_result.details["json_column"] = json!(error.column());
-        error_result.details["json_category"] =
-            json!(format!("{:?}", error.classify()).to_ascii_lowercase());
-        error_result
+        self.with_source(error)
     }
 
     /// Marks a failed verification whose transaction must not be submitted again,
@@ -226,14 +298,44 @@ impl TuneWeaveError {
     }
 }
 
-// Third-party errors sometimes embed complete URLs or the rejected JSON value.
-// Preserve transport/parser wording, but remove those untrusted data fragments.
-fn safe_error_cause(value: &str) -> String {
+fn is_upstream_code(value: &Value) -> bool {
+    value.is_i64()
+        || value.is_u64()
+        || value.as_str().is_some_and(|code| {
+            !code.is_empty()
+                && code.len() <= 24
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+}
+
+fn append_diagnostic(message: &mut String, label: &str, value: &str) {
+    if !message
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_')
+        })
+        .any(|part| part == value)
+    {
+        message.push_str(&format!(" ({label} {value})"));
+    }
+}
+
+/// Preserve a bounded diagnostic while redacting URLs, credentials and quoted
+/// payload values. Pass only a known upstream message field, never a raw body.
+#[must_use]
+pub fn redact_upstream_message(value: &str) -> String {
     let bounded: String = value.chars().take(4096).collect();
     let mut input = bounded.as_str();
     let mut result = String::new();
     while !input.is_empty() {
-        if input.starts_with("http://") || input.starts_with("https://") {
+        if input
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+            || input
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        {
             let end = input.find(char::is_whitespace).unwrap_or(input.len());
             result.push_str("[URL redacted]");
             input = &input[end..];
@@ -241,7 +343,10 @@ fn safe_error_cause(value: &str) -> String {
         }
         let character = input.chars().next().unwrap();
         input = &input[character.len_utf8()..];
-        if matches!(character, '\"' | '\'' | '`') {
+        let apostrophe = character == '\''
+            && result.ends_with(|character: char| character.is_ascii_alphanumeric())
+            && input.starts_with(|character: char| character.is_ascii_alphanumeric());
+        if matches!(character, '\"' | '\'' | '`') && !apostrophe {
             let mut escaped = false;
             while let Some(next) = input.chars().next() {
                 input = &input[next.len_utf8()..];
@@ -250,7 +355,7 @@ fn safe_error_cause(value: &str) -> String {
                 }
                 escaped = next == '\\' && !escaped;
             }
-            result.push_str("[value redacted]");
+            result.push_str("[value-redacted]");
         } else {
             result.push(if character.is_control() {
                 ' '
@@ -262,13 +367,37 @@ fn safe_error_cause(value: &str) -> String {
     let mut words = result.split_whitespace().peekable();
     let mut output = Vec::new();
     while let Some(word) = words.next() {
+        let inline_assignment = word.contains(['=', ':']);
+        let detached_assignment = !inline_assignment
+            && words
+                .peek()
+                .is_some_and(|next| next.starts_with(['=', ':']));
         let key = word
             .split(['=', ':'])
             .next()
             .unwrap_or_default()
+            .trim_start_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '_'
+            })
             .to_ascii_lowercase();
-        if word.contains(['=', ':'])
-            && [
+        if matches!(key.as_str(), "cookie" | "set-cookie" | "authorization")
+            && (inline_assignment || detached_assignment)
+        {
+            // These fields can contain space-separated values. The rest of the
+            // upstream message is not a safe boundary for exposing them.
+            output.push("[credential redacted]".to_owned());
+            break;
+        } else if word
+            .trim_matches(|c: char| !c.is_ascii_alphabetic())
+            .eq_ignore_ascii_case("bearer")
+        {
+            words.next();
+            output.push("[credential redacted]".to_owned());
+        } else if (inline_assignment || detached_assignment)
+            && (matches!(
+                key.as_str(),
+                "sid" | "skey" | "p_skey" | "buvid3" | "buvid4"
+            ) || [
                 "token",
                 "password",
                 "cookie",
@@ -277,11 +406,36 @@ fn safe_error_cause(value: &str) -> String {
                 "signature",
                 "authorization",
                 "musickey",
+                "music_u",
+                "music_a",
+                "nmtid",
+                "__csrf",
+                "sessionid",
+                "session_id",
+                "vkey",
+                "accesskey",
+                "access_key",
+                "a_bogus",
+                "x-helios",
+                "x-medusa",
+                "pacm",
+                "passport_ticket",
+                "sessdata",
+                "bili_jct",
+                "qrcode_key",
+                "v_voucher",
+                "qm_keyst",
+                "qqmusic_key",
             ]
             .iter()
-            .any(|name| key.contains(name))
+            .any(|name| key.contains(name)))
         {
-            if word.ends_with(['=', ':'])
+            let separate_value = if detached_assignment {
+                matches!(words.next(), Some("=" | ":"))
+            } else {
+                word.ends_with(['=', ':'])
+            };
+            if separate_value
                 && let Some(next) = words.next()
                 && next.eq_ignore_ascii_case("bearer")
             {
@@ -332,6 +486,61 @@ mod tests {
         for secret in ["private-cookie", "private-token", "private-value"] {
             assert!(!format!("{error:?}").contains(secret));
         }
+    }
+
+    #[test]
+    fn provider_diagnostics_keep_business_code_and_http_status_without_repeating_the_reason() {
+        let mut error = TuneWeaveError::new(ErrorCode::UpstreamError, "Request rejected")
+            .with_platform(Platform::Migu)
+            .with_details(json!({
+                "platform_code": "0091",
+                "platform_message": "Session expired HTTPS://private.test?q=secret",
+                "http_status": 503
+            }));
+        error.normalize_upstream_diagnostics();
+        let message = error.message.clone();
+        error.normalize_upstream_diagnostics();
+        assert_eq!(error.message, message);
+        assert_eq!(error.details["upstream_code"], "0091");
+        assert_eq!(error.details["upstream_http_status"], 503);
+        assert_eq!(
+            error.details["upstream_message"],
+            "Session expired [URL redacted]"
+        );
+        assert!(message.contains("upstream code 0091"));
+        assert!(message.contains("upstream HTTP 503"));
+        assert!(!message.contains("private.test"));
+        assert!(!error.details.to_string().contains("private.test"));
+    }
+
+    #[test]
+    fn provider_messages_do_not_return_named_secrets_or_multivalue_headers() {
+        let error = TuneWeaveError::new(ErrorCode::UpstreamError, "Request rejected")
+            .with_upstream_message(
+                "Session expired; MUSIC_U=short-a PACM: short-b (__csrf=short-c) Bearer short-d session_id =short-g Set-Cookie : a=short-e; b=short-f",
+            )
+            .with_details(json!({"operation": "login"}));
+        let diagnostic = error.details["upstream_message"].as_str().unwrap();
+        assert!(diagnostic.contains("Session expired"));
+        for secret in [
+            "short-a", "short-b", "short-c", "short-d", "short-e", "short-f",
+        ] {
+            assert!(!diagnostic.contains(secret), "{secret}");
+            assert!(!error.message.contains(secret), "{secret}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_preserves_contractions_and_exposes_an_os_code_without_guessing() {
+        assert_eq!(
+            redact_upstream_message("Can't connect to HTTPS://private.test"),
+            "Can't connect to [URL redacted]"
+        );
+        let error = TuneWeaveError::new(ErrorCode::InternalError, "File operation failed")
+            .with_source(&std::io::Error::from_raw_os_error(13))
+            .with_details(json!({"operation": "read"}));
+        assert_eq!(error.details["os_error_code"], 13);
+        assert_eq!(error.details["operation"], "read");
     }
 
     #[test]

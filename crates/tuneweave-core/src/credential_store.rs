@@ -252,8 +252,9 @@ impl FileAccountCredentialStore {
             let encoded = serde_json::to_vec(&file).map_err(|error| {
                 TuneWeaveError::new(
                     ErrorCode::InternalError,
-                    format!("failed to serialize account credential: {error}"),
+                    "failed to serialize account credential",
                 )
+                .with_json_source(&error)
             })?;
             if let Err(error) = write_private_file(&temporary_path, &encoded) {
                 let _ = fs::remove_file(&temporary_path);
@@ -484,8 +485,9 @@ fn load_latest_credential(
     let file: CredentialFile = serde_json::from_slice(&encoded).map_err(|error| {
         TuneWeaveError::new(
             ErrorCode::InternalError,
-            format!("failed to parse stored account credential: {error}"),
+            "failed to parse stored account credential",
         )
+        .with_json_source(&error)
     })?;
     if file.version != CREDENTIAL_FILE_VERSION {
         return Err(TuneWeaveError::new(
@@ -638,11 +640,9 @@ fn is_published_credential(path: &Path) -> bool {
 }
 
 fn store_io_error(operation: &str, error: std::io::Error) -> TuneWeaveError {
-    TuneWeaveError::new(
-        ErrorCode::InternalError,
-        format!("failed to {operation}: {error}"),
-    )
-    .with_details(json!({ "operation": operation }))
+    TuneWeaveError::new(ErrorCode::InternalError, format!("failed to {operation}"))
+        .with_source(&error)
+        .with_details(json!({ "operation": operation }))
 }
 
 #[cfg(test)]
@@ -869,5 +869,6 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InternalError);
         assert!(!error.message.contains(&root.to_string_lossy().to_string()));
         assert!(!error.message.contains("{not-json"));
+        assert_eq!(error.details["json_category"], "syntax");
     }
 }
