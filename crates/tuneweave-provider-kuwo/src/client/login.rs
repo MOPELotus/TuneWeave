@@ -896,7 +896,9 @@ fn web_http_error(status: StatusCode) -> TuneWeaveError {
         StatusCode::FORBIDDEN => ErrorCode::PermissionDenied,
         _ => ErrorCode::UpstreamError,
     };
-    TuneWeaveError::new(code, "Kuwo Web login request failed").with_platform(Platform::Kuwo)
+    TuneWeaveError::new(code, "Kuwo Web login request failed")
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({"http_status":status.as_u16()}))
 }
 
 fn parse_web_login_ack(bytes: &[u8]) -> Result<()> {
@@ -916,7 +918,11 @@ fn parse_web_login_ack(bytes: &[u8]) -> Result<()> {
             ErrorCode::AuthenticationRequired,
             "Kuwo Web password login was not accepted",
         )
-        .with_platform(Platform::Kuwo))
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({
+            "platform_code":(ack.status != 200).then_some(ack.status),
+            "platform_status":ack.status,
+        })))
     }
 }
 
@@ -936,7 +942,8 @@ fn parse_web_session_ack(bytes: &[u8]) -> Result<()> {
             ErrorCode::AuthenticationRequired,
             "Kuwo Web session did not pass independent validation",
         )
-        .with_platform(Platform::Kuwo))
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({"platform_code":ack.status})))
     }
 }
 
@@ -965,7 +972,11 @@ fn parse_pc_sms_send_ack(bytes: &[u8], fallback_tm: &str) -> Result<String> {
             ErrorCode::AuthenticationRequired,
             "Kuwo Web SMS was not accepted",
         )
-        .with_platform(Platform::Kuwo));
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({
+            "platform_code":if envelope.meta.code == 200 { envelope.data.status } else { envelope.meta.code },
+            "platform_status":envelope.data.status,
+        })));
     }
     let Some(value) = envelope.data.tm else {
         return valid_pc_sms_tm(fallback_tm);
@@ -1012,7 +1023,11 @@ fn parse_pc_sms_login_ack(bytes: &[u8]) -> Result<KuwoWebFormSession> {
             ErrorCode::AuthenticationRequired,
             "Kuwo Web SMS login was not accepted",
         )
-        .with_platform(Platform::Kuwo));
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({
+            "platform_code":(envelope.meta.code != 200).then_some(envelope.meta.code),
+            "platform_status":envelope.meta.code,
+        })));
     }
     let user_id = match envelope.data.uid.ok_or_else(invalid)? {
         serde_json::Value::String(value) => value,

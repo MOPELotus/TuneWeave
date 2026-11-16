@@ -125,7 +125,9 @@ fn parse_inner_impl(
         return Err(invalid());
     }
     match body.code {
-        4015 | 4017 => return Err(authentication_required()),
+        4015 | 4017 => {
+            return Err(authentication_required().with_details(json!({"platform_code": body.code})));
+        }
         401 | 402 | 403 | 404 | 407 | 4012 | 4018 | 5001 | 5002 => {
             return Ok(Outcome::Denied {
                 code: Some(body.code as i64),
@@ -133,7 +135,7 @@ fn parse_inner_impl(
             });
         }
         200 => {}
-        _ => return Err(invalid()),
+        _ => return Err(invalid().with_details(json!({"platform_code": body.code}))),
     }
     let data = body.data.ok_or_else(invalid)?;
     let duration = match (body.duration, data.duration) {

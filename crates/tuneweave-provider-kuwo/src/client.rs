@@ -1601,12 +1601,12 @@ fn parse_mobile_lyrics(bytes: &[u8], requested_music_id: &str) -> Result<(String
         kuwo_upstream_error("Kuwo mobile lyrics returned malformed JSON").with_source(&error)
     })?;
     if envelope.status.as_i64() != Some(200) {
-        return Err(
-            kuwo_upstream_error("Kuwo mobile lyrics rejected the request").with_details(json!({
-                "platform_code": envelope.status.as_text().map(|value| bounded_text(&value, 64)),
-                "platform_message": bounded_text(&envelope.msg, 256),
-            })),
-        );
+        return Err(with_business_message(
+            kuwo_upstream_error("Kuwo mobile lyrics rejected the request").with_details(
+                json!({"platform_code": envelope.status.as_i64().map(|code| code.to_string())}),
+            ),
+            &envelope.msg,
+        ));
     }
     let data = envelope
         .data
@@ -1765,7 +1765,6 @@ fn parse_playback_response(bytes: &[u8]) -> Result<KuwoPublicMediaOutcome> {
         .code
         .as_i64()
         .ok_or_else(|| kuwo_upstream_error("Kuwo public playback omitted a platform code"))?;
-    let message = bounded_text(&envelope.msg, 256);
     match platform_code {
         200 => {
             let data = envelope
@@ -1779,18 +1778,17 @@ fn parse_playback_response(bytes: &[u8]) -> Result<KuwoPublicMediaOutcome> {
         }
         -1 if envelope.data.is_none() => Ok(KuwoPublicMediaOutcome::PermissionDenied {
             platform_code,
-            message,
+            message: tuneweave_core::redact_upstream_message(&envelope.msg),
         }),
         -1001 if envelope.data.is_none() => Ok(KuwoPublicMediaOutcome::Unavailable {
             platform_code,
-            message,
+            message: tuneweave_core::redact_upstream_message(&envelope.msg),
         }),
-        _ => Err(
-            kuwo_upstream_error("Kuwo public playback rejected the request").with_details(json!({
-                "platform_code": platform_code,
-                "platform_message": message,
-            })),
-        ),
+        _ => Err(with_business_message(
+            kuwo_upstream_error("Kuwo public playback rejected the request")
+                .with_details(json!({"platform_code": platform_code})),
+            &envelope.msg,
+        )),
     }
 }
 
@@ -1818,19 +1816,17 @@ fn parse_track_detail_response(bytes: &[u8], requested_music_id: &str) -> Result
         kuwo_upstream_error("Kuwo track detail returned malformed JSON").with_source(&error)
     })?;
     if envelope.code.as_i64() != Some(200) {
-        if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
-            return Err(TuneWeaveError::new(
-                ErrorCode::ResourceNotFound,
-                "Kuwo track was not found",
-            )
-            .with_platform(Platform::Kuwo));
-        }
-        return Err(
-            kuwo_upstream_error("Kuwo track detail rejected the request").with_details(json!({
-                "platform_code": envelope.code.as_text().map(|value| bounded_text(&value, 64)),
-                "platform_message": bounded_text(&envelope.msg, 256),
-            })),
-        );
+        let code = envelope.code.as_i64();
+        let error = if code == Some(-1) && envelope.data.is_none() {
+            TuneWeaveError::new(ErrorCode::ResourceNotFound, "Kuwo track was not found")
+                .with_platform(Platform::Kuwo)
+        } else {
+            kuwo_upstream_error("Kuwo track detail rejected the request")
+        };
+        return Err(with_business_message(
+            error.with_details(json!({"platform_code": code.map(|code| code.to_string())})),
+            &envelope.msg,
+        ));
     }
     let detail = envelope
         .data
@@ -1969,19 +1965,20 @@ fn parse_playlist_response(
         kuwo_upstream_error("Kuwo public playlist returned malformed JSON").with_source(&error)
     })?;
     if envelope.code.as_i64() != Some(200) {
-        if envelope.code.as_i64() == Some(-1) && envelope.data.is_none() {
-            return Err(TuneWeaveError::new(
+        let code = envelope.code.as_i64();
+        let error = if code == Some(-1) && envelope.data.is_none() {
+            TuneWeaveError::new(
                 ErrorCode::ResourceNotFound,
                 "Kuwo playlist was not found or is not public",
             )
-            .with_platform(Platform::Kuwo));
-        }
-        return Err(
-            kuwo_upstream_error("Kuwo public playlist rejected the request").with_details(json!({
-                "platform_code": envelope.code.as_text().map(|value| bounded_text(&value, 64)),
-                "platform_message": bounded_text(&envelope.msg, 256),
-            })),
-        );
+            .with_platform(Platform::Kuwo)
+        } else {
+            kuwo_upstream_error("Kuwo public playlist rejected the request")
+        };
+        return Err(with_business_message(
+            error.with_details(json!({"platform_code": code.map(|code| code.to_string())})),
+            &envelope.msg,
+        ));
     }
     let data = envelope
         .data
@@ -2592,30 +2589,41 @@ fn public_media_permission_error(
     platform_code: i64,
     platform_message: &str,
 ) -> TuneWeaveError {
-    TuneWeaveError::new(
-        ErrorCode::PermissionDenied,
-        "Kuwo did not authorize full anonymous playback",
+    with_business_message(
+        TuneWeaveError::new(
+            ErrorCode::PermissionDenied,
+            "Kuwo did not authorize full anonymous playback",
+        )
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({
+            "requested_quality": request.quality,
+            "requested_bitrate": request.bitrate,
+            "platform_code": platform_code,
+            "trial_available": false,
+        })),
+        platform_message,
     )
-    .with_platform(Platform::Kuwo)
-    .with_details(json!({
-        "requested_quality": request.quality,
-        "requested_bitrate": request.bitrate,
-        "platform_code": platform_code,
-        "platform_message": bounded_text(platform_message, 256),
-        "trial_available": false,
-    }))
 }
 
 fn public_media_unavailable_error(platform_code: i64, platform_message: &str) -> TuneWeaveError {
-    TuneWeaveError::new(
-        ErrorCode::ResourceNotFound,
-        "Kuwo reported that this track is unavailable",
+    with_business_message(
+        TuneWeaveError::new(
+            ErrorCode::ResourceNotFound,
+            "Kuwo reported that this track is unavailable",
+        )
+        .with_platform(Platform::Kuwo)
+        .with_details(json!({"platform_code": platform_code})),
+        platform_message,
     )
-    .with_platform(Platform::Kuwo)
-    .with_details(json!({
-        "platform_code": platform_code,
-        "platform_message": bounded_text(platform_message, 256),
-    }))
+}
+
+fn with_business_message(error: TuneWeaveError, platform_message: &str) -> TuneWeaveError {
+    let mut error = error.with_upstream_message(platform_message);
+    // Keep the legacy details field without returning the raw platform string.
+    if let Some(message) = error.details.get("upstream_message") {
+        error.details["platform_message"] = message.clone();
+    }
+    error
 }
 
 fn canonical_positive_decimal(value: &str) -> Option<&str> {
@@ -2749,6 +2757,7 @@ fn kuwo_http_error(status: StatusCode) -> TuneWeaveError {
     TuneWeaveError::new(code, format!("Kuwo API returned HTTP {status}"))
         .with_platform(Platform::Kuwo)
         .retryable(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+        .with_details(json!({"http_status": status.as_u16()}))
 }
 
 fn kuwo_invalid_request(message: impl Into<String>) -> TuneWeaveError {
@@ -3258,6 +3267,45 @@ mod tests {
         ] {
             assert_eq!(normalize_official_image_url(invalid), None);
         }
+    }
+
+    #[test]
+    fn public_rejections_keep_codes_and_redacted_business_messages() {
+        let missing = parse_track_detail_response(
+            br#"{"code":"-1","msg":"Track removed token=fixture-secret","data":null,"token":"body-secret"}"#,
+            "123",
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, ErrorCode::ResourceNotFound);
+        assert_eq!(missing.details["platform_code"], "-1");
+        assert!(missing.message.contains("Track removed"));
+        assert_eq!(
+            missing.details["platform_message"],
+            missing.details["upstream_message"]
+        );
+        assert!(!missing.retryable);
+        assert!(!format!("{missing:?}").contains("fixture-secret"));
+        assert!(!format!("{missing:?}").contains("body-secret"));
+
+        let paid = parse_playback_response(
+            br#"{"code":-1,"msg":"Membership required https://example.test/path?token=fixture-secret","data":null}"#,
+        )
+        .unwrap();
+        let KuwoPublicMediaOutcome::PermissionDenied {
+            platform_code,
+            message,
+        } = paid
+        else {
+            panic!("expected paid playback to remain permission denied");
+        };
+        assert_eq!(platform_code, -1);
+        assert!(message.contains("Membership required"));
+        assert!(!message.contains("example.test"));
+        assert!(!message.contains("fixture-secret"));
+
+        let http = kuwo_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(http.details["http_status"], 503);
+        assert!(http.retryable);
     }
 
     #[test]
