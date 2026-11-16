@@ -17078,6 +17078,15 @@ fn qq_track_numeric_id(track: &Track) -> Result<u64> {
         .ok_or_else(|| qq_data_error("QQ track detail is missing a positive numeric song ID"))
 }
 
+// Playlist mutations use a different enumeration than track detail and playback.
+fn qq_playlist_wire_song_type(song_type: i64) -> i64 {
+    match song_type {
+        0 | 1 => 0,
+        5 | 111 | 112 | 113 => song_type,
+        _ => 1,
+    }
+}
+
 fn qq_track_subscription_request(track: QqPlaylistWriteTrack, subscribed: bool) -> QqApiRequest {
     let request = QqApiRequest::new(
         "music.musicasset.PlaylistDetailWrite",
@@ -17092,7 +17101,7 @@ fn qq_track_subscription_request(track: QqPlaylistWriteTrack, subscribed: bool) 
             "bFmtUtf8": true,
             "v_songInfo": [{
                 "songId": track.song_id,
-                "songType": track.song_type
+                "songType": qq_playlist_wire_song_type(track.song_type)
             }]
         }),
     );
@@ -17294,7 +17303,7 @@ fn qq_playlist_items_mutation_request(
                 .iter()
                 .map(|track| json!({
                     "songId": track.song_id,
-                    "songType": track.song_type
+                    "songType": qq_playlist_wire_song_type(track.song_type)
                 }))
                 .collect::<Vec<_>>()
         }),
@@ -26094,6 +26103,48 @@ mod tests {
                 .code,
                 ErrorCode::UpstreamError
             );
+        }
+    }
+
+    #[test]
+    fn playlist_writes_use_wire_types_without_changing_track_identity() {
+        let locator = QqPlaylistLocator {
+            playlist_id: 8,
+            directory_id: 2,
+        };
+        for (read, wire) in [
+            (0, 0),
+            (1, 0),
+            (5, 5),
+            (111, 111),
+            (112, 112),
+            (113, 113),
+            (7, 1),
+        ] {
+            let mut track = Track::new(
+                ResourceRef::new(Platform::Qq, "0039MnYb0qxYhV").unwrap(),
+                "晴天",
+            );
+            track.extensions.insert("numeric_id".into(), json!(97_773));
+            track.extensions.insert("song_type".into(), json!(read));
+            let identity = qq_playlist_write_track(&track).unwrap();
+            assert_eq!(identity.song_type, read);
+            let expected = json!([{"songId": 97_773, "songType": wire}]);
+            for subscribed in [true, false] {
+                assert_eq!(
+                    qq_track_subscription_request(identity, subscribed).param["v_songInfo"],
+                    expected
+                );
+            }
+            for action in [
+                PlaylistItemMutationAction::Add,
+                PlaylistItemMutationAction::Remove,
+            ] {
+                assert_eq!(
+                    qq_playlist_items_mutation_request(locator, &[identity], action).param["v_songInfo"],
+                    expected
+                );
+            }
         }
     }
 
