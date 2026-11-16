@@ -194,7 +194,7 @@ fn decrypt_cenc_audio_internal(
         ));
     }
 
-    let sample_sizes = parse_sample_sizes(media, stsz)?;
+    let sample_sizes = parse_sample_sizes(media, stsz, media_payload_bytes(&media_payloads))?;
     let sample_count = sample_sizes.len();
     let sample_to_chunk = parse_sample_to_chunk(media, stsc)?;
     let chunk_offsets = match (stco, co64) {
@@ -615,7 +615,12 @@ fn parse_tenc(media: &[u8], header: BoxHeader) -> Result<(usize, [u8; 16])> {
     ))
 }
 
-fn parse_sample_sizes(media: &[u8], header: BoxHeader) -> Result<Vec<u32>> {
+fn media_payload_bytes(payloads: &[std::ops::Range<usize>]) -> usize {
+    // Top-level boxes cannot overlap, so their total fits in the input length.
+    payloads.iter().map(|payload| payload.len()).sum()
+}
+
+fn parse_sample_sizes(media: &[u8], header: BoxHeader, payload_bytes: usize) -> Result<Vec<u32>> {
     let data = payload(media, header)?;
     if data.len() < 12 {
         return Err(media_error("Soda media contains a truncated stsz box"));
@@ -638,6 +643,11 @@ fn parse_sample_sizes(media: &[u8], header: BoxHeader) -> Result<Vec<u32>> {
     };
     if data.len() != expected {
         return Err(media_error("Soda media stsz table length is inconsistent"));
+    }
+    // Every sample is nonempty and must fit in the combined mdat payload.
+    let min_size = usize::try_from(fixed_size.max(1)).unwrap_or(usize::MAX);
+    if count > payload_bytes / min_size {
+        return Err(media_error("Soda media sample table exceeds mdat payload"));
     }
     if fixed_size != 0 {
         return Ok(vec![fixed_size; count]);
@@ -751,9 +761,16 @@ fn parse_sample_encryption(
         ));
     }
     let has_subsamples = flags & 0x02 != 0;
+    let minimum_entry_bytes = iv_size + if has_subsamples { 2 } else { 0 };
+    let entry_bytes = data.len() - 8;
+    if count > entry_bytes / minimum_entry_bytes
+        || (!has_subsamples && entry_bytes != count * minimum_entry_bytes)
+    {
+        return Err(media_error("Soda media senc table length is inconsistent"));
+    }
     let mut cursor = 8_usize;
     let mut samples = Vec::with_capacity(count);
-    for _ in 0..count {
+    for index in 0..count {
         let iv_end = cursor
             .checked_add(iv_size)
             .filter(|end| *end <= data.len())
@@ -774,6 +791,15 @@ fn parse_sample_encryption(
             if subsample_count > MAX_SUBSAMPLES_PER_SAMPLE {
                 return Err(media_error(
                     "Soda media contains too many encrypted subsamples",
+                ));
+            }
+            let remaining_entries = (count - index - 1) * minimum_entry_bytes;
+            if !(data.len() - cursor)
+                .checked_sub(remaining_entries)
+                .is_some_and(|bytes| subsample_count <= bytes / 6)
+            {
+                return Err(media_error(
+                    "Soda media contains a truncated subsample entry",
                 ));
             }
             subsamples.reserve(subsample_count);
@@ -1172,6 +1198,35 @@ mod tests {
                 .expect_err("count mismatch must fail");
         assert_eq!(error.code, ErrorCode::UpstreamError);
         assert!(!error.message.contains(TEST_KEY_HEX));
+    }
+
+    #[test]
+    fn sample_tables_require_payload_bytes_before_allocating() {
+        let mut sizes = vec![0; 4];
+        sizes.extend_from_slice(&4_u32.to_be_bytes());
+        sizes.extend_from_slice(&3_u32.to_be_bytes());
+        let sizes = make_box(*b"stsz", &sizes);
+        let header = parse_boxes(&sizes, 0, sizes.len()).unwrap()[0];
+        assert_eq!(parse_sample_sizes(&sizes, header, 12).unwrap(), [4; 3]);
+        assert!(
+            parse_sample_sizes(&sizes, header, 11)
+                .unwrap_err()
+                .message
+                .contains("exceeds mdat payload")
+        );
+
+        let mut encryption = vec![0; 4];
+        encryption.extend_from_slice(&u32::try_from(MAX_SAMPLE_COUNT).unwrap().to_be_bytes());
+        encryption.extend_from_slice(&[0; 8]);
+        let encryption = make_box(*b"senc", &encryption);
+        let header = parse_boxes(&encryption, 0, encryption.len()).unwrap()[0];
+        assert!(
+            parse_sample_encryption(&encryption, header, 8, MAX_SAMPLE_COUNT)
+                .err()
+                .expect("senc cannot contain the declared entries")
+                .message
+                .contains("senc table length")
+        );
     }
 
     #[test]

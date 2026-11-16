@@ -187,7 +187,12 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
     {
         return Err(invalid());
     }
-    let sizes = parse_sample_sizes(bytes, stsz)?;
+    let payloads = top
+        .iter()
+        .filter(|b| b.kind == *b"mdat")
+        .map(|b| b.payload_start()..b.end())
+        .collect::<Vec<_>>();
+    let sizes = parse_sample_sizes(bytes, stsz, media_payload_bytes(&payloads))?;
     groups::validate(bytes, &table, sizes.len())?;
     let mappings = parse_sample_to_chunk(bytes, stsc)?;
     let offsets = match (
@@ -214,11 +219,6 @@ fn iso_audio(bytes: &[u8], format: SodaAudioFormat) -> Result<usize> {
         }
         _ => return Err(invalid()),
     };
-    let payloads = top
-        .iter()
-        .filter(|b| b.kind == *b"mdat")
-        .map(|b| b.payload_start()..b.end())
-        .collect::<Vec<_>>();
     let ranges = map_sample_ranges(&sizes, &mappings, &offsets, 1, &payloads)?;
     validate_timing(
         bytes,
