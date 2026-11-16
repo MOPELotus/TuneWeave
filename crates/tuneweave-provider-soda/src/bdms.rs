@@ -379,7 +379,7 @@ fn map_native_response(response: SignerResponse) -> Result<HeaderMap> {
     let mut output = HeaderMap::new();
     for (name, value) in response.headers {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| signer_runtime_error())?;
-        if !matches!(name.as_str(), "x-helios" | "x-medusa") {
+        if !matches!(name.as_str(), "x-helios" | "x-medusa") || value.trim().is_empty() {
             return Err(signer_runtime_error());
         }
         let value = HeaderValue::from_str(&value).map_err(|_| signer_runtime_error())?;
@@ -402,8 +402,28 @@ fn map_passport_response(response: SignerResponse, original: &str) -> Result<Url
     let original = Url::parse(original).map_err(|_| signer_runtime_error())?;
     if signed.origin() != original.origin()
         || signed.path() != original.path()
-        || !signed.query_pairs().any(|(name, _)| name == "a_bogus")
+        || !signed.username().is_empty()
+        || signed.password().is_some()
+        || signed.fragment().is_some()
     {
+        return Err(signer_runtime_error());
+    }
+    // The Passport SDK adds its signature; it does not rewrite the operation's
+    // query parameters. Compare decoded pairs to allow URL serialization changes
+    // while preserving values, order, and repeated keys.
+    let mut original_pairs = original.query_pairs();
+    let mut has_signature = false;
+    for (name, value) in signed.query_pairs() {
+        if name == "a_bogus" {
+            if has_signature || value.trim().is_empty() {
+                return Err(signer_runtime_error());
+            }
+            has_signature = true;
+        } else if original_pairs.next() != Some((name, value)) {
+            return Err(signer_runtime_error());
+        }
+    }
+    if !has_signature || original_pairs.next().is_some() {
         return Err(signer_runtime_error());
     }
     Ok(signed)
@@ -574,6 +594,57 @@ mod tests {
         ] {
             assert!(validate_remote_endpoint(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn native_signer_rejects_empty_signatures() {
+        for headers in [
+            [("x-helios", ""), ("x-medusa", "signed-m")],
+            [("x-helios", "signed-h"), ("x-medusa", " \t")],
+        ] {
+            let response = SignerResponse {
+                ok: true,
+                headers: headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+                url: None,
+            };
+            assert!(map_native_response(response).is_err());
+        }
+    }
+
+    #[test]
+    fn passport_signer_can_only_add_one_nonempty_signature() {
+        let base = "https://api.qishui.com/passport/web/check_qrconnect/";
+        let original = format!("{base}?aid=386088&x=with%20space&x=plus%2B&empty=");
+        let map = |url: String| {
+            map_passport_response(
+                SignerResponse {
+                    ok: true,
+                    headers: Default::default(),
+                    url: Some(url),
+                },
+                &original,
+            )
+        };
+        let pairs = "aid=386088&x=with+space&x=plus%2B&empty=";
+        assert!(map(format!("{base}?{pairs}&a_bogus=signed")).is_ok());
+        for query in [
+            pairs.to_owned(),
+            format!("{pairs}&a_bogus="),
+            format!("{pairs}&a_bogus=%20%09"),
+            format!("{pairs}&a_bogus=signed&a%5Fbogus=second"),
+            format!("{pairs}&a_bogus=signed&added=1"),
+            format!("{pairs}&a_bogus=signed#fragment"),
+            "aid=changed&x=with+space&x=plus%2B&empty=&a_bogus=signed".into(),
+            "aid=386088&x=with+space&empty=&a_bogus=signed".into(),
+            "aid=386088&x=plus%2B&x=with+space&empty=&a_bogus=signed".into(),
+        ] {
+            assert!(map(format!("{base}?{query}")).is_err(), "{query}");
+        }
+        let with_userinfo = base.replacen("://", "://user:pass@", 1);
+        assert!(map(format!("{with_userinfo}?{pairs}&a_bogus=signed")).is_err());
     }
 
     #[tokio::test]
