@@ -39,6 +39,8 @@ future ports can be audited precisely.
 - Additional reviewed commit: `27861e51432ea6b6e88dc35c4e8c8e239c0339e8`
   (Android profile/QIMEI/GetSession, artist filters, and read-only sound-power
   endpoint facts; independently validated against official services).
+- Additional reviewed commit: `c046788dd1f11daacc74da487cbbf1bcd8ac6f33`
+  (playlist write type mapping and complete-order request behavior).
 - License: GNU General Public License v3.0 or later
 - Used for: QQ Music CGI request, authentication, catalog, playlist, lyric,
   media MID, file naming, VKey, and CDN behavior research.
@@ -93,6 +95,8 @@ under TuneWeave's architecture.
 
 - Source: https://github.com/sodahub-org/libresoda
 - Reviewed commit: `719a6f4e993f72e49d8514b2b2a4c1153c5e5719`
+- Additional reviewed commit: `32fe0f9a95a51bcdf1c35576ecaf8aa5a786039b`
+  (media sample allocation and signer response validation research).
 - License: GNU Affero General Public License v3.0
 - Used for: identifying official Soda recent-playback and music-wall endpoint
   contracts, independently tested against official services.
