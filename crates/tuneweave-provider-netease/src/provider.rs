@@ -28587,7 +28587,7 @@ mod tests {
                 .unwrap()
                 .contains("private-download")
         );
-        assert!(unavailable.extensions.get("response").is_none());
+        assert!(!unavailable.extensions.contains_key("response"));
         assert_eq!(unavailable.extensions["requested_level"], "sky");
     }
 
@@ -28729,7 +28729,7 @@ mod tests {
             batch.outcomes[1].extensions["details"]["upstream_code"],
             200
         );
-        assert!(batch.outcomes[1].extensions.get("response_item").is_none());
+        assert!(!batch.outcomes[1].extensions.contains_key("response_item"));
         assert_eq!(
             batch.extensions["response"]["data"][0],
             json!({"id":456,"code":200})
