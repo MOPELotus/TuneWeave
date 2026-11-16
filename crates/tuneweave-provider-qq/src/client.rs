@@ -211,6 +211,8 @@ pub(crate) struct QqBusinessResponse {
 #[derive(Clone)]
 pub struct QqClient {
     http: Client,
+    #[cfg(test)]
+    test_api_endpoint: Option<String>,
     login_http: Client,
     proxy_configured: bool,
     device: Arc<Mutex<DeviceStore>>,
@@ -261,6 +263,8 @@ impl QqClient {
         let device = DeviceStore::open(config.device_path)?;
         Ok(Self {
             http,
+            #[cfg(test)]
+            test_api_endpoint: None,
             login_http,
             proxy_configured: proxy_url.is_some(),
             device: Arc::new(Mutex::new(device)),
@@ -463,7 +467,20 @@ impl QqClient {
         comm_fields: &[(&str, Value)],
         credential: Option<&QqCredential>,
     ) -> Result<QqBusinessResponse> {
+        self.request_android_business_checked(request, comm_fields, credential, || Ok(()))
+            .await
+    }
+
+    // Check account state after Android preparation, immediately before the one-shot CGI call.
+    pub(crate) async fn request_android_business_checked(
+        &self,
+        request: QqApiRequest,
+        comm_fields: &[(&str, Value)],
+        credential: Option<&QqCredential>,
+        before_send: impl FnOnce() -> Result<()> + Send,
+    ) -> Result<QqBusinessResponse> {
         self.ensure_android_session().await?;
+        before_send()?;
         let response = self
             .post_android_with_comm_fields_allowing_business_errors(
                 &request,
@@ -481,6 +498,26 @@ impl QqClient {
             data: response.data,
             raw: response.raw,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_test_api_endpoint(&mut self, endpoint: String) -> Result<()> {
+        let now = unix_seconds_now()?;
+        self.http = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("build loopback QQ client");
+        self.test_api_endpoint = Some(endpoint);
+        let mut device = self.lock_device()?;
+        let device = device.device_mut();
+        device.qimei = Some("test-q16".to_owned());
+        device.qimei36 = Some("test-q36".to_owned());
+        device.qimei_saved_at = Some(now);
+        device.session_uid = Some("test-uid".to_owned());
+        device.session_sid = Some("test-sid".to_owned());
+        device.session_saved_at = Some(now);
+        Ok(())
     }
 
     async fn post_android_with_comm_fields(
@@ -832,7 +869,10 @@ impl QqClient {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body)
         } else {
-            self.http.post(API_ENDPOINT).json(&payload)
+            let endpoint = API_ENDPOINT;
+            #[cfg(test)]
+            let endpoint = self.test_api_endpoint.as_deref().unwrap_or(endpoint);
+            self.http.post(endpoint).json(&payload)
         };
         if let Some(user_agent) = user_agent {
             request = request.header(reqwest::header::USER_AGENT, user_agent);

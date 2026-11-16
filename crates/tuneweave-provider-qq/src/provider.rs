@@ -1,5 +1,7 @@
 #[path = "artist_filters.rs"]
 mod artist_filters;
+#[path = "playlist_order.rs"]
+mod playlist_order;
 #[path = "sound_power.rs"]
 mod sound_power;
 use std::{
@@ -6049,6 +6051,14 @@ impl MusicProvider for QqProvider {
             )
             .await?;
         map_qq_playlist_items_mutation(id, action, request, locator, write_tracks, response)
+    }
+
+    async fn reorder_playlist_tracks(
+        &self,
+        id: &str,
+        request: &tuneweave_core::PlaylistTrackOrderRequest,
+    ) -> Result<tuneweave_core::PlaylistTrackOrderResult> {
+        self.reorder_owned_playlist_tracks(id, request).await
     }
 
     async fn playlist_source(
