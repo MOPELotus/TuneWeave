@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "route_count": 307,
+  "route_count": 310,
   "routes": [
     {
       "method": "GET",
@@ -288,6 +288,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/account/podcasts/collected-feed"
+    },
+    {
+      "method": "GET",
       "path": "/v1/account/podcasts/created"
     },
     {
@@ -309,6 +313,10 @@
     {
       "method": "GET",
       "path": "/v1/account/purchases/tracks"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/account/recommendation-dislikes"
     },
     {
       "method": "GET",
@@ -769,6 +777,10 @@
     {
       "method": "GET",
       "path": "/v1/podcasts/category-recommendations"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/podcasts/category-tree"
     },
     {
       "method": "GET",
