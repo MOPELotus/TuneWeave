@@ -4001,7 +4001,13 @@ fn parse_search_suggestion_response(bytes: &[u8]) -> Result<BilibiliSearchSugges
         return Err(platform_business_error(
             "Bilibili search suggestion",
             response.code,
-            "",
+            response
+                .extra
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.trim().is_empty())
+                .or_else(|| response.extra.get("msg").and_then(Value::as_str))
+                .unwrap_or_default(),
         ));
     }
     let (items, result_extensions) = response
@@ -4307,11 +4313,8 @@ fn parse_video_search_response(
     bytes: &[u8],
     requested_page: u32,
 ) -> Result<BilibiliVideoSearchPage> {
-    let response: PassportResponse<VideoSearchPayload> =
-        serde_json::from_slice(bytes).map_err(|error| {
-            bilibili_upstream_error("Bilibili video search returned invalid JSON")
-                .with_source(&error)
-        })?;
+    let response: PassportResponse<VideoSearchPayload> = serde_json::from_slice(bytes)
+        .map_err(|error| business_or_json_error(bytes, "Bilibili video search", &error))?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili video search",
@@ -4399,11 +4402,8 @@ fn parse_video_view_response(
     bytes: &[u8],
     requested_identity: &crate::BilibiliVideoIdentity,
 ) -> Result<BilibiliVideoView> {
-    let response: PassportResponse<VideoViewData> =
-        serde_json::from_slice(bytes).map_err(|error| {
-            bilibili_upstream_error("Bilibili video detail returned invalid JSON")
-                .with_source(&error)
-        })?;
+    let response: PassportResponse<VideoViewData> = serde_json::from_slice(bytes)
+        .map_err(|error| business_or_json_error(bytes, "Bilibili video detail", &error))?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili video detail",
@@ -4752,11 +4752,8 @@ fn parse_playback_manifest(
     requested_bvid: &str,
     requested_cid: u64,
 ) -> Result<BilibiliPlaybackManifest> {
-    let response: PassportResponse<PlaybackData> =
-        serde_json::from_slice(bytes).map_err(|error| {
-            bilibili_upstream_error("Bilibili playback manifest returned invalid JSON")
-                .with_source(&error)
-        })?;
+    let response: PassportResponse<PlaybackData> = serde_json::from_slice(bytes)
+        .map_err(|error| business_or_json_error(bytes, "Bilibili playback manifest", &error))?;
     if response.code != 0 {
         return Err(platform_business_error(
             "Bilibili playback manifest",
@@ -6973,17 +6970,12 @@ fn parse_qr_generate_response(bytes: &[u8]) -> Result<BilibiliQrStart> {
                 .with_source(&error)
         })?;
     if response.code != 0 {
-        let message = response.message.trim();
-        return Err(TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            if message.is_empty() {
-                format!("Bilibili QR creation failed with code {}", response.code)
-            } else {
-                format!("Bilibili QR creation failed: {message}")
-            },
-        )
-        .with_platform(Platform::Bilibili)
-        .with_details(json!({ "platform_code": response.code })));
+        return Err(bilibili_upstream_error(format!(
+            "Bilibili QR creation failed with code {}",
+            response.code
+        ))
+        .with_details(json!({ "platform_code": response.code }))
+        .with_upstream_message(&response.message));
     }
     let data = response
         .data
@@ -7026,14 +7018,17 @@ fn parse_qr_poll_response(bytes: &[u8], headers: &HeaderMap) -> Result<BilibiliQ
                 timestamp_ms: data.timestamp.filter(|timestamp| *timestamp > 0),
             })
         }
-        code => Ok(BilibiliQrPoll::Failed {
-            code,
-            message: if data.message.trim().is_empty() {
-                format!("Bilibili QR login failed with code {code}")
-            } else {
-                data.message
-            },
-        }),
+        code => {
+            let message = tuneweave_core::redact_upstream_message(&data.message);
+            Ok(BilibiliQrPoll::Failed {
+                code,
+                message: if message.is_empty() {
+                    format!("Bilibili QR login failed with code {code}")
+                } else {
+                    message
+                },
+            })
+        }
     }
 }
 
@@ -7346,6 +7341,7 @@ fn bilibili_http_error(context: &str, status: StatusCode) -> TuneWeaveError {
                     StatusCode::PRECONDITION_FAILED | StatusCode::TOO_MANY_REQUESTS
                 ),
         )
+        .with_details(json!({ "http_status": status.as_u16() }))
 }
 
 async fn log_http_failure_response(response: &mut reqwest::Response, endpoint: &'static str) {
@@ -7447,15 +7443,26 @@ fn platform_business_error(context: &str, code: i64, message: &str) -> TuneWeave
         -352 | -412 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
-    let message = if message.trim().is_empty() {
-        format!("{context} failed with code {code}")
-    } else {
-        format!("{context} failed: {message}")
-    };
-    TuneWeaveError::new(error_code, message)
+    TuneWeaveError::new(error_code, format!("{context} failed with code {code}"))
         .with_platform(Platform::Bilibili)
         .retryable(matches!(code, -352 | -412))
         .with_details(json!({ "platform_code": code }))
+        .with_upstream_message(message)
+}
+
+fn business_or_json_error(
+    bytes: &[u8],
+    context: &str,
+    cause: &serde_json::Error,
+) -> TuneWeaveError {
+    // Some failures return a different data shape. Don't let success DTO
+    // decoding hide an explicit rejection from an otherwise valid envelope.
+    if let Ok(response) = serde_json::from_slice::<PassportResponse<serde::de::IgnoredAny>>(bytes)
+        && response.code != 0
+    {
+        return platform_business_error(context, response.code, &response.message);
+    }
+    bilibili_upstream_error(format!("{context} returned invalid JSON")).with_json_source(cause)
 }
 
 fn bilibili_upstream_error(message: impl Into<String>) -> TuneWeaveError {
@@ -8517,6 +8524,7 @@ mod tests {
         .expect_err("blocked search");
         assert_eq!(blocked.code, ErrorCode::RateLimited);
         assert!(blocked.retryable);
+        assert_eq!(blocked.details["upstream_message"], "request blocked");
         assert!(is_video_search_risk_challenge(&blocked));
         let blocked_http =
             bilibili_http_error("Bilibili video search", StatusCode::PRECONDITION_FAILED);
@@ -8541,6 +8549,27 @@ mod tests {
         )
         .expect_err("changed page size");
         assert_eq!(malformed.code, ErrorCode::UpstreamError);
+    }
+
+    #[test]
+    fn business_rejections_preserve_codes_and_sanitized_text_before_playback_shape() {
+        let rejected = r#"{"code":-403,"message":"播放受限 https://cdn.example/link?token=very-private","data":{"reason":"not a manifest"}}"#.as_bytes();
+        let error = parse_playback_manifest(rejected, 1, "BV1xx411c7mD", 2)
+            .expect_err("upstream playback rejection");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(!error.retryable);
+        assert_eq!(error.details["platform_code"], -403);
+        assert!(error.message.contains("播放受限"));
+        assert!(error.message.contains("-403"));
+        assert!(!format!("{error:?}").contains("very-private"));
+        assert!(!format!("{error:?}").contains("not a manifest"));
+
+        let suggestion =
+            parse_search_suggestion_response(br#"{"code":-400,"message":"invalid keyword"}"#)
+                .expect_err("upstream suggestion rejection");
+        assert_eq!(suggestion.code, ErrorCode::InvalidRequest);
+        assert_eq!(suggestion.details["platform_code"], -400);
+        assert_eq!(suggestion.details["upstream_message"], "invalid keyword");
     }
 
     #[test]
