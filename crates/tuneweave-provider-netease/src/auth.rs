@@ -371,13 +371,15 @@ fn login_result(
     let code = response_code(&response.body)
         .ok_or_else(|| upstream_error(operation, "response did not contain a status code"))?;
     if code != 200 {
-        return Err(TuneWeaveError::new(
-            ErrorCode::AuthenticationRequired,
-            response_message(&response.body)
-                .unwrap_or_else(|| format!("NetEase {operation} failed")),
-        )
-        .with_platform(Platform::Netease)
-        .with_details(json!({ "code": code })));
+        return Err(crate::client::with_response_message(
+            TuneWeaveError::new(
+                ErrorCode::AuthenticationRequired,
+                format!("NetEase {operation} failed"),
+            )
+            .with_platform(Platform::Netease)
+            .with_details(json!({ "code": code, "upstream_code": code })),
+            &response.body,
+        ));
     }
     let session_cookie = merge_cookie_headers(client.configured_cookie(), &response.cookies)
         .filter(|cookie| has_authenticated_cookie(Some(cookie.as_str())))
@@ -411,9 +413,10 @@ fn session_status_from_body(body: &Value) -> Result<NeteaseSessionStatus> {
         upstream_error("session status", "response did not contain a status code")
     })?;
     if code != 200 && code != 301 {
-        return Err(upstream_error(
-            "session status",
-            &format!("failed with code {code}"),
+        return Err(crate::client::with_response_message(
+            upstream_error("session status", &format!("failed with code {code}"))
+                .with_details(json!({ "code": code, "upstream_code": code })),
+            body,
         ));
     }
     let account = map_account(body);
@@ -760,7 +763,7 @@ mod tests {
             &client,
             NeteaseResponse {
                 status: StatusCode::OK,
-                body: json!({ "code": 502, "message": "账号或密码错误" }),
+                body: json!({ "code": 502, "message": "账号或密码错误 password=private-password" }),
                 cookies: Vec::new(),
             },
             "test login",
@@ -768,6 +771,9 @@ mod tests {
         .expect_err("wrong credentials");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
         assert_eq!(error.details["code"], 502);
+        assert_eq!(error.details["upstream_code"], 502);
+        assert!(error.message.contains("账号或密码错误"));
+        assert!(!format!("{error:?}").contains("private-password"));
     }
 
     #[test]

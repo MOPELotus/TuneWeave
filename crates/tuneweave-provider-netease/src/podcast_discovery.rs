@@ -105,13 +105,7 @@ impl NeteaseProvider {
 }
 
 fn check_success(body: &Value, operation: &str) -> Result<()> {
-    ensure_success(body).map_err(|error| {
-        TuneWeaveError::new(error.code, format!("NetEase {operation} request failed"))
-            .with_platform(Platform::Netease)
-            .retryable(error.retryable)
-            .with_details(error.details)
-            .with_upstream_message(&error.message)
-    })
+    ensure_success_for(body, &format!("NetEase {operation} request failed"))
 }
 
 fn malformed(operation: &str, field: &str) -> TuneWeaveError {

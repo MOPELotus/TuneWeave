@@ -51,18 +51,25 @@ async fn fetch(provider: &NeteaseProvider, request: &PageRequest, kind: Kind) ->
     let response = client
         .request_weapi(kind.path(), payload)
         .await
-        .map_err(public_error)?;
-    ensure_account_access(&client, &response.body, "recent history").map_err(public_error)?;
+        .map_err(public_transport_error)?;
     Ok(response.body)
 }
 
-// Upstream text and arbitrary response fields are never returned as error diagnostics.
-fn public_error(error: TuneWeaveError) -> TuneWeaveError {
+fn public_transport_error(error: TuneWeaveError) -> TuneWeaveError {
     let mut clean = TuneWeaveError::new(error.code, "NetEase recent history request failed")
         .with_platform(Platform::Netease)
         .retryable(error.retryable);
-    if let Some(code) = error.details.get("upstream_code").and_then(Value::as_i64) {
-        clean.details = json!({ "upstream_code": code });
+    if let Some(message) = error
+        .details
+        .get("upstream_message")
+        .and_then(Value::as_str)
+    {
+        clean = clean.with_upstream_message(message);
+    }
+    for key in ["status", "upstream_code", "upstream_http_status"] {
+        if let Some(value) = error.details.get(key).and_then(Value::as_i64) {
+            clean.details[key] = json!(value);
+        }
     }
     clean
 }
@@ -81,7 +88,7 @@ fn map_page<T>(
     map: impl Fn(Value) -> Result<T>,
 ) -> Result<Page<T>> {
     request_payload(request)?;
-    ensure_success(&body).map_err(public_error)?;
+    ensure_success_for(&body, "NetEase recent history request failed")?;
     let data = body
         .get("data")
         .filter(|v| v.is_object())
@@ -483,14 +490,20 @@ mod tests {
             (500, ErrorCode::UpstreamError),
         ] {
             let error = map_page(
-                json!({"code":code,"message":"private-marker"}),
+                json!({"code":code,"message":"历史记录读取失败 cookie=private-marker"}),
                 &PageRequest::new(1, 0),
                 track,
             )
             .unwrap_err();
             assert_eq!(error.code, expected);
             assert!(!error.to_string().contains("private-marker"));
-            assert_eq!(error.details, json!({"upstream_code":code}));
+            assert_eq!(error.details["upstream_code"], code);
+            assert!(
+                error.details["upstream_message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("历史记录读取失败")
+            );
         }
     }
 
@@ -632,12 +645,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_history_upstream_failures_and_bad_json_do_not_expose_response_text() {
+    async fn recent_history_exposes_only_redacted_business_text_from_failed_responses() {
         let responses = vec![
-            Some(r#"{"code":301,"message":"private-marker"}"#),
-            Some(r#"{"code":403,"message":"private-marker"}"#),
-            Some(r#"{"code":429,"message":"private-marker"}"#),
-            Some(r#"{"code":500,"message":"private-marker"}"#),
+            Some(r#"{"code":301,"message":"历史记录读取失败 cookie=private-marker"}"#),
+            Some(r#"{"code":403,"message":"历史记录读取失败 cookie=private-marker"}"#),
+            Some(r#"{"code":429,"message":"历史记录读取失败 cookie=private-marker"}"#),
+            Some(r#"{"code":500,"message":"历史记录读取失败 cookie=private-marker"}"#),
             Some("private-marker-invalid-json"),
         ];
         let (url, server) = mock_history(responses);
@@ -647,18 +660,19 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        for code in [
-            ErrorCode::AuthenticationRequired,
-            ErrorCode::PermissionDenied,
-            ErrorCode::RateLimited,
-            ErrorCode::UpstreamError,
-            ErrorCode::UpstreamError,
+        for (code, native_message) in [
+            (ErrorCode::AuthenticationRequired, true),
+            (ErrorCode::PermissionDenied, true),
+            (ErrorCode::RateLimited, true),
+            (ErrorCode::UpstreamError, true),
+            (ErrorCode::UpstreamError, false),
         ] {
             let error = tracks(&provider, &PageRequest::new(1, 0))
                 .await
                 .unwrap_err();
             assert_eq!(error.code, code);
             assert!(!format!("{error:?}").contains("private-marker"));
+            assert_eq!(error.message.contains("历史记录读取失败"), native_message);
         }
         server.join().unwrap();
     }

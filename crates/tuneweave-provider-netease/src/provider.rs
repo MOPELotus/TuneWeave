@@ -3330,13 +3330,12 @@ impl MusicProvider for NeteaseProvider {
     async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
         let client = self.client_for(request.account.as_deref())?;
         let batch = request_netease_streams(&client, std::slice::from_ref(track), request).await?;
-        let outcome = batch.outcomes.into_iter().next().ok_or_else(|| {
+        let mut outcome = batch.outcomes.into_iter().next().ok_or_else(|| {
             TuneWeaveError::new(
                 ErrorCode::UpstreamError,
                 "NetEase returned an empty stream batch",
             )
             .with_platform(Platform::Netease)
-            .with_details(json!(batch.extensions))
         })?;
         if let Some(stream) = outcome.stream {
             return Ok(stream);
@@ -3348,7 +3347,12 @@ impl MusicProvider for NeteaseProvider {
                 .unwrap_or_else(|| "NetEase did not return a playable stream".to_owned()),
         )
         .with_platform(Platform::Netease)
-        .with_details(json!(outcome.extensions)))
+        .with_details(
+            outcome
+                .extensions
+                .remove("details")
+                .unwrap_or_else(|| json!({})),
+        ))
     }
 
     async fn streams(&self, tracks: &[Track], request: &StreamRequest) -> Result<StreamBatch> {
@@ -10806,12 +10810,15 @@ fn map_image_upload_result(
 fn ensure_account_access(client: &NeteaseClient, body: &Value, operation: &str) -> Result<()> {
     match ensure_success(body) {
         Err(error) if error.code == ErrorCode::PermissionDenied && !client.is_authenticated() => {
-            Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                format!("NetEase {operation} requires a logged-in session"),
-            )
-            .with_platform(Platform::Netease)
-            .with_details(error.details))
+            Err(crate::client::with_response_message(
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    format!("NetEase {operation} requires a logged-in session"),
+                )
+                .with_platform(Platform::Netease)
+                .with_details(error.details),
+                body,
+            ))
         }
         result => result,
     }
@@ -10823,12 +10830,15 @@ fn ensure_listening_rights_gain_access(client: &NeteaseClient, body: &Value) -> 
             if !client.is_authenticated()
                 && error.details.get("upstream_code").and_then(json_i64) == Some(2001) =>
         {
-            Err(TuneWeaveError::new(
-                ErrorCode::AuthenticationRequired,
-                "NetEase listening-rights gain requires a logged-in session",
-            )
-            .with_platform(Platform::Netease)
-            .with_details(error.details))
+            Err(crate::client::with_response_message(
+                TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "NetEase listening-rights gain requires a logged-in session",
+                )
+                .with_platform(Platform::Netease)
+                .with_details(error.details),
+                body,
+            ))
         }
         result => result,
     }
@@ -11862,7 +11872,7 @@ fn map_netease_stream_batch(
         .iter()
         .map(validate_netease_stream_track)
         .collect::<Result<Vec<_>>>()?;
-    let raw_response = response.clone();
+    let mut raw_response = response.clone();
     let raw_items = response
         .get("data")
         .and_then(Value::as_array)
@@ -11873,10 +11883,9 @@ fn map_netease_stream_batch(
                 "NetEase stream response is missing its data array",
             )
             .with_platform(Platform::Netease)
-            .with_details(json!({ "response": response }))
         })?;
     let envelope: StreamEnvelope = parse_body(response)?;
-    let outcomes = tracks
+    let outcomes: Vec<_> = tracks
         .iter()
         .zip(ids)
         .map(|(track, id)| {
@@ -11893,7 +11902,6 @@ fn map_netease_stream_batch(
                     )
                     .with_platform(Platform::Netease)
                     .with_details(json!({ "id": id })),
-                    raw,
                 );
             };
             match map_stream(track, request, stream, authenticated) {
@@ -11907,10 +11915,33 @@ fn map_netease_stream_batch(
                         .map(|raw| Extensions::from([("response_item".to_owned(), raw)]))
                         .unwrap_or_default(),
                 },
-                Err(error) => stream_outcome_error(track, error, raw),
+                Err(error) => {
+                    let error = if let Some(raw) = &raw {
+                        crate::client::with_response_message(error, raw)
+                    } else {
+                        error
+                    };
+                    stream_outcome_error(track, error)
+                }
             }
         })
         .collect();
+    // Keep the existing response metadata for playable rows; rejected rows
+    // already carry a separate sanitized diagnosis and must not echo their body.
+    let failed_ids: BTreeSet<_> = outcomes
+        .iter()
+        .filter(|outcome| outcome.error_code.is_some())
+        .filter_map(|outcome| outcome.track_ref.id().parse::<u64>().ok())
+        .collect();
+    if let Some(rows) = raw_response["data"].as_array_mut() {
+        for row in rows {
+            if let Some(id) = row.get("id").and_then(json_u64)
+                && failed_ids.contains(&id)
+            {
+                *row = json!({"id": id, "code": row.get("code").and_then(json_i64)});
+            }
+        }
+    }
     let mut extensions = Extensions::from([
         ("variant".to_owned(), json!(variant)),
         ("request_path".to_owned(), json!(path)),
@@ -12076,7 +12107,6 @@ fn map_netease_download(
             "NetEase download response is missing data",
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({ "response": response.clone() }))
     })?;
     let item = if let Some(items) = data.as_array() {
         items
@@ -12089,7 +12119,7 @@ fn map_netease_download(
                     "NetEase omitted a requested download result",
                 )
                 .with_platform(Platform::Netease)
-                .with_details(json!({ "id": id, "response": raw_response }))
+                .with_details(json!({ "id": id }))
             })?
     } else {
         data.clone()
@@ -12121,12 +12151,22 @@ fn map_netease_download(
         },
     );
     let actual_quality = stream_quality(download.level.as_deref(), download.br);
+    let message = crate::client::with_response_message(
+        TuneWeaveError::new(ErrorCode::UpstreamError, ""),
+        &item,
+    )
+    .details
+    .get("upstream_message")
+    .and_then(Value::as_str)
+    .map(str::to_owned);
     let mut extensions = Extensions::from([
         ("variant".to_owned(), json!(variant)),
         ("request_path".to_owned(), json!(path)),
-        ("response_item".to_owned(), item),
-        ("response".to_owned(), raw_response),
     ]);
+    if url.is_some() {
+        extensions.insert("response_item".to_owned(), item);
+        extensions.insert("response".to_owned(), raw_response);
+    }
     if let Some(level) = requested_level {
         extensions.insert("requested_level".to_owned(), json!(level));
     }
@@ -12161,7 +12201,7 @@ fn map_netease_download(
         actual_quality,
         platform_code: download.code,
         fee: download.fee,
-        message: download.message,
+        message,
         extensions,
     })
 }
@@ -12193,18 +12233,14 @@ fn netease_stream_level(quality: Quality) -> Result<&'static str> {
     })
 }
 
-fn stream_outcome_error(track: &Track, error: TuneWeaveError, raw: Option<Value>) -> StreamOutcome {
-    let mut extensions = Extensions::from([("details".to_owned(), error.details)]);
-    if let Some(raw) = raw {
-        extensions.insert("response_item".to_owned(), raw);
-    }
+fn stream_outcome_error(track: &Track, error: TuneWeaveError) -> StreamOutcome {
     StreamOutcome {
         track_ref: track.resource_ref.clone(),
         status: netease_stream_error_status(error.code),
         stream: None,
         error_code: Some(error.code),
         error: Some(error.message),
-        extensions,
+        extensions: Extensions::from([("details".to_owned(), error.details)]),
     }
 }
 
@@ -17375,22 +17411,17 @@ fn capability_for_search(kind: SearchKind) -> Capability {
 }
 
 fn ensure_success(body: &Value) -> Result<()> {
-    let code = body["code"]
+    ensure_success_for(body, "NetEase request failed")
+}
+
+fn ensure_success_for(body: &Value, context: &str) -> Result<()> {
+    let native_code = body["code"]
         .as_i64()
-        .or_else(|| body["code"].as_str().and_then(|code| code.parse().ok()))
-        .unwrap_or(500);
+        .or_else(|| body["code"].as_str().and_then(|code| code.parse().ok()));
+    let code = native_code.unwrap_or(500);
     if code == 200 {
         return Ok(());
     }
-    let message = ["message", "msg"]
-        .into_iter()
-        .find_map(|field| {
-            body[field]
-                .as_str()
-                .map(str::trim)
-                .filter(|message| !message.is_empty())
-        })
-        .unwrap_or("NetEase request failed");
     let error_code = match code {
         301 | 401 => ErrorCode::AuthenticationRequired,
         -2 | 403 => ErrorCode::PermissionDenied,
@@ -17398,19 +17429,20 @@ fn ensure_success(body: &Value) -> Result<()> {
         429 => ErrorCode::RateLimited,
         _ => ErrorCode::UpstreamError,
     };
-    Err(TuneWeaveError::new(error_code, message)
+    let mut error = TuneWeaveError::new(error_code, context)
         .with_platform(Platform::Netease)
-        .retryable(code == 429 || code >= 500)
-        .with_details(json!({ "upstream_code": code })))
+        .retryable(code == 429 || code >= 500);
+    if let Some(code) = native_code {
+        error.details["upstream_code"] = json!(code);
+    }
+    Err(crate::client::with_response_message(error, body))
 }
 
 fn parse_body<T: DeserializeOwned>(body: Value) -> Result<T> {
     serde_json::from_value(body).map_err(|error| {
-        TuneWeaveError::new(
-            ErrorCode::UpstreamError,
-            format!("failed to parse NetEase response: {error}"),
-        )
-        .with_platform(Platform::Netease)
+        TuneWeaveError::new(ErrorCode::UpstreamError, "failed to parse NetEase response")
+            .with_platform(Platform::Netease)
+            .with_json_source(&error)
     })
 }
 
@@ -28532,7 +28564,8 @@ mod tests {
                     "encodeType": null,
                     "time": 0,
                     "fee": 0,
-                    "message": "quality unavailable",
+                    "message": "quality unavailable token=private-download-token",
+                    "token": "private-download-response",
                     "freeTrialInfo": null
                 }]
             }),
@@ -28542,7 +28575,19 @@ mod tests {
         assert_eq!(unavailable.url, None);
         assert_eq!(unavailable.actual_quality, Quality::Auto);
         assert_eq!(unavailable.platform_code, Some(-110));
-        assert_eq!(unavailable.message.as_deref(), Some("quality unavailable"));
+        assert!(
+            unavailable
+                .message
+                .as_deref()
+                .unwrap()
+                .starts_with("quality unavailable")
+        );
+        assert!(
+            !serde_json::to_string(&unavailable)
+                .unwrap()
+                .contains("private-download")
+        );
+        assert!(unavailable.extensions.get("response").is_none());
         assert_eq!(unavailable.extensions["requested_level"], "sky");
     }
 
@@ -28585,7 +28630,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_batch_preserves_input_order_duplicates_failures_and_full_response() {
+    fn stream_batch_preserves_success_rows_and_redacts_rejected_rows() {
         let first = Track::new(
             ResourceRef::new(Platform::Netease, "123").expect("first track reference"),
             "first",
@@ -28614,6 +28659,8 @@ mod tests {
                     "level": "exhigh",
                     "encodeType": null,
                     "fee": 1,
+                    "msg": "此音质需会员 token=private-stream-token",
+                    "token": "private-stream-field",
                     "freeTrialInfo": null
                 },
                 {
@@ -28671,6 +28718,27 @@ mod tests {
         assert_eq!(batch.extensions["level"], "exhigh");
         assert_eq!(batch.extensions["response"]["code"], 200);
         assert_eq!(batch.outcomes[0].extensions["response_item"]["id"], 123);
+        assert!(
+            batch.outcomes[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("此音质需会员")
+        );
+        assert_eq!(
+            batch.outcomes[1].extensions["details"]["upstream_code"],
+            200
+        );
+        assert!(batch.outcomes[1].extensions.get("response_item").is_none());
+        assert_eq!(
+            batch.extensions["response"]["data"][0],
+            json!({"id":456,"code":200})
+        );
+        assert!(
+            !serde_json::to_string(&batch)
+                .unwrap()
+                .contains("private-stream")
+        );
     }
 
     #[test]
@@ -29555,7 +29623,35 @@ mod tests {
         }))
         .expect_err("authentication failure");
         assert_eq!(error.code, ErrorCode::AuthenticationRequired);
-        assert_eq!(error.message, "login");
+        assert_eq!(error.message, "NetEase request failed: login");
+        assert_eq!(error.details["upstream_message"], "login");
+    }
+
+    #[test]
+    fn business_errors_keep_native_code_and_redacted_reason_without_body() {
+        for (native, expected, retryable) in [
+            (301, ErrorCode::AuthenticationRequired, false),
+            (403, ErrorCode::PermissionDenied, false),
+            (404, ErrorCode::ResourceNotFound, false),
+            (429, ErrorCode::RateLimited, true),
+            (503, ErrorCode::UpstreamError, true),
+        ] {
+            let body = json!({"code":native.to_string(), "message":" ",
+                "msg":"平台返回失败 cookie=private-auth https://private.example/path",
+                "data":{"token":"private-raw-data"}});
+            let error = ensure_success(&body).unwrap_err();
+            assert_eq!(error.code, expected);
+            assert_eq!(error.retryable, retryable);
+            assert_eq!(error.details["upstream_code"], native);
+            assert!(error.message.contains("平台返回失败"));
+            let rendered = format!("{error:?}");
+            assert!(!rendered.contains("private-"));
+            assert!(!rendered.contains("private.example"));
+        }
+
+        let malformed = ensure_success(&json!({"message":"错误响应"})).unwrap_err();
+        assert_eq!(malformed.code, ErrorCode::UpstreamError);
+        assert!(malformed.details.get("upstream_code").is_none());
     }
 
     #[test]

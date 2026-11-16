@@ -462,7 +462,7 @@ impl NeteaseClient {
                 return Err(
                     TuneWeaveError::new(code, "NetEase listening log HTTP request failed")
                         .with_platform(Platform::Netease)
-                        .with_details(json!({"upstream_status":response.status().as_u16()})),
+                        .with_details(json!({"upstream_status":response.status().as_u16(),"upstream_http_status":response.status().as_u16()})),
                 );
             }
             // Do not include arbitrary upstream text: it may echo encrypted
@@ -777,7 +777,9 @@ impl NeteaseClient {
                 )
                 .with_platform(Platform::Netease)
                 .retryable(status.is_server_error())
-                .with_details(json!({ "status": status.as_u16() })));
+                .with_details(
+                    json!({ "status": status.as_u16(), "upstream_http_status": status.as_u16() }),
+                ));
             }
             if response.content_length().is_some_and(|length| {
                 length > u64::try_from(MAX_VOICE_LYRIC_DOCUMENT_BYTES).unwrap_or(u64::MAX)
@@ -1773,13 +1775,26 @@ async fn parse_response_with_encryption(
         .collect();
     let mut bytes = response.bytes().await.map_err(request_error)?.to_vec();
     if !status.is_success() {
-        return Err(TuneWeaveError::new(
+        let mut error = TuneWeaveError::new(
             ErrorCode::UpstreamError,
             format!("NetEase returned HTTP {status}"),
         )
         .with_platform(Platform::Netease)
         .retryable(status.is_server_error())
-        .with_details(json!({ "status": status.as_u16() })));
+        .with_details(
+            json!({ "status": status.as_u16(), "upstream_http_status": status.as_u16() }),
+        );
+        // An HTTP failure may still have a small JSON business envelope. Never
+        // copy the body, HTML, or an encrypted buffer into diagnostics.
+        if bytes.len() <= 64 * 1024
+            && let Ok(body) = serde_json::from_slice::<Value>(&bytes)
+        {
+            if let Some(code) = response_code(&body) {
+                error.details["upstream_code"] = json!(code);
+            }
+            error = with_response_message(error, &body);
+        }
+        return Err(error);
     }
 
     if encrypted {
@@ -1808,13 +1823,18 @@ fn parse_xeapi_public_key_registration(
     response: NeteaseResponse,
     nonce: &str,
 ) -> Result<XeapiPublicKey> {
-    if response_code(&response.body) != Some(200) {
-        return Err(TuneWeaveError::new(
+    let code = response_code(&response.body);
+    if code != Some(200) {
+        let mut error = TuneWeaveError::new(
             ErrorCode::UpstreamError,
             "NetEase XEAPI public key registration failed",
         )
         .with_platform(Platform::Netease)
-        .with_details(json!({ "code": response_code(&response.body) })));
+        .with_details(json!({ "code": code }));
+        if let Some(code) = code {
+            error.details["upstream_code"] = json!(code);
+        }
+        return Err(with_response_message(error, &response.body));
     }
     let data = response
         .body
@@ -1897,6 +1917,18 @@ fn qr_login_key(body: &Value) -> Option<String> {
         })
 }
 
+pub(crate) fn with_response_message(error: TuneWeaveError, body: &Value) -> TuneWeaveError {
+    match ["message", "msg"].into_iter().find_map(|name| {
+        body.get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }) {
+        Some(message) => error.with_upstream_message(message),
+        None => error,
+    }
+}
+
 pub(crate) fn ensure_response_code(body: &Value, expected: i64, operation: &str) -> Result<()> {
     let code = response_code(body).ok_or_else(|| {
         TuneWeaveError::new(
@@ -1908,12 +1940,15 @@ pub(crate) fn ensure_response_code(body: &Value, expected: i64, operation: &str)
     if code == expected {
         return Ok(());
     }
-    Err(TuneWeaveError::new(
-        ErrorCode::UpstreamError,
-        format!("NetEase {operation} failed with code {code}"),
-    )
-    .with_platform(Platform::Netease)
-    .with_details(json!({ "code": code })))
+    Err(with_response_message(
+        TuneWeaveError::new(
+            ErrorCode::UpstreamError,
+            format!("NetEase {operation} failed with code {code}"),
+        )
+        .with_platform(Platform::Netease)
+        .with_details(json!({ "code": code, "upstream_code": code })),
+        body,
+    ))
 }
 
 fn qr_state(code: i64) -> NeteaseQrState {
@@ -2103,7 +2138,8 @@ fn ensure_voice_upload_http_success(status: StatusCode, operation: &str) -> Resu
         ErrorCode::UpstreamError,
         format!("NetEase voice upload {operation} returned HTTP {status}"),
     )
-    .with_platform(Platform::Netease))
+    .with_platform(Platform::Netease)
+    .with_details(json!({"upstream_http_status":status.as_u16()})))
 }
 
 fn validate_voice_lyric_url(lyric_url: &str) -> Result<Url> {
@@ -2842,6 +2878,57 @@ mod tests {
             .expect("build plain request");
         assert!(!request.headers().contains_key("X-Real-IP"));
         assert!(!request.headers().contains_key("X-Forwarded-For"));
+    }
+
+    #[tokio::test]
+    async fn http_failures_keep_verified_status_and_only_json_business_diagnostics() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let fixture = tokio::spawn(async move {
+            for (status, body) in [
+                (
+                    "429 Too Many Requests",
+                    r#"{"code":"45001","message":"hold on token=private-echo","data":"private-body"}"#,
+                ),
+                ("502 Bad Gateway", "<html>private-upstream-page</html>"),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 1024];
+                while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                }
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let client = NeteaseClient::new(NeteaseConfig {
+            base_url,
+            ..Default::default()
+        })
+        .unwrap();
+        let error = client
+            .request_api("/api/test/diagnostics", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert!(!error.retryable);
+        assert_eq!(error.details["upstream_http_status"], 429);
+        assert_eq!(error.details["upstream_code"], 45001);
+        assert!(error.message.contains("hold on"));
+        assert!(!format!("{error:?}").contains("private-"));
+
+        let error = client
+            .request_api("/api/test/diagnostics", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.details["upstream_http_status"], 502);
+        assert!(error.retryable);
+        assert!(error.details.get("upstream_message").is_none());
+        assert!(!format!("{error:?}").contains("private-"));
+        fixture.await.unwrap();
     }
 
     #[tokio::test]
