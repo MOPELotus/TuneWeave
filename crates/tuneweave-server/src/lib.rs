@@ -5291,7 +5291,11 @@ async fn track_stream_redirect(
 ) -> Result<Response, ApiError> {
     let params = query_params(params)?;
     let (stream, _) = resolve_track_stream_request(&state, &headers, reference, params).await?;
-    Ok(download_redirect_response(&stream.url))
+    Ok(download_redirect_response(track_redirect_url(
+        stream.resolved_platform,
+        &stream.url,
+        stream.backup_urls.iter().map(String::as_str),
+    )))
 }
 
 async fn track_stream_content(
@@ -6588,7 +6592,18 @@ async fn track_download_redirect(
     let reference = parse_reference(reference)?;
     let download = resolve_track_download_request(&state, &headers, reference, &params).await?;
     if let Some(url) = download.url.as_deref() {
-        return Ok(download_redirect_response(url));
+        let backups = download
+            .extensions
+            .get("backup_urls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str);
+        return Ok(download_redirect_response(track_redirect_url(
+            download.platform,
+            url,
+            backups,
+        )));
     }
     Err(TuneWeaveError::new(
         ErrorCode::PermissionDenied,
@@ -6597,6 +6612,22 @@ async fn track_download_redirect(
     .with_platform(download.platform)
     .with_details(json!({ "download": download }))
     .into())
+}
+
+fn track_redirect_url<'a>(
+    platform: Platform,
+    primary: &'a str,
+    mut backups: impl Iterator<Item = &'a str>,
+) -> &'a str {
+    // A single-location redirect cannot expose ordered alternatives. Keep
+    // HTTPS for browser clients when the provider offers the same URL over TLS.
+    if platform == Platform::Netease
+        && let Some(suffix) = primary.strip_prefix("http://")
+        && let Some(https) = backups.find(|url| url.strip_prefix("https://") == Some(suffix))
+    {
+        return https;
+    }
+    primary
 }
 
 fn download_redirect_response(url: &str) -> Response {
@@ -23702,14 +23733,21 @@ mod tests {
 
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             Ok(MediaStream {
-                url: "https://example.test/audio.mp3".to_owned(),
-                backup_urls: if track.id == "fallback" {
-                    vec![
+                url: match track.id.as_str() {
+                    "net-media-order" => "http://m801.music.126.net/audio.flac?sig=a%2f",
+                    _ => "https://example.test/audio.mp3",
+                }
+                .to_owned(),
+                backup_urls: match track.id.as_str() {
+                    "fallback" => vec![
                         "https://example.test/first.mp3".into(),
                         "http://example.test/second.mp3?sig=a%2f".into(),
-                    ]
-                } else {
-                    Vec::new()
+                    ],
+                    "net-media-order" => vec![
+                        "https://m801.music.126.net/audio.flac?sig=a%2f".into(),
+                        "https://m801c.music.126.net/audio.flac?sig=a%2f".into(),
+                    ],
+                    _ => Vec::new(),
                 },
                 headers: BTreeMap::from([
                     (
@@ -23787,7 +23825,7 @@ mod tests {
         }
 
         async fn download(&self, track: &Track, request: &StreamRequest) -> Result<MediaDownload> {
-            let available = !matches!(track.id.as_str(), "fallback" | "trial");
+            let available = !matches!(track.id.as_str(), "fallback" | "trial" | "net-media-order");
             Ok(MediaDownload {
                 track_ref: track.resource_ref.clone(),
                 platform: Platform::Netease,
@@ -38495,6 +38533,41 @@ mod tests {
                 "http://example.test/second.mp3?sig=a%2f"
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn netease_json_preserves_origin_but_track_redirects_use_same_host_https() {
+        let base = "/v1/tracks/netease:net-media-order";
+        let original = "http://m801.music.126.net/audio.flac?sig=a%2f";
+        let https = "https://m801.music.126.net/audio.flac?sig=a%2f";
+        let aliases = json!([https, "https://m801c.music.126.net/audio.flac?sig=a%2f"]);
+        for (operation, backup_pointer) in [
+            ("stream", "/data/backup_urls"),
+            ("download", "/data/extensions/backup_urls"),
+        ] {
+            let path = format!("{base}/{operation}");
+            let (status, body) = json_response_from(test_app_with_provider(), &path).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["url"], original);
+            assert_eq!(body.pointer(backup_pointer), Some(&aliases));
+
+            let response = test_app_with_provider()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{path}/redirect"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()[header::LOCATION], https);
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "private, no-store"
+            );
+        }
     }
 
     #[tokio::test]

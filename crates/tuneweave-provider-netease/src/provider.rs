@@ -12321,12 +12321,9 @@ fn map_stream(
 }
 
 fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
-    let Some(mut parsed) = Url::parse(&url).ok() else {
+    let Ok(parsed) = tuneweave_core::validate_upstream_media_url(&url) else {
         return (url, Vec::new());
     };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return (url, Vec::new());
-    }
     let Some(host) = parsed.host_str() else {
         return (url, Vec::new());
     };
@@ -12339,18 +12336,18 @@ fn netease_media_url_variants(url: String) -> (String, Vec<String>) {
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return (url, Vec::new());
     }
-    let compatible_host = format!("{prefix}c.music.126.net");
-    if parsed.set_host(Some(&compatible_host)).is_err() {
+    // Change only the literal authority, without serializing the signed path
+    // and query. Leave nonstandard origins or URL forms as returned upstream.
+    let origin = format!("{}://{host}/", parsed.scheme());
+    let Some(path_and_query) = url.strip_prefix(&origin) else {
         return (url, Vec::new());
+    };
+    let mut backups = Vec::with_capacity(2);
+    if parsed.scheme() == "http" {
+        backups.push(format!("https://{host}/{path_and_query}"));
     }
-    if parsed.scheme() == "http" && parsed.set_scheme("https").is_err() {
-        return (url, Vec::new());
-    }
-    let compatible = parsed.to_string();
-    if compatible == url {
-        return (url, Vec::new());
-    }
-    (compatible, vec![url])
+    backups.push(format!("https://{prefix}c.music.126.net/{path_and_query}"));
+    (url, backups)
 }
 
 fn stream_format(kind: Option<String>, url: &str, bitrate: Option<u64>) -> Option<String> {
@@ -28156,25 +28153,28 @@ mod tests {
     }
 
     #[test]
-    fn netease_media_url_variants_upgrades_http_cdn_url_and_preserves_backup() {
-        let original = "http://m801.music.126.net/song/path.flac?auth=opaque";
+    fn netease_media_url_variants_preserve_origin_and_put_same_host_https_first() {
+        let original = "http://m801.music.126.net/song/%2e/path.flac?sig=a%2fb&b=&sig=x";
         let (primary, backups) = netease_media_url_variants(original.to_owned());
+        assert_eq!(primary, original);
         assert_eq!(
-            primary,
-            "https://m801c.music.126.net/song/path.flac?auth=opaque"
+            backups,
+            [
+                "https://m801.music.126.net/song/%2e/path.flac?sig=a%2fb&b=&sig=x",
+                "https://m801c.music.126.net/song/%2e/path.flac?sig=a%2fb&b=&sig=x",
+            ]
         );
-        assert_eq!(backups, vec![original]);
     }
 
     #[test]
     fn netease_media_url_variants_keeps_https_and_rejects_invalid_hosts() {
         let original = "https://m801.music.126.net/song/path.flac?auth=opaque";
         let (primary, backups) = netease_media_url_variants(original.to_owned());
+        assert_eq!(primary, original);
         assert_eq!(
-            primary,
-            "https://m801c.music.126.net/song/path.flac?auth=opaque"
+            backups,
+            ["https://m801c.music.126.net/song/path.flac?auth=opaque"]
         );
-        assert_eq!(backups, vec![original]);
 
         let compatible = "https://m801c.music.126.net/song/path.flac";
         let (primary, backups) = netease_media_url_variants(compatible.to_owned());
@@ -28186,6 +28186,9 @@ mod tests {
             "http://m801.music.126.net.evil.test/song.mp3",
             "https://mabc.music.126.net/song.mp3",
             "https://m801.music.126.net@evil.test/song.mp3",
+            "https://user@m801.music.126.net/song.mp3",
+            "http://m801.music.126.net:8080/song.mp3",
+            "http://m801.music.126.net/song.mp3#fragment",
             "ftp://m801.music.126.net/song.mp3",
         ] {
             let (primary, backups) = netease_media_url_variants(input.to_owned());
@@ -28530,12 +28533,12 @@ mod tests {
         .expect("map compatible download");
         assert_eq!(
             compatible.url.as_deref(),
-            Some("https://m801c.music.126.net/audio.flac")
+            Some("https://m801.music.126.net/audio.flac")
         );
         assert_eq!(compatible.format.as_deref(), Some("flac"));
         assert_eq!(
             compatible.extensions["backup_urls"][0],
-            "https://m801.music.126.net/audio.flac"
+            "https://m801c.music.126.net/audio.flac"
         );
 
         let unavailable = map_netease_download(
