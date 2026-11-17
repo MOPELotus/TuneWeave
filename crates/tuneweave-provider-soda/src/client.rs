@@ -848,8 +848,7 @@ impl SodaClient {
                 .await
                 .map_err(soda_network_error)?;
             http_status = Some(response.status());
-            let body = read_bounded_response(response, "Soda track search").await?;
-            parse_search_response(&body, cursor)
+            read_anonymous_track_search_response(response, cursor).await
         }
         .await;
         self.log_upstream_request(
@@ -1411,6 +1410,24 @@ fn soda_upstream_classification(
             retryable: error.retryable,
         },
     )
+}
+
+async fn read_anonymous_track_search_response(
+    response: reqwest::Response,
+    requested_cursor: u32,
+) -> Result<SodaSearchPage> {
+    let status = response.status();
+    let body = read_bounded_response(response, "Soda track search").await?;
+    if body.is_empty() {
+        return Err(soda_upstream_error(
+            "Soda anonymous track search returned an empty HTTP response",
+        )
+        .with_details(json!({
+            "upstream_http_status": status.as_u16(),
+            "upstream_response_empty": true,
+        })));
+    }
+    parse_search_response(&body, requested_cursor)
 }
 
 fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearchPage> {
@@ -4220,6 +4237,31 @@ mod tests {
         assert_eq!(limited.details["http_status"], 429);
         assert!(soda_http_error(StatusCode::SERVICE_UNAVAILABLE).retryable);
         assert!(!soda_http_error(StatusCode::BAD_REQUEST).retryable);
+    }
+
+    #[tokio::test]
+    async fn anonymous_track_search_distinguishes_empty_http_from_no_results() {
+        let empty =
+            raw_test_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        let error = read_anonymous_track_search_response(empty, 0)
+            .await
+            .expect_err("an empty upstream body is not an empty result page");
+        assert_eq!(error.code, ErrorCode::UpstreamError);
+        assert_eq!(error.platform, Some(Platform::Soda));
+        assert_eq!(error.details["upstream_http_status"], 200);
+        assert_eq!(error.details["upstream_response_empty"], true);
+
+        let no_results = raw_test_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"extra\":{\"empty_search\":1}}",
+        )
+        .await;
+        let page = read_anonymous_track_search_response(no_results, 0)
+            .await
+            .expect("explicit upstream no-results response");
+        assert!(page.tracks.is_empty());
+        assert!(!page.has_more);
+        assert_eq!(page.next_cursor, None);
     }
 
     #[tokio::test]
