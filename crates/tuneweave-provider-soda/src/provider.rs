@@ -22,8 +22,9 @@ use tuneweave_core::{
 use crate::{
     account::SodaAccount,
     client::{
-        MAX_UPSTREAM_PLAYLIST_PAGES, SodaAccountTrack, SodaCatalogKind, SodaClient, SodaConfig,
-        SodaPlayback, UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE, UPSTREAM_PLAYLIST_PAGE_SIZE,
+        MAX_UPSTREAM_PLAYLIST_PAGES, SIGNED_TRACK_SEARCH_BACKEND, SodaAccountTrack,
+        SodaCatalogKind, SodaClient, SodaConfig, SodaPlayback, SodaSearchPage,
+        UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE, UPSTREAM_PLAYLIST_PAGE_SIZE,
         UPSTREAM_SEARCH_PAGE_SIZE,
     },
     identity::SodaTrackIdentity,
@@ -1284,22 +1285,53 @@ impl MusicProvider for SodaProvider {
             });
         }
         validate_search_query(query)?;
-        collect_search_pages(
+        let android = collect_search_pages(
             query,
             "official_android_track_search",
+            false,
             |cursor| async move {
-                let page = self
-                    .client
+                self.client
                     .search_tracks_page(query.query.trim(), cursor)
-                    .await?;
-                Ok(SearchPhysicalPage {
-                    items: page.tracks,
-                    next_cursor: page.next_cursor,
-                    has_more: page.has_more,
-                })
+                    .await
+                    .map(SearchPhysicalPage::from)
             },
         )
-        .await
+        .await;
+        if !self.client.has_track_search_signer()
+            || !android.as_ref().is_err_and(|error| {
+                error.details["upstream_http_status"] == 200
+                    && error.details["upstream_response_empty"] == true
+            })
+        {
+            return android;
+        }
+
+        // Restart the window: Android and PC can rank tracks and advance cursors differently.
+        let search_id = crate::client::account_search::search_id();
+        let signed = collect_search_pages(query, SIGNED_TRACK_SEARCH_BACKEND, true, |cursor| {
+            let search_id = &search_id;
+            async move {
+                self.client
+                    .signed_anonymous_track_search_page(query.query.trim(), cursor, search_id)
+                    .await
+                    .map(SearchPhysicalPage::from)
+            }
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(45), signed)
+            .await
+            .unwrap_or_else(|_| {
+                Err(TuneWeaveError::new(
+                    ErrorCode::UpstreamTimeout,
+                    "Soda signed anonymous track search timed out",
+                )
+                .with_platform(Platform::Soda)
+                .retryable(true))
+            });
+        result.map_err(|mut error| {
+            error.details["android_search_empty"] = json!(true);
+            error.details["search_backend"] = json!(SIGNED_TRACK_SEARCH_BACKEND);
+            error
+        })
     }
 
     async fn search_catalog(&self, query: &SearchQuery) -> Result<Page<SearchItem>> {
@@ -1328,7 +1360,7 @@ impl MusicProvider for SodaProvider {
             }
         };
         validate_search_options(query)?;
-        collect_search_pages(query, kind.backend(), |cursor| async move {
+        collect_search_pages(query, kind.backend(), false, |cursor| async move {
             let page = self
                 .client
                 .search_catalog_page(kind, query.query.trim(), cursor)
@@ -1962,23 +1994,40 @@ struct SearchPhysicalPage<T> {
     has_more: bool,
 }
 
+impl From<SodaSearchPage> for SearchPhysicalPage<Track> {
+    fn from(page: SodaSearchPage) -> Self {
+        Self {
+            items: page.tracks,
+            next_cursor: page.next_cursor,
+            has_more: page.has_more,
+        }
+    }
+}
+
 async fn collect_search_pages<T, F, Fut>(
     query: &SearchQuery,
     backend: &'static str,
+    signed: bool,
     mut fetch: F,
 ) -> Result<Page<T>>
 where
     F: FnMut(u32) -> Fut,
     Fut: std::future::Future<Output = Result<SearchPhysicalPage<T>>>,
 {
-    let start_cursor = query.offset / UPSTREAM_SEARCH_PAGE_SIZE * UPSTREAM_SEARCH_PAGE_SIZE;
-    let skip = usize::try_from(query.offset % UPSTREAM_SEARCH_PAGE_SIZE)
+    let start_cursor = if signed {
+        0
+    } else {
+        query.offset / UPSTREAM_SEARCH_PAGE_SIZE * UPSTREAM_SEARCH_PAGE_SIZE
+    };
+    let skip = usize::try_from(query.offset - start_cursor)
         .map_err(|_| soda_invalid_request("Soda search offset is too large"))?;
     let requested = usize::try_from(query.limit)
         .map_err(|_| soda_invalid_request("Soda search limit is too large"))?;
     let needed = skip.saturating_add(requested);
     let mut cursor = start_cursor;
-    let mut buffer = Vec::with_capacity(needed);
+    let mut buffer = Vec::with_capacity(
+        needed.min((MAX_UPSTREAM_PAGES_PER_SEARCH * UPSTREAM_SEARCH_PAGE_SIZE) as usize),
+    );
     let mut pages_fetched = 0_u32;
     let mut upstream_has_more = false;
     let mut upstream_next_cursor = None;
@@ -2028,8 +2077,8 @@ where
     if let Some(next_cursor) = upstream_next_cursor {
         extensions.insert("upstream_next_cursor".to_owned(), json!(next_cursor));
     }
-    extensions.insert("anonymous_device_required".to_owned(), json!(false));
-    extensions.insert("request_signature_required".to_owned(), json!(false));
+    extensions.insert("anonymous_device_required".to_owned(), json!(signed));
+    extensions.insert("request_signature_required".to_owned(), json!(signed));
 
     Ok(Page {
         items,
@@ -2195,6 +2244,7 @@ mod tests {
     mod account_suggestions;
     mod album_collection_source;
     mod album_collections;
+    mod anonymous_track_search;
     mod artist_catalog;
     mod artist_collection;
     mod auth_generation;
@@ -4183,7 +4233,7 @@ mod tests {
     async fn shared_search_pagination_enforces_budget_and_cursor_progress() {
         let query = SearchQuery::tracks("query", 100, 19);
         let mut calls = 0;
-        let error = collect_search_pages(&query, "test", |cursor| {
+        let error = collect_search_pages(&query, "test", false, |cursor| {
             calls += 1;
             std::future::ready(Ok(SearchPhysicalPage {
                 items: vec![cursor],
@@ -4196,7 +4246,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::UpstreamError);
         assert_eq!(calls, 6);
         assert!(
-            collect_search_pages(&query, "test", |cursor| std::future::ready(Ok(
+            collect_search_pages(&query, "test", false, |cursor| std::future::ready(Ok(
                 SearchPhysicalPage {
                     items: vec![cursor],
                     next_cursor: Some(cursor),
@@ -4207,7 +4257,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            collect_search_pages(&query, "test", |cursor| std::future::ready(Ok(
+            collect_search_pages(&query, "test", false, |cursor| std::future::ready(Ok(
                 SearchPhysicalPage {
                     items: Vec::<u32>::new(),
                     next_cursor: Some(cursor + 20),

@@ -8,7 +8,9 @@ use std::{
 
 use reqwest::{
     Client, Proxy, StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, LOCATION},
+    header::{
+        ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, LOCATION, USER_AGENT as USER_AGENT_HEADER,
+    },
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
@@ -64,10 +66,12 @@ use crate::identity::{
 use crate::media::{DecryptedSodaAudio, SodaAudioContainer, SodaAudioFormat, decrypt_cenc_audio};
 
 pub(crate) const UPSTREAM_SEARCH_PAGE_SIZE: u32 = 20;
+pub(crate) const SIGNED_TRACK_SEARCH_BACKEND: &str = "official_pc_signed_track_search";
 pub(crate) const UPSTREAM_PLAYLIST_PAGE_SIZE: u32 = 100;
 pub(crate) const UPSTREAM_ACCOUNT_PLAYLIST_PAGE_SIZE: u32 = 50;
 pub(crate) const MAX_UPSTREAM_PLAYLIST_PAGES: u32 = 128;
 const SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/search/track";
+const SIGNED_TRACK_SEARCH_ENDPOINT: &str = "https://api.qishui.com/luna/pc/search/track";
 const TRACK_DETAIL_ENDPOINT: &str = "https://beta-luna.douyin.com/luna/h5/seo_track";
 const PLAYLIST_DETAIL_ENDPOINT: &str = "https://api.qishui.com/luna/pc/playlist/detail";
 const ALBUM_SHARE_ENDPOINT: &str = "https://www.qishui.com/share/album";
@@ -108,6 +112,7 @@ pub struct SodaClient {
     http: Client,
     proxy_configured: bool,
     device: Arc<SodaDeviceStore>,
+    anonymous_search_device: Arc<SodaDeviceStore>,
     bdms_signer: Option<SodaBdmsSigner>,
     #[cfg(test)]
     auth_origin: Option<Url>,
@@ -734,6 +739,7 @@ impl SodaClient {
             http,
             proxy_configured: config.proxy_url.is_some(),
             device: Arc::new(SodaDeviceStore::new(config.device_path.clone())),
+            anonymous_search_device: Arc::new(SodaDeviceStore::new(None)),
             bdms_signer,
             #[cfg(test)]
             auth_origin: None,
@@ -751,16 +757,18 @@ impl SodaClient {
         method: reqwest::Method,
         url: Url,
     ) -> reqwest::RequestBuilder {
+        self.http.request(method, self.request_target(url))
+    }
+
+    fn request_target(&self, url: Url) -> Url {
         #[cfg(test)]
-        let url = if let Some(origin) = &self.auth_origin {
+        if let Some(origin) = &self.auth_origin {
             let mut target = origin.clone();
             target.set_path(url.path());
             target.set_query(url.query());
-            target
-        } else {
-            url
-        };
-        self.http.request(method, url)
+            return target;
+        }
+        url
     }
 
     pub(crate) async fn send_login_request(
@@ -814,6 +822,12 @@ impl SodaClient {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_track_search_test_signer(mut self, origin: &Url) -> Self {
+        self.bdms_signer = Some(SodaBdmsSigner::test_remote(origin.as_str()));
+        self
+    }
+
     pub(crate) fn login_device(&self) -> Result<SodaDeviceState> {
         self.device.snapshot()
     }
@@ -833,7 +847,7 @@ impl SodaClient {
         let outcome = async {
             let response = self
                 .http
-                .get(SEARCH_ENDPOINT)
+                .get(self.request_target(Url::parse(SEARCH_ENDPOINT).expect("fixed Soda URL")))
                 .query(&SodaSearchQuery {
                     q: query,
                     aid: SODA_APP_ID,
@@ -848,13 +862,102 @@ impl SodaClient {
                 .await
                 .map_err(soda_network_error)?;
             http_status = Some(response.status());
-            read_anonymous_track_search_response(response, cursor).await
+            read_anonymous_track_search_response(response, cursor, "official_android_track_search")
+                .await
         }
         .await;
         self.log_upstream_request(
             "search",
             "api.qishui.com",
             "/luna/search/track",
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
+    }
+
+    pub(crate) fn has_track_search_signer(&self) -> bool {
+        self.bdms_signer.is_some()
+    }
+
+    pub(crate) async fn signed_anonymous_track_search_page(
+        &self,
+        query: &str,
+        cursor: u32,
+        search_id: &str,
+    ) -> Result<SodaSearchPage> {
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let signer = self
+                .bdms_signer
+                .as_ref()
+                .ok_or_else(signer_required_error)?;
+            let device = self.anonymous_search_device.snapshot()?;
+            let mut url = Url::parse(SIGNED_TRACK_SEARCH_ENDPOINT).expect("fixed Soda URL");
+            url.query_pairs_mut()
+                .append_pair("aid", SODA_APP_ID)
+                .append_pair("app_name", "luna_pc")
+                .append_pair("region", "cn")
+                .append_pair("geo_region", "cn")
+                .append_pair("os_region", "cn")
+                .append_pair("sim_region", "")
+                .append_pair("device_id", &device.device_id)
+                .append_pair("iid", &device.install_id)
+                .append_pair("fp", &device.device_id)
+                .append_pair("cdid", "")
+                .append_pair("device_platform", "windows")
+                .append_pair("device_type", "Windows")
+                .append_pair("os_version", "Windows 10 Education")
+                .append_pair("version_name", "3.8.0")
+                .append_pair("version_code", "38000000")
+                .append_pair("channel", "official")
+                .append_pair("build_mode", "master")
+                .append_pair("network_carrier", "")
+                .append_pair("ac", "wifi")
+                .append_pair("tz_name", "Asia/Shanghai")
+                .append_pair("resolution", "")
+                .append_pair("q", query)
+                .append_pair("cursor", &cursor.to_string())
+                .append_pair("search_id", search_id)
+                .append_pair("search_method", "input")
+                .append_pair("debug_params", "")
+                .append_pair("from_search_id", "")
+                .append_pair("search_scene", "");
+            let mut request = self
+                .http
+                .get(url)
+                .header(USER_AGENT_HEADER, "LunaPC/3.8.0")
+                .header(ACCEPT, "application/json")
+                .header("x-luna-background-type", "foreground")
+                .header("x-luna-is-background-req", "0")
+                .header("x-luna-is-local-user", "0")
+                .build()
+                .map_err(soda_network_error)?;
+            let headers = soda_signing_headers(request.headers())?;
+            let signed = signer
+                .sign(device.device_id, request.url().as_str().to_owned(), headers)
+                .await?;
+            request.headers_mut().extend(signed);
+            #[cfg(test)]
+            {
+                *request.url_mut() = self.request_target(request.url().clone());
+            }
+            let response = self
+                .http
+                .execute(request)
+                .await
+                .map_err(soda_network_error)?;
+            http_status = Some(response.status());
+            read_anonymous_track_search_response(response, cursor, SIGNED_TRACK_SEARCH_BACKEND)
+                .await
+        }
+        .await;
+        self.log_upstream_request(
+            "signed_anonymous_track_search",
+            "api.qishui.com",
+            "/luna/pc/search/track",
             http_status,
             started,
             &outcome,
@@ -1415,8 +1518,17 @@ fn soda_upstream_classification(
 async fn read_anonymous_track_search_response(
     response: reqwest::Response,
     requested_cursor: u32,
+    backend: &'static str,
 ) -> Result<SodaSearchPage> {
     let status = response.status();
+    if status.is_success() && response.headers().contains_key("bdturing-verify") {
+        return Err(TuneWeaveError::new(
+            ErrorCode::CapabilityNotSupported,
+            "Soda search requires an additional platform verification challenge",
+        )
+        .with_platform(Platform::Soda)
+        .with_details(json!({"upstream_http_status": status.as_u16()})));
+    }
     let body = read_bounded_response(response, "Soda track search").await?;
     if body.is_empty() {
         return Err(soda_upstream_error(
@@ -1427,10 +1539,18 @@ async fn read_anonymous_track_search_response(
             "upstream_response_empty": true,
         })));
     }
-    parse_search_response(&body, requested_cursor)
+    parse_search_response_with_backend(&body, requested_cursor, backend)
 }
 
 fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearchPage> {
+    parse_search_response_with_backend(body, requested_cursor, "official_android_track_search")
+}
+
+fn parse_search_response_with_backend(
+    body: &[u8],
+    requested_cursor: u32,
+    backend: &'static str,
+) -> Result<SodaSearchPage> {
     let envelope: SodaSearchEnvelope = serde_json::from_slice(body).map_err(|error| {
         soda_upstream_error("Soda search returned malformed JSON").with_source(&error)
     })?;
@@ -1500,7 +1620,7 @@ fn parse_search_response(body: &[u8], requested_cursor: u32) -> Result<SodaSearc
                 soda_upstream_error("Soda track search item omitted its track payload")
             })
         })
-        .map(|track| track.and_then(|track| map_track(track, "official_android_track_search")))
+        .map(|track| track.and_then(|track| map_track(track, backend)))
         .collect::<Result<Vec<_>>>()?;
     Ok(SodaSearchPage {
         tracks,
@@ -4244,7 +4364,7 @@ mod tests {
         let empty =
             raw_test_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await;
-        let error = read_anonymous_track_search_response(empty, 0)
+        let error = read_anonymous_track_search_response(empty, 0, "official_android_track_search")
             .await
             .expect_err("an empty upstream body is not an empty result page");
         assert_eq!(error.code, ErrorCode::UpstreamError);
@@ -4256,9 +4376,10 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"extra\":{\"empty_search\":1}}",
         )
         .await;
-        let page = read_anonymous_track_search_response(no_results, 0)
-            .await
-            .expect("explicit upstream no-results response");
+        let page =
+            read_anonymous_track_search_response(no_results, 0, "official_android_track_search")
+                .await
+                .expect("explicit upstream no-results response");
         assert!(page.tracks.is_empty());
         assert!(!page.has_more);
         assert_eq!(page.next_cursor, None);

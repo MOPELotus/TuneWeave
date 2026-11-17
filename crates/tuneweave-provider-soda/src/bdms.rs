@@ -147,6 +147,11 @@ impl SodaBdmsSigner {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_remote(endpoint: &str) -> Self {
+        Self::remote(endpoint, "test".repeat(8)).expect("loopback test signer")
+    }
+
     fn spawn(
         node: PathBuf,
         addon: PathBuf,
