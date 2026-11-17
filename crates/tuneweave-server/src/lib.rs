@@ -6404,6 +6404,9 @@ fn media_download_from_stream(
         ("attempts".to_owned(), json!(attempts)),
     ]);
     extensions.insert("fallback".to_owned(), json!(true));
+    if !stream.backup_urls.is_empty() {
+        extensions.insert("backup_urls".to_owned(), json!(stream.backup_urls));
+    }
     Ok(MediaDownload {
         track_ref: origin.clone(),
         platform: resolved_platform,
@@ -23700,7 +23703,14 @@ mod tests {
         async fn stream(&self, track: &Track, request: &StreamRequest) -> Result<MediaStream> {
             Ok(MediaStream {
                 url: "https://example.test/audio.mp3".to_owned(),
-                backup_urls: Vec::new(),
+                backup_urls: if track.id == "fallback" {
+                    vec![
+                        "https://example.test/first.mp3".into(),
+                        "http://example.test/second.mp3?sig=a%2f".into(),
+                    ]
+                } else {
+                    Vec::new()
+                },
                 headers: BTreeMap::from([
                     (
                         "x-test-stream-variant".to_owned(),
@@ -38478,6 +38488,13 @@ mod tests {
         assert_eq!(json["data"]["actual_quality"], "high");
         assert_eq!(json["data"]["extensions"]["fallback"], true);
         assert_eq!(json["data"]["extensions"]["source"], "stream_resolution");
+        assert_eq!(
+            json["data"]["extensions"]["backup_urls"],
+            json!([
+                "https://example.test/first.mp3",
+                "http://example.test/second.mp3?sig=a%2f"
+            ])
+        );
     }
 
     #[tokio::test]
