@@ -115,6 +115,7 @@ impl MusicProvider for BilibiliProvider {
             Capability::VideoDetail,
             Capability::VideoParts,
             Capability::VideoStats,
+            Capability::BilibiliSpaceFeed,
             Capability::VideoSubtitles,
             Capability::VideoPlaybackManifest,
             Capability::VideoAudioStream,
@@ -287,6 +288,16 @@ impl MusicProvider for BilibiliProvider {
             .video_view(&identity, credential.as_ref())
             .await
             .and_then(map_bilibili_video_view)
+    }
+
+    async fn bilibili_space_feed(&self, uid: u64, account: &str) -> Result<Vec<serde_json::Value>> {
+        if self.caller_credential.is_some() {
+            return Err(bilibili_invalid_request(
+                "Bilibili space feed requires a server account alias",
+            ));
+        }
+        let credential = self.selected_credential(account)?;
+        self.client.space_feed(uid, &credential).await
     }
 
     async fn video_stats(&self, id: &str, request: &VideoDetailRequest) -> Result<VideoStats> {

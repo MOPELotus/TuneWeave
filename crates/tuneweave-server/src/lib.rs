@@ -1085,6 +1085,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/videos/{reference}/subtitles", get(video_subtitles))
         .route("/videos/{reference}", get(video_detail))
         .route("/videos/{reference}/stats", get(video_stats))
+        .route("/bilibili/users/{uid}/dynamics", get(bilibili_space_feed))
         .route(
             "/videos/{reference}/native-stream",
             get(migu_native_mv_stream),
@@ -12207,6 +12208,51 @@ async fn video_details_response(
         .into());
     }
     Ok(Json(access.list_response(details, selected_platform)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BilibiliSpaceFeedParams {
+    account: String,
+}
+
+async fn bilibili_space_feed(
+    State(state): State<AppState>,
+    Path(uid): Path<String>,
+    params: Result<Query<BilibiliSpaceFeedParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    caller_scope::mark_sensitive();
+    if headers.contains_key(CALLER_CREDENTIAL_HEADER) {
+        return Err(TuneWeaveError::invalid_request(
+            "Bilibili space feed requires a server account alias",
+        )
+        .into());
+    }
+    let params = query_params(params)?;
+    let uid = uid
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value != 0 && value.to_string() == uid)
+        .ok_or_else(|| {
+            TuneWeaveError::invalid_request("Bilibili UID must be a positive decimal integer")
+        })?;
+    if params.account.trim().is_empty() {
+        return Err(TuneWeaveError::invalid_request("Bilibili account alias is required").into());
+    }
+    let account = account_alias(Some(&params.account))?;
+    let platform = Platform::Bilibili;
+    let access = CallerCredentialSet::default().select_provider(
+        &state,
+        platform,
+        Some(&account),
+        AccountSelection::Optional,
+    )?;
+    let items = access.provider.bilibili_space_feed(uid, &account).await?;
+    Ok(auth_json_response(
+        access.response(json!({ "items": items, "authenticated": true }), platform),
+        true,
+    ))
 }
 
 async fn video_stats(
@@ -24530,6 +24576,17 @@ mod tests {
             BTreeSet::from([Capability::VideoAudioStream, Capability::VideoStream])
         }
 
+        async fn bilibili_space_feed(&self, uid: u64, account: &str) -> Result<Vec<Value>> {
+            if account != "test-login" {
+                return Err(TuneWeaveError::new(
+                    ErrorCode::AuthenticationRequired,
+                    "test Bilibili login was not found",
+                )
+                .with_platform(Platform::Bilibili));
+            }
+            Ok(vec![json!({ "id_str": uid.to_string() })])
+        }
+
         async fn video_audio_stream(
             &self,
             id: &str,
@@ -33064,6 +33121,56 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(response["error"]["code"], "invalid_request", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn bilibili_space_feed_is_bound_to_a_server_alias() {
+        let mut registry = ProviderRegistry::new();
+        registry
+            .register(TestBilibiliProvider)
+            .expect("Bilibili test provider");
+        let app = build_router(AppState::new(registry, Platform::Bilibili));
+        let (status, body) = json_response_from(
+            app.clone(),
+            "/v1/bilibili/users/42/dynamics?account=test-login",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"],
+            json!({"items":[{"id_str":"42"}],"authenticated":true})
+        );
+        assert_eq!(body["meta"]["platform"], "bilibili");
+        assert_eq!(body["meta"]["account"], "test-login");
+
+        for path in [
+            "/v1/bilibili/users/42/dynamics",
+            "/v1/bilibili/users/42/dynamics?account=%20",
+            "/v1/bilibili/users/42/dynamics?account=test-login&offset=1",
+            "/v1/bilibili/users/0/dynamics?account=test-login",
+        ] {
+            let (status, _) = json_response_from(app.clone(), path).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        }
+        let (status, body) = json_response_from(
+            app.clone(),
+            "/v1/bilibili/users/42/dynamics?account=missing",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "authentication_required");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/bilibili/users/42/dynamics?account=test-login")
+                    .header(CALLER_CREDENTIAL_HEADER, "local-fixture")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key(CALLER_CREDENTIAL_HEADER));
     }
 
     #[tokio::test]

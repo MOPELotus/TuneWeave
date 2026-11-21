@@ -1182,6 +1182,17 @@ pub trait MusicProvider: Send + Sync {
         ))
     }
 
+    async fn bilibili_space_feed(
+        &self,
+        _uid: u64,
+        _account: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        Err(TuneWeaveError::unsupported(
+            self.platform(),
+            Capability::BilibiliSpaceFeed,
+        ))
+    }
+
     async fn video_stats(&self, _id: &str, _request: &VideoDetailRequest) -> Result<VideoStats> {
         Err(TuneWeaveError::unsupported(
             self.platform(),

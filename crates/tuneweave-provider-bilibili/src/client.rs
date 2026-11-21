@@ -2653,6 +2653,61 @@ impl BilibiliClient {
         })
     }
 
+    pub(crate) async fn space_feed(
+        &self,
+        uid: u64,
+        credential: &BilibiliCredential,
+    ) -> Result<Vec<Value>> {
+        const PATH: &str = "/x/polymer/web-dynamic/v1/feed/space";
+        const MAX_BYTES: usize = 4 * 1024 * 1024;
+        let mut endpoint = Url::parse(concat!(
+            "https://api.bilibili.com",
+            "/x/polymer/web-dynamic/v1/feed/space"
+        ))
+        .map_err(|_| bilibili_internal_error("invalid Bilibili space feed endpoint"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("host_mid", &uid.to_string())
+            .append_pair("offset", "");
+        let started = Instant::now();
+        let mut http_status = None;
+        let outcome = async {
+            let mut response = self
+                .http
+                .get(endpoint)
+                .header(REFERER, WEB_HOME_ENDPOINT)
+                .header(COOKIE, credential.cookie_header())
+                .send()
+                .await
+                .map_err(bilibili_network_error)?;
+            let status = response.status();
+            http_status = Some(status);
+            if !status.is_success() {
+                return Err(bilibili_http_error("Bilibili space feed", status));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(bilibili_network_error)? {
+                if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
+                    return Err(bilibili_upstream_error(
+                        "Bilibili space feed response exceeded the size limit",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            crate::space_feed::parse(&bytes, uid)
+        }
+        .await;
+        self.log_upstream_request(
+            "space_feed",
+            "api.bilibili.com",
+            PATH,
+            http_status,
+            started,
+            &outcome,
+        );
+        outcome
+    }
+
     async fn video_account_state_response<T>(
         &self,
         kind: BilibiliVideoAccountStateRequest,

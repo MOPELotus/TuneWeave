@@ -128,6 +128,7 @@ pub enum Capability {
     VideoAudioStream,
     VideoTrackStream,
     VideoStats,
+    BilibiliSpaceFeed,
     VideoStream,
     VideoSubscriptionWrite,
     QrLogin,
