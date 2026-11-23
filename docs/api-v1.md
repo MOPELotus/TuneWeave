@@ -919,3 +919,7 @@ MV 播放使用 `GET /v1/videos/migu:{contentId}/stream?type=mv&resolution=auto`
 汽水音乐墙：`GET /v1/extensions/soda/music-wall?account=personal` 读取本人，附加 `user_id=正十进制ID` 读取指定用户的官方可见音乐墙。SDK 为 `music_wall(user_id, account)`，能力为 `music_wall`。两种读取都需要所选账户；使用固定官方接口及默认实验参数，返回 `user_ref` 和 `content` 中的原生歌曲、标签、听歌时长、可见性及好友榜等已知墙内容。指定用户时核对返回身份，不输出未知顶层字段及原始状态诊断；缺失或 null 内容原样保留。时长单位未经官方合同证明，`duration_unit=null`，不擅自换算为秒。账户轮换和总时限规则同最近播放；HTTP 响应为 `no-store`。
 
 QQ 音响力读取：`GET /v1/extensions/qq/sound-power/{section}?account=personal`；section 为 `detail`（等级与今日听歌）、`hugevip-rule`（会员等级规则）、`friends`（好友听歌榜）、`medals`（勋章入口）、`tasks`（任务模块）。SDK 为 `sound_power(SoundPowerQuery, account)`，能力 `sound_power`。好友榜接收 `offset=0`、`limit=10`（1–100）、`last_uin`、`rankno=0`，后两者保留官方续页含义；不将它们转换成统一 offset 分页。勋章接收可选 `encrypted_uin`；任务接收 `activity_id`（默认 `1nsAQf`）和逗号分隔 `module_ids`（默认 `Z1jtHy7`，1–16 个不重复 ID）。拒绝其他分支参数；这些命名入口只读取，不执行点赞、隐私设置或任务上报。要求所选账户或调用方凭据，返回已脱敏的原生成功数据，不推断权益或任务完成状态；业务拒绝、登录失效及超时返回统一错误，HTTP 全部 `no-store`。
+
+### B站用户空间动态
+
+只读入口 `GET /v1/bilibili/users/{uid}/dynamics?account=personal` 复用已有服务端 B站账户登录态，返回 `data.items` 和 `data.authenticated=true`。必须显式指定服务器账户别名；不接受调用方凭据。当前只读取上游首页，不提供历史翻页或动态写入。支持视频、文字、图片、专栏、转发与直播推荐的已知展示字段，跳过不支持的条目类型；结果不声明覆盖全部动态。成功与失败均按敏感请求处理。
