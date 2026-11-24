@@ -31,6 +31,12 @@ jobs:
             asset_platform: linux
             asset_architecture: x86_64
             asset_extension: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: tuneweave
+            asset_platform: linux
+            asset_architecture: aarch64
+            asset_extension: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: tuneweave.exe

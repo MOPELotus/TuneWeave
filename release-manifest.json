@@ -24,6 +24,20 @@
       }
     },
     {
+      "platform": "linux",
+      "architecture": "aarch64",
+      "target": "aarch64-unknown-linux-gnu",
+      "file": "tuneweave-v1.0.0-beta.4-linux-aarch64",
+      "executable": "tuneweave-v1.0.0-beta.4-linux-aarch64",
+      "format": "elf",
+      "download_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v1.0.0-beta.4/tuneweave-v1.0.0-beta.4-linux-aarch64",
+      "verification": {
+        "algorithm": "sha256",
+        "checksum_file": "tuneweave-v1.0.0-beta.4-linux-aarch64.sha256",
+        "checksum_url": "https://github.com/MOPELotus/TuneWeave/releases/download/v1.0.0-beta.4/tuneweave-v1.0.0-beta.4-linux-aarch64.sha256"
+      }
+    },
+    {
       "platform": "windows",
       "architecture": "x86_64",
       "target": "x86_64-pc-windows-msvc",

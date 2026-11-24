@@ -1,0 +1,107 @@
+name: Supplement Linux ARM64 release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to supplement
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate existing release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          gh release view "$TAG" >/dev/null
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-unknown-linux-gnu
+
+      - name: Build original tagged source
+        run: cargo build --release --locked --package tuneweave-server --bin tuneweave --target aarch64-unknown-linux-gnu
+
+      - name: Test ARM64 executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          python3 - <<'PY'
+          import json, os, pathlib, socket, subprocess, tempfile, time, urllib.request
+          binary = pathlib.Path("target/aarch64-unknown-linux-gnu/release/tuneweave").resolve()
+          with tempfile.TemporaryDirectory() as td:
+              with socket.socket() as s:
+                  s.bind(("127.0.0.1", 0))
+                  port = s.getsockname()[1]
+              env = {k: v for k, v in os.environ.items() if not k.startswith("TUNEWEAVE_")}
+              env.update(TUNEWEAVE_BIND=f"127.0.0.1:{port}", TUNEWEAVE_DATA_DIR=td)
+              p = subprocess.Popen([str(binary)], cwd=td, env=env)
+              opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              try:
+                  for _ in range(100):
+                      try:
+                          with opener.open(f"http://127.0.0.1:{port}/healthz", timeout=1) as r:
+                              assert r.status == 200
+                          break
+                      except OSError:
+                          assert p.poll() is None
+                          time.sleep(.1)
+                  else:
+                      raise RuntimeError("ARM64 server did not become healthy")
+                  for platform in ("netease", "soda"):
+                      with opener.open(f"http://127.0.0.1:{port}/v1/capabilities?platform={platform}", timeout=5) as r:
+                          assert json.load(r)["ok"]
+              finally:
+                  p.terminate()
+                  try:
+                      p.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      p.kill()
+                      p.wait()
+          PY
+
+      - name: Package and supplement release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          asset="tuneweave-${TAG}-linux-aarch64"
+          cp target/aarch64-unknown-linux-gnu/release/tuneweave "dist/$asset"
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
+          gh release download "$TAG" -p release-manifest.json -D dist
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path("dist/release-manifest.json")
+          d = json.loads(p.read_text())
+          assert d["tag"] == os.environ["TAG"]
+          source = next(a for a in d["artifacts"] if a["target"] == "x86_64-unknown-linux-gnu")
+          arm = json.loads(json.dumps(source).replace("x86_64", "aarch64"))
+          existing = [a for a in d["artifacts"] if a["target"] == arm["target"]]
+          assert not existing or existing == [arm]
+          if not existing:
+              d["artifacts"].insert(d["artifacts"].index(source) + 1, arm)
+          p.write_text(json.dumps(d, indent=2) + "\n")
+          PY
+          python3 scripts/release_manifest.py --manifest dist/release-manifest.json --check
+          gh release upload "$TAG" "dist/$asset" "dist/$asset.sha256" --clobber
+          gh release upload "$TAG" dist/release-manifest.json --clobber
