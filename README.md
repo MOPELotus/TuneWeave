@@ -49,6 +49,8 @@ curl http://127.0.0.1:7832/v1/capabilities
 
 接口可用性应以运行实例返回的 `/v1/capabilities` 为准。媒体端点返回平台提供的 URL 和必要请求头；TuneWeave 不代理媒体内容。
 
+TuneWeave Linux x86_64 发行产物遵循基础 x86-64 CPU 指令集契约，构建时必须同时为 Rust（target-cpu=x86-64）与原生 C/C++ 编译器（-march=x86-64 -mtune=generic）显式设定目标架构，以防止构建机可选 AVX 指令泄漏。发布前需在无 AVX 的 QEMU Nehalem 环境下实际执行 SHA256/HMAC 已知向量测试以验证密码学路径，而不能仅依赖 healthz 检查。
+
 ## 许可证
 
 TuneWeave 采用 [MIT OR Apache-2.0](LICENSE) 双许可证。第三方研究来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

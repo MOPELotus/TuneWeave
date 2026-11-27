@@ -76,10 +76,26 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '-C target-cpu=x86-64' || '' }}
+          CFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '-march=x86-64 -mtune=generic' || '' }}
+          CXXFLAGS: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '-march=x86-64 -mtune=generic' || '' }}
         run: >-
           cargo build --release --locked
           --package tuneweave-server --bin tuneweave
           --target ${{ matrix.target }}
+
+      - name: Verify Linux x86-64 CPU baseline
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64
+          CFLAGS: -march=x86-64 -mtune=generic
+          CXXFLAGS: -march=x86-64 -mtune=generic
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: qemu-x86_64 -cpu Nehalem
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          cargo test --release --locked --target x86_64-unknown-linux-gnu --package tuneweave-provider-bilibili --test cpu_baseline
 
       - name: Package release asset
         shell: bash
